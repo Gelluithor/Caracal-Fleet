@@ -1,0 +1,12 @@
+.git
+*.zip
+__pycache__
+*.pyc
+.pytest_cache
+data
+data-dev
+.github
+.gitlab-ci.yml
+compose.yml
+.env
+deploy

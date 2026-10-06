@@ -1,0 +1,45 @@
+# CARACAL Fleet - self-hosted deployment.
+#
+#   cp .env.example .env        # optional, all settings have defaults
+#   docker compose up -d                      # http://<server>:8090
+#   docker compose --profile https up -d      # + automatic HTTPS (Let's Encrypt) for CARACAL_HUB_DOMAIN
+#
+# On the first start without CARACAL_HUB_ADMIN_PASSWORD, open the web UI and create the administrator with the
+# one-time setup code from the log:  docker compose logs hub | grep "SETUP CODE"
+name: caracal-fleet
+
+services:
+  hub:
+    image: ${CARACAL_HUB_IMAGE:-ghcr.io/taurannun/caracal-fleet}:${CARACAL_HUB_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${CARACAL_HUB_PORT:-8090}:8090"
+    volumes:
+      - hub-data:/var/lib/caracal-hub
+    environment:
+      CARACAL_NODE_IMAGE: ${CARACAL_NODE_IMAGE:-ghcr.io/taurannun/caracal-node}
+      CARACAL_HUB_ADMIN_PASSWORD: ${CARACAL_HUB_ADMIN_PASSWORD:-}
+      CARACAL_HUB_ENROLL_TOKEN: ${CARACAL_HUB_ENROLL_TOKEN:-}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+  # Reverse proxy with automatic Let's Encrypt certificates. The domain must point to this server and
+  # ports 80 and 443 must be reachable from the internet (for an internal CA, edit deploy/Caddyfile).
+  caddy:
+    profiles: [https]
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      CARACAL_HUB_DOMAIN: ${CARACAL_HUB_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [hub]
+
+volumes:
+  hub-data:
+  caddy-data:
+  caddy-config:
