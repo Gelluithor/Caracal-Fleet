@@ -1,6 +1,6 @@
 # CARACAL Fleet
 
-Central management for [CARACAL](https://github.com/TaurAnnun/caracal) digital signage screens, self-hosted
+Central management for [CARACAL](https://github.com/Gelluithor/Caracal) digital signage screens, self-hosted
 with one `docker compose up`. Every organisation runs its own Fleet; nothing is sent to third parties.
 
 - **Monitoring:** online state, CPU, RAM, disk, temperature and what each screen is playing right now, plus
@@ -22,7 +22,7 @@ On any Linux server with Docker (amd64 or arm64, a Raspberry Pi works too):
 
 ```bash
 mkdir caracal-fleet && cd caracal-fleet
-curl -fsSLO https://raw.githubusercontent.com/TaurAnnun/caracal-fleet/main/compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Gelluithor/Caracal-Fleet/main/compose.yml
 docker compose up -d
 docker compose logs hub | grep "SETUP CODE"
 ```
@@ -44,7 +44,7 @@ All settings are optional (`.env.example`):
 | `CARACAL_HUB_VERSION` | hub image version (default `latest`) |
 | `CARACAL_HUB_PORT` | published port (default `8090`; with HTTPS use `127.0.0.1:8090`) |
 | `CARACAL_HUB_DOMAIN` | domain for the `https` profile |
-| `CARACAL_NODE_IMAGE` | default CARACAL node image (`ghcr.io/taurannun/caracal-node`), can be changed in the UI |
+| `CARACAL_NODE_IMAGE` | default CARACAL node image (`ghcr.io/gelluithor/caracal-node`), can be changed in the UI |
 | `CARACAL_HUB_ADMIN_PASSWORD` | password of the `admin` account, applied on every start; empty = create the administrator in the UI |
 | `CARACAL_HUB_ENROLL_TOKEN` | enrollment token of the agents; empty = generated, shown and rotated in *Settings* |
 

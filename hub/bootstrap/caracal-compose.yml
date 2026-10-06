@@ -3,7 +3,7 @@
 name: caracal
 
 x-node: &node
-  image: ${CARACAL_IMAGE:-ghcr.io/taurannun/caracal-node}:${CARACAL_VERSION:-latest}
+  image: ${CARACAL_IMAGE:-ghcr.io/gelluithor/caracal-node}:${CARACAL_VERSION:-latest}
   network_mode: host            # the player and the Fleet Agent talk to the app on 127.0.0.1:8080
   user: "${CARACAL_UID:-1000}:${CARACAL_GID:-1000}"
   restart: unless-stopped

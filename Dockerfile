@@ -18,7 +18,7 @@ RUN for f in hub/bootstrap/*.sh; do bash -n "$f"; done \
  && python -m pytest -q -p no:cacheprovider tests
 
 FROM base AS runtime
-ARG NODE_IMAGE=ghcr.io/taurannun/caracal-node
+ARG NODE_IMAGE=ghcr.io/gelluithor/caracal-node
 # CARACAL_NODE_IMAGE: default image of the CARACAL nodes (can be changed in the UI)
 ENV CARACAL_HUB_DATA=/var/lib/caracal-hub CARACAL_NODE_IMAGE=$NODE_IMAGE
 EXPOSE 8090

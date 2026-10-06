@@ -10,14 +10,14 @@ name: caracal-fleet
 
 services:
   hub:
-    image: ${CARACAL_HUB_IMAGE:-ghcr.io/taurannun/caracal-fleet}:${CARACAL_HUB_VERSION:-latest}
+    image: ${CARACAL_HUB_IMAGE:-ghcr.io/gelluithor/caracal-fleet}:${CARACAL_HUB_VERSION:-latest}
     restart: unless-stopped
     ports:
       - "${CARACAL_HUB_PORT:-8090}:8090"
     volumes:
       - hub-data:/var/lib/caracal-hub
     environment:
-      CARACAL_NODE_IMAGE: ${CARACAL_NODE_IMAGE:-ghcr.io/taurannun/caracal-node}
+      CARACAL_NODE_IMAGE: ${CARACAL_NODE_IMAGE:-ghcr.io/gelluithor/caracal-node}
       CARACAL_HUB_ADMIN_PASSWORD: ${CARACAL_HUB_ADMIN_PASSWORD:-}
       CARACAL_HUB_ENROLL_TOKEN: ${CARACAL_HUB_ENROLL_TOKEN:-}
     logging:
