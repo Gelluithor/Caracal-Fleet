@@ -3,7 +3,10 @@
 # running on Docker, and connects it to CARACAL Fleet.
 #
 #   sudo bash install-node.sh --hub https://fleet.example --token ENROLL_TOKEN \
-#        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME]
+#        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME] [--docker-pool 10.200.0.0/16]
+#
+# --docker-pool moves Docker's own networks out of 172.16.0.0/12 (e.g. when the LAN uses those addresses): the first
+# half of the private /16-/23 range is the default bridge, the second half the pool for networks Docker creates.
 #
 # The host only runs Docker, the X display (Xorg + Openbox on tty1) and the Fleet Agent; the CARACAL app,
 # player and overlay run in containers. An existing classic CARACAL installation (/opt/caracal) is converted:
@@ -11,7 +14,7 @@
 # to /opt/caracal.legacy-<date>.
 set -euo pipefail
 
-HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''
+HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''; DOCKER_POOL=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -19,6 +22,7 @@ while [ $# -gt 0 ]; do
     --name) NAME=$2; shift 2;;
     --image) IMAGE=$2; shift 2;;
     --version) VERSION=$2; shift 2;;
+    --docker-pool) DOCKER_POOL=$2; shift 2;;
     --skip-agent) SKIP_AGENT=1; shift;;   # used when the running Fleet Agent converts its own node
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
@@ -38,11 +42,42 @@ apt-get install -y -qq ca-certificates curl xserver-xorg xserver-xorg-legacy xin
   x11-xserver-utils dbus-x11 python3 python3-requests python3-psutil >/dev/null
 
 step '[2/7] Docker'
+DOCKER_CHANGED=''
+if [ -n "$DOCKER_POOL" ]; then
+  # written before Docker is installed, so that it starts with these networks right away
+  install -d -m 755 /etc/docker
+  DOCKER_CHANGED=$(python3 - "$DOCKER_POOL" <<'PY'
+import ipaddress, json, sys
+from pathlib import Path
+try:
+    net = ipaddress.ip_network(sys.argv[1], strict=False)
+except ValueError:
+    sys.exit(f'Invalid --docker-pool {sys.argv[1]}')
+if net.version != 4 or not net.is_private or not 16 <= net.prefixlen <= 23:
+    sys.exit(f'--docker-pool must be a private IPv4 range from /16 to /23, not {sys.argv[1]}')
+bridge_half, pool_half = net.subnets(prefixlen_diff=1)
+bridge = next(bridge_half.subnets(new_prefix=24))
+path = Path('/etc/docker/daemon.json')
+try:
+    current = json.loads(path.read_text())
+except (OSError, ValueError):
+    current = {}
+wanted = {**current, 'bip': f'{bridge.network_address + 1}/24',
+          'default-address-pools': [{'base': str(pool_half), 'size': 24}]}
+if wanted != current:
+    path.write_text(json.dumps(wanted, indent=2) + '\n')
+    print('changed')
+print(f'Docker networks: bridge {bridge}, pool {pool_half}', file=sys.stderr)
+PY
+  ) || exit 2
+fi
 if ! docker compose version >/dev/null 2>&1; then
   # official Docker packages (include "docker compose"); Debian's docker.io as a fallback
   curl -fsSL https://get.docker.com | sh || apt-get install -y -qq docker.io docker-compose
 fi
 systemctl enable --now docker >/dev/null
+# a Docker that was already running reads daemon.json only when it starts
+[ -z "$DOCKER_CHANGED" ] || systemctl restart docker
 docker compose version
 
 step '[3/7] User and data folders'
@@ -51,6 +86,27 @@ for g in video audio input render; do getent group "$g" >/dev/null && usermod -a
 install -d -o caracal -g caracal /var/lib/caracal /var/lib/caracal/media /var/lib/caracal/chromium /home/caracal \
   /home/caracal/.config /home/caracal/.config/openbox
 chown -R caracal:caracal /var/lib/caracal
+
+# Raspberry Pi: the player and the overlay need the KMS graphics driver (/dev/dri, passed to the containers).
+# Raspberry Pi OS enables it by default, DietPi does not. The change needs a reboot; this is checked before anything
+# is converted, so a node is never left without CARACAL. Exit code 5 = run again after the reboot.
+if grep -qi raspberry /proc/device-tree/model 2>/dev/null; then
+  CONFIG_TXT=''
+  for f in /boot/firmware/config.txt /boot/config.txt; do [ -f "$f" ] && { CONFIG_TXT=$f; break; }; done
+  if [ -n "$CONFIG_TXT" ] && ! grep -Eq '^[[:blank:]]*dtoverlay=vc4-f?kms-v3d' "$CONFIG_TXT"; then
+    if [ -x /boot/dietpi/func/dietpi-set_hardware ]; then
+      /boot/dietpi/func/dietpi-set_hardware rpi-opengl vc4-kms-v3d
+    else
+      printf '\n[all]\ndtoverlay=vc4-kms-v3d\n' >> "$CONFIG_TXT"
+    fi
+    echo "KMS graphics driver enabled in $CONFIG_TXT"
+    if [ ! -e /dev/dri ]; then
+      echo 'REBOOT REQUIRED: reboot the device and run the installation again to finish it.'
+      exit 5
+    fi
+  fi
+fi
+[ -e /dev/dri ] || { echo 'No graphics device (/dev/dri) found: the CARACAL player needs a KMS/DRM display driver.' >&2; exit 6; }
 
 step '[4/7] Converting an existing classic CARACAL installation (if any)'
 if [ -f /opt/caracal/app/main.py ]; then

@@ -139,6 +139,15 @@ def _provision(job_id, p, user):
                 stdin_data = password + '\n'
         code = _run(ssh, job_id, cmd, stdin_data)
         _run(ssh, job_id, f'rm -rf {shlex.quote(tmp)}', timeout=30)
+        if node and code == 5:   # install-node.sh enabled the graphics driver (e.g. DietPi), it needs a reboot
+            reboot = 'systemctl reboot' if username == 'root' else \
+                ('sudo -n systemctl reboot' if not password else "sudo -S -p '' systemctl reboot")
+            try:
+                _run(ssh, job_id, reboot, stdin_data, timeout=30)
+            except Exception:  # noqa: BLE001 - the connection drops when the device reboots
+                pass
+            raise RuntimeError('The graphics driver was enabled and the device is rebooting. '
+                               'Run the installation again in about a minute to finish it.')
         if code:
             raise RuntimeError(f'Installer finished with exit code {code}')
 

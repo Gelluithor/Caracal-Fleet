@@ -97,6 +97,8 @@ run_install() {
     sleep 10
   done
   wait_for_os_setup
+  # the OS setup may reboot (e.g. DietPi after a kernel update) while a previous attempt was installing packages
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
 
   local name
   name=$(node_name)
@@ -118,16 +120,25 @@ run_install() {
   [ -n "$image" ] || { echo 'The hub has no CARACAL node image set (CARACAL updates), retrying later.'; return 1; }
 
   echo "Installing $image:${version:-latest} as $name"
-  if bash "$work/install-node.sh" --hub "$HUB" --token "$TOKEN" --name "$name" --image "$image" \
-       --version "${version:-latest}"; then
+  local code=0 extra=()
+  [ -n "${DOCKER_POOL:-}" ] && extra+=(--docker-pool "$DOCKER_POOL")
+  bash "$work/install-node.sh" --hub "$HUB" --token "$TOKEN" --name "$name" --image "$image" \
+    --version "${version:-latest}" "${extra[@]}" || code=$?
+  rm -rf "$work"
+  if [ "$code" -eq 0 ]; then
     date -Is > "$DONE"
-    rm -rf "$work" "$CONF"
+    rm -f "$CONF"
     systemctl disable caracal-firstboot.service >/dev/null 2>&1
     echo '===== CARACAL node installed'
     return 0
   fi
-  rm -rf "$work"
-  echo 'Installation failed, retrying in a minute.'
+  if [ "$code" -eq 5 ]; then
+    # the graphics driver was enabled: the installation continues after the reboot (the service is still enabled)
+    echo 'Rebooting to load the graphics driver, the installation continues afterwards.'
+    systemctl reboot
+    return 0
+  fi
+  echo "Installation failed (exit $code), retrying in a minute."
   return 1
 }
 

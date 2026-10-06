@@ -1197,8 +1197,10 @@ async function sdCardDialog() {
         <label>${t('wifiCountry')}<input name="wifi_country" value="${esc(country)}" maxlength="2"></label></details>
       <details><summary>${t('deviceLogin')}</summary><p class="muted">${t('deviceLoginHint')}</p>
         <div class="row2"><label class="raspios-only">${t('username')}<input name="user" value="admin"></label>
-        <label>${t('password')}<input name="password" type="password" autocomplete="new-password" minlength="8"></label></div>
+        <label>${t('password')}<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="100"></label></div>
         <label>${t('sshPublicKey')}<textarea name="ssh_key" rows="2" placeholder="ssh-ed25519 AAAA… user@pc"></textarea></label></details>
+      <details><summary>${t('dockerNetwork')}</summary><p class="muted">${t('dockerNetworkHint')}</p>
+        <label>${t('dockerPool')}<input name="docker_pool" placeholder="10.200.0.0/16" pattern="[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{2}" spellcheck="false"></label></details>
       <div class="note info">${t('sdCardTokenNote')}</div></div>`,
     onOpen: form => {
       const sync = () => {

@@ -9,6 +9,7 @@ Raspberry Pi OS (Trixie and newer) is configured with cloud-init (user-data, net
 dietpi.txt (patched copy of the one from the card), dietpi-wifi.txt and Automation_Custom_Script.sh.
 """
 import io
+import ipaddress
 import json
 import os
 import re
@@ -82,6 +83,7 @@ def _options(d):
         'user': _clean(d.get('user'), 32) or 'admin',
         'password': str(d.get('password') or ''),
         'ssh_key': _clean(d.get('ssh_key'), 2000),
+        'docker_pool': _clean(d.get('docker_pool'), 18),
     }
     checks = (
         (o['os'], 'invalid_os'),
@@ -91,8 +93,10 @@ def _options(d):
         (not o['wifi_ssid'] or 8 <= len(o['wifi_password']) <= 63, 'invalid_wifi_password'),
         (not o['wifi_ssid'] or COUNTRY_RE.match(o['wifi_country']), 'invalid_wifi_country'),
         (USER_RE.match(o['user']) and o['user'] not in RESERVED_USERS, 'invalid_user'),
-        (not o['password'] or 8 <= len(o['password']) <= 128, 'invalid_password'),
+        # DietPi's SSH server (Dropbear) does not accept passwords over 100 bytes
+        (not o['password'] or (len(o['password']) >= 8 and len(o['password'].encode()) <= 100), 'invalid_password'),
         (not o['ssh_key'] or SSH_KEY_RE.match(o['ssh_key']), 'invalid_ssh_key'),
+        (not o['docker_pool'] or _docker_pool(o['docker_pool']), 'invalid_docker_pool'),
     )
     for ok, error in checks:
         if not ok:
@@ -103,10 +107,22 @@ def _options(d):
     return o
 
 
+def _docker_pool(value):
+    """Private IPv4 range /16 to /23 for Docker's networks instead of 172.17.0.0/16 and co. (install-node.sh splits it
+    into the default bridge and the pool for networks Docker creates). Returns the normalized range or ''."""
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return ''
+    return str(net) if net.version == 4 and net.is_private and 16 <= net.prefixlen <= 23 else ''
+
+
 def firstboot_conf(o):
+    pool = _docker_pool(o['docker_pool']) if o.get('docker_pool') else ''
     return ('# CARACAL zero-touch: hub and enrollment token (removed from the card on the first boot)\n'
             f"HUB={shlex.quote(o['hub_url'])}\nTOKEN={shlex.quote(cfg()['enroll_token'])}\n"
-            f"NAME_PREFIX={shlex.quote(o['prefix'])}\n")
+            f"NAME_PREFIX={shlex.quote(o['prefix'])}\n"
+            + (f'DOCKER_POOL={shlex.quote(pool)}\n' if pool else ''))
 
 
 def _yaml(value):
@@ -170,7 +186,6 @@ def dietpi_files(o, dietpi_txt):
     password = o['password'] or secrets.token_urlsafe(18)   # never keep DietPi's well-known default password
     values = {
         'AUTO_SETUP_AUTOMATED': '1',
-        'AUTO_SETUP_ACCEPT_LICENSE': '1',
         'AUTO_SETUP_GLOBAL_PASSWORD': password,
         'AUTO_SETUP_NET_HOSTNAME': o['prefix'],
         'AUTO_SETUP_CUSTOM_SCRIPT_EXEC': '0',
@@ -181,7 +196,9 @@ def dietpi_files(o, dietpi_txt):
     if o['ssh_key']:
         values['AUTO_SETUP_SSH_PUBKEY'] = o['ssh_key']
     if o['wifi_ssid']:
-        values.update({'AUTO_SETUP_NET_WIFI_ENABLED': '1', 'AUTO_SETUP_NET_WIFI_COUNTRY_CODE': o['wifi_country']})
+        # DietPi uses one adapter: with Wi-Fi enabled it disables Ethernet anyway
+        values.update({'AUTO_SETUP_NET_WIFI_ENABLED': '1', 'AUTO_SETUP_NET_ETHERNET_ENABLED': '0',
+                       'AUTO_SETUP_NET_WIFI_COUNTRY_CODE': o['wifi_country']})
     files = {
         'dietpi.txt': patch_dietpi_txt(dietpi_txt, values),
         'Automation_Custom_Script.sh': (
@@ -218,7 +235,9 @@ appears in CARACAL Fleet as "{prefix}-xxxxxx". Log on the device: /var/log/carac
 3. Insert the card into the Raspberry Pi, connect the screen and the network and power it on.
 
 DietPi finishes its automatic first-boot setup, then Docker, the display and CARACAL are installed
-(15-30 minutes, internet access needed). The node then appears in CARACAL Fleet as "{prefix}-xxxxxx".
+(15-30 minutes, internet access needed). On a Raspberry Pi the graphics driver (KMS) is enabled and the device
+reboots once during the installation. The node then appears in CARACAL Fleet as "{prefix}-xxxxxx".
+With Wi-Fi set on the card, DietPi uses Wi-Fi only (Ethernet is disabled).
 Log on the device: /var/log/caracal-firstboot.log
 """,
 }
@@ -254,6 +273,7 @@ async def sd_card(r: Request):
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = (0o755 if name.endswith('.sh') else 0o644) << 16
             z.writestr(info, content.replace('\r\n', '\n'))
-    audit(u, 'sdcard.create', o['os'], {'hub_url': o['hub_url'], 'prefix': o['prefix'], 'wifi': bool(o['wifi_ssid'])})
+    audit(u, 'sdcard.create', o['os'], {'hub_url': o['hub_url'], 'prefix': o['prefix'], 'wifi': bool(o['wifi_ssid']),
+                                        'docker_pool': o['docker_pool']})
     return Response(buf.getvalue(), media_type='application/zip', headers={
         'Content-Disposition': f'attachment; filename="caracal-sdcard-{o["os"]}.zip"'})

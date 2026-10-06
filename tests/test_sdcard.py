@@ -1,7 +1,9 @@
 """Zero-touch SD cards: generated boot partition files, validation, node configuration and token rotation."""
 import io
+import json
 import shutil
 import subprocess
+import sys
 import zipfile
 
 import pytest
@@ -127,3 +129,70 @@ def test_enroll_token_rotation(env, monkeypatch):
 def test_firstboot_script_syntax():
     script = ROOT / 'hub' / 'bootstrap' / 'caracal-firstboot.sh'
     assert subprocess.run([shutil.which('bash'), '-n', str(script)]).returncode == 0
+
+
+def test_dietpi_card_details(env):
+    # current DietPi (v10): Wi-Fi replaces Ethernet, only real dietpi.txt keys, Dropbear's 100 byte password limit
+    files, _ = card(env, os='dietpi', dietpi_txt=DIETPI_TXT, wifi_ssid='net', wifi_password='wifi-pass-1',
+                    wifi_country='CZ', password='device-pass-1')
+    txt = files['dietpi.txt']
+    assert 'AUTO_SETUP_NET_ETHERNET_ENABLED=0' in txt and 'AUTO_SETUP_GLOBAL_PASSWORD=device-pass-1' in txt
+    assert 'AUTO_SETUP_ACCEPT_LICENSE' not in txt
+    assert 'reboots once' in files['CARACAL-README.txt']
+    wired, _ = card(env, os='dietpi', dietpi_txt=DIETPI_TXT)
+    assert 'AUTO_SETUP_NET_ETHERNET_ENABLED' not in wired['dietpi.txt']
+    r = card(env, ok=False, os='dietpi', dietpi_txt=DIETPI_TXT, password='ž' * 51)   # 102 bytes
+    assert r.status_code == 400 and r.json()['detail'] == 'invalid_password'
+
+
+@pytest.mark.skipif(not shutil.which('bash'), reason='bash not available')
+def test_install_node_enables_kms_on_raspberry_pi(tmp_path):
+    """The KMS step of install-node.sh (paths moved into tmp_path): DietPi ships without KMS, so the player would have
+    no /dev/dri; the installer enables it and asks for a reboot (exit 5) before converting anything."""
+    src = (ROOT / 'hub' / 'bootstrap' / 'install-node.sh').read_text(encoding='utf-8')
+    start = src.index('# Raspberry Pi: the player and the overlay need')
+    end = src.index("step '[4/7]")
+    snippet = src[start:end]
+    for old, new in (('/proc/device-tree/model', 'model'), ('/boot/firmware/config.txt', 'fw/config.txt'),
+                     ('/boot/config.txt', 'config.txt'), ('/boot/dietpi/func/dietpi-set_hardware', 'set_hardware'),
+                     ('/dev/dri', 'dri')):
+        snippet = snippet.replace(old, f'{tmp_path}/{new}')
+    (tmp_path / 'snippet.sh').write_text(snippet)
+    run = lambda: subprocess.run([shutil.which('bash'), str(tmp_path / 'snippet.sh')], capture_output=True, text=True)
+    (tmp_path / 'fw').mkdir()
+    (tmp_path / 'model').write_bytes(b'Raspberry Pi 4 Model B Rev 1.5\0')
+    (tmp_path / 'fw' / 'config.txt').write_text('#dtoverlay=vc4-kms-v3d,noaudio\n')
+    r = run()   # Raspberry Pi OS style config without DietPi tools: the overlay is appended
+    assert r.returncode == 5 and 'REBOOT REQUIRED' in r.stdout
+    assert (tmp_path / 'fw' / 'config.txt').read_text().endswith('[all]\ndtoverlay=vc4-kms-v3d\n')
+    (tmp_path / 'dri').mkdir()   # after the reboot
+    assert run().returncode == 0
+    (tmp_path / 'dri').rmdir()
+    (tmp_path / 'model').unlink()   # a PC without a graphics device
+    assert run().returncode == 6
+
+
+def test_docker_address_range(env):
+    files, _ = card(env, docker_pool='10.200.5.0/16')
+    assert 'DOCKER_POOL=10.200.0.0/16\n' in files['caracal-firstboot.conf']   # normalized
+    assert 'DOCKER_POOL' not in card(env)[0]['caracal-firstboot.conf']
+    for bad in ('8.8.0.0/16', '10.0.0.0/8', '192.168.1.0/24', 'fd00::/64', '10.200.0.0/16; reboot', 'x'):
+        r = card(env, ok=False, docker_pool=bad)
+        assert r.status_code == 400 and r.json()['detail'] in ('invalid_docker_pool', 'invalid_value'), bad
+
+
+def test_install_node_writes_docker_networks(tmp_path):
+    """The daemon.json part of install-node.sh: bridge in the first half, address pool in the second, other keys kept."""
+    src = (ROOT / 'hub' / 'bootstrap' / 'install-node.sh').read_text(encoding='utf-8')
+    code = src[src.index("<<'PY'\n") + 7:src.index('\nPY\n')].replace('/etc/docker/daemon.json', str(tmp_path / 'daemon.json'))
+    (tmp_path / 'daemon.py').write_text(code)
+    run = lambda pool: subprocess.run([sys.executable, str(tmp_path / 'daemon.py'), pool], capture_output=True, text=True)
+    (tmp_path / 'daemon.json').write_text('{"log-driver": "journald"}')
+    r = run('10.200.0.0/16')
+    assert r.returncode == 0 and r.stdout.strip() == 'changed'
+    assert json.loads((tmp_path / 'daemon.json').read_text()) == {
+        'log-driver': 'journald', 'bip': '10.200.0.1/24', 'default-address-pools': [{'base': '10.200.128.0/17', 'size': 24}]}
+    assert run('10.200.0.0/16').stdout == ''          # unchanged: Docker is not restarted again
+    assert run('192.168.0.0/23').returncode == 0
+    assert json.loads((tmp_path / 'daemon.json').read_text())['default-address-pools'] == [{'base': '192.168.1.0/24', 'size': 24}]
+    assert run('8.8.0.0/16').returncode != 0 and run('10.0.0.0/24').returncode != 0

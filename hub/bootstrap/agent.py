@@ -31,7 +31,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.6.0'
+VERSION = '4.6.1'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -699,6 +699,10 @@ class Agent:
                 [shutil.which('bash') or 'bash', 'install-node.sh', '--hub', self.hub_url, '--skip-agent',
                  '--image', str(p['image']), '--version', str(p.get('version') or 'latest')], cwd=work)
             write_key_file(self.conf['device_token'])
+            if code == 5:   # the graphics driver was enabled (e.g. DietPi); nothing was converted yet
+                self.after = lambda: subprocess.Popen(['systemctl', 'reboot'])
+                raise RuntimeError('The graphics driver was enabled and the node reboots now. Run "Convert to Docker" '
+                                   f'again when it is back online.\n{out[-3000:]}')
             if code != 0:
                 raise RuntimeError(f'install-node.sh failed (exit {code}):\n{out[-6000:]}')
             return {'version': caracal_version(), 'runtime': runtime(), 'log': out[-3000:]}

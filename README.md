@@ -58,7 +58,7 @@ the CARACAL containers and the Fleet Agent.
 
 1. **SD card (zero-touch):** *Add device → Prepare SD card* (admin). Write Raspberry Pi OS Lite (64-bit) with
    Raspberry Pi Imager, or DietPi, copy the downloaded files to the boot partition and power the device on.
-   It installs itself and appears in Fleet as `<prefix>-xxxxxx` after 10–30 minutes. Wi-Fi, time zone and
+   It installs itself and appears in Fleet as `<prefix>-xxxxxx` after 10–30 minutes. Wi-Fi, time zone, Docker's address range (instead of 172.17.0.0/16) and
    an optional maintenance login are set in the same dialog. The enrollment token on the card is removed on the
    first boot; if a card is lost before that, rotate the token in *Settings*.
 2. **Network discovery + SSH:** *Add device → Find devices in the network* lists devices with SSH and
