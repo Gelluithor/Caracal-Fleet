@@ -1,0 +1,63 @@
+# Tests every push and pull request; publishes the hub image to GHCR (linux/amd64 and linux/arm64).
+#   push to main/master   -> ghcr.io/<owner>/caracal-fleet:edge
+#   tag v4.6.0 etc.       -> ghcr.io/<owner>/caracal-fleet:4.6.0 and :latest
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.13'}
+      - run: pip install -r hub/requirements.txt -r requirements-dev.txt
+      - run: for f in hub/bootstrap/*.sh; do bash -n "$f"; done
+      - run: python -m pytest -q -p no:cacheprovider tests
+
+  image:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tags
+        id: meta
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/caracal-fleet"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+            grep -q "HUB_VERSION = '$V'" hub/app/core.py || { echo "::error::tag $V does not match HUB_VERSION in hub/app/core.py"; exit 1; }
+            echo "tags=$IMAGE:$V,$IMAGE:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$IMAGE:edge" >> "$GITHUB_OUTPUT"
+          fi
+          echo "node_image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/caracal-node" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: NODE_IMAGE=${{ steps.meta.outputs.node_image }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CARACAL Fleet</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ed5d2f'/%3E%3Ctext x='16' y='22' font-size='18' font-family='Arial' font-weight='900' fill='white' text-anchor='middle'%3EC%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css?v={{VERSION}}">
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <div class="login-shell">
+      <section class="login-copy">
+        <div class="brand-row"><span class="mark" data-logo>C</span><span><b>CARACAL</b><small>Fleet Controller</small></span></div>
+        <div>
+          <span class="kicker" data-i="loginKicker"></span>
+          <h1 data-i="loginHero"></h1>
+          <p data-i="loginHeroSub"></p>
+        </div>
+        <div class="login-features"><span data-i="featHealth"></span><span data-i="featContent"></span><span data-i="featRoles"></span></div>
+      </section>
+      <form id="loginForm" class="login-card">
+        <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="en">EN</button></div>
+        <span class="kicker" data-i="secureAccess"></span>
+        <h2 data-i="welcome"></h2>
+        <p class="muted" data-i="loginSub"></p>
+        <label><span data-i="username"></span><input id="loginUser" autocomplete="username" required></label>
+        <label><span data-i="password"></span><input id="loginPass" type="password" autocomplete="current-password" required></label>
+        <button class="btn primary block" data-i="signIn"></button>
+        <div id="loginError" class="form-error"></div>
+      </form>
+      <form id="setupForm" class="login-card" hidden>
+        <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="en">EN</button></div>
+        <span class="kicker" data-i="setupKicker"></span>
+        <h2 data-i="setupTitle"></h2>
+        <p class="muted" data-i="setupSub"></p>
+        <label><span data-i="setupCode"></span><input id="setupCode" autocomplete="off" required></label>
+        <label><span data-i="username"></span><input id="setupUser" value="admin" autocomplete="username" required></label>
+        <label><span data-i="newPassword"></span><input id="setupPass" type="password" minlength="10" autocomplete="new-password" required></label>
+        <button class="btn primary block" data-i="setupCreate"></button>
+        <div id="setupError" class="form-error"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="shell" class="shell" hidden>
+    <aside id="sidebar">
+      <div class="brand"><span class="mark small" data-logo>C</span><div><b>CARACAL</b><small>Fleet</small></div></div>
+      <nav id="nav"></nav>
+      <div class="aside-foot">
+        <div class="seg" id="langSwitch"><button data-lang="cs">CS</button><button data-lang="en">EN</button></div>
+        <button class="icon-btn ghost" id="themeToggle" title="Theme"></button>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn ghost menu-btn" id="menuBtn" aria-label="Menu"></button>
+        <div class="crumbs"><small id="crumb">CARACAL FLEET</small><h1 id="title"></h1></div>
+        <div class="top-actions">
+          <span id="liveDot" class="live-dot" title=""></span>
+          <button class="btn" id="refreshBtn"></button>
+          <button class="btn primary" id="addDeviceBtn"></button>
+          <div class="user-menu">
+            <button class="avatar" id="userBtn"></button>
+            <div class="dropdown" id="userDrop" hidden></div>
+          </div>
+        </div>
+      </header>
+      <main id="view"></main>
+    </div>
+  </div>
+
+  <dialog id="modal"></dialog>
+  <div id="toasts"></div>
+  <script src="/static/i18n.js?v={{VERSION}}"></script>
+  <script src="/static/app.js?v={{VERSION}}"></script>
+</body>
+</html>

@@ -1,0 +1,140 @@
+"""Turns raw heartbeat data into the device model shown in the UI, including attention reasons."""
+import json
+import time
+
+from .core import AGENT_VERSION, ONLINE_TIMEOUT, version_tuple
+
+MEDIA_KINDS = ('image', 'video')
+COLLECTION_KIND = 'grafana-tag'   # Grafana collections kept as playlist assets on CARACAL nodes
+
+
+def normalize_asset(a):
+    a = dict(a or {})
+    a['kind'] = str(a.get('kind') or a.get('type') or a.get('mimetype') or 'web').lower()
+    if '/' in a['kind']:  # mimetype such as image/png
+        a['kind'] = a['kind'].split('/', 1)[0]
+    a['source'] = a.get('source') or a.get('url') or a.get('uri') or ''
+    a['name'] = a.get('name') or a['source'] or f"#{a.get('id')}"
+    a['enabled'] = a.get('enabled', a.get('is_enabled', True)) not in (False, 0, '0', 'false')
+    if a['kind'] == COLLECTION_KIND:
+        a.update(grafana_config(a['source']))
+    return a
+
+
+def grafana_config(source):
+    """A CARACAL Grafana collection stores {"grafana_url", "tag", "kiosk"} as JSON in 'source'."""
+    try:
+        cfg = json.loads(source or '{}')
+    except (TypeError, ValueError):
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return {'grafana_url': str(cfg.get('grafana_url') or ''), 'tag': str(cfg.get('tag') or ''),
+            'kiosk': bool(cfg.get('kiosk', True))}
+
+
+def collections_of(status):
+    """Grafana collections are the playlist assets of kind grafana-tag ('profiles' are login profiles)."""
+    return [normalize_asset(a) for a in status.get('assets') or []
+            if str(a.get('kind') or a.get('type')) == COLLECTION_KIND]
+
+
+def player_of(status):
+    """Agent 4 sends a nested player object, agent 3 sent flat keys."""
+    p = status.get('player')
+    if isinstance(p, dict):
+        return p
+    return {k: status.get(k) for k in ('current_id', 'current_name', 'remaining', 'duration', 'frozen',
+                                       'player_online')}
+
+
+def attention(d, failed_commands=0):
+    """List of {code, level, detail}; level is critical, warning or info."""
+    out = []
+    add = lambda code, level, detail='': out.append({'code': code, 'level': level, 'detail': detail})
+    if not d['online']:
+        add('offline', 'critical', d['last_seen'])
+        return out
+    if d.get('maintenance'):
+        # CARACAL is being updated: its API and player are down on purpose
+        add('maintenance', 'info', d['maintenance'])
+        return out
+    if d.get('api_ok') is False:
+        add('local_api', 'critical', d.get('api_error') or '')
+    elif d.get('player_online') is False:
+        add('player', 'critical', d.get('player_error') or '')
+    temp = d.get('temp')
+    if temp is not None:
+        if temp >= 80:
+            add('temperature', 'critical', temp)
+        elif temp >= 70:
+            add('temperature', 'warning', temp)
+    disk = d.get('disk')
+    if disk is not None:
+        if disk >= 95:
+            add('disk', 'critical', disk)
+        elif disk >= 85:
+            add('disk', 'warning', disk)
+    if (d.get('ram') or 0) >= 90:
+        add('ram', 'warning', d['ram'])
+    if (d.get('cpu') or 0) >= 95:
+        add('cpu', 'warning', d['cpu'])
+    if failed_commands:
+        add('commands_failed', 'warning', failed_commands)
+    if version_tuple(d.get('version')) < version_tuple(AGENT_VERSION):
+        add('agent_outdated', 'info', d.get('version') or '?')
+    return out
+
+
+def build(row, failed_commands=0, full=False, latest_caracal=None):
+    status = json.loads(row['status_json'] or '{}')
+    player = player_of(status)
+    now = time.time()
+    online = now - (row['last_seen'] or 0) < ONLINE_TIMEOUT
+    assets = [normalize_asset(a) for a in status.get('assets') or []]
+    collections = collections_of(status)
+    d = {
+        'id': row['id'], 'name': row['name'] or row['id'], 'ip': status.get('ip') or row['ip'] or '',
+        'version': row['version'] or '', 'last_seen': row['last_seen'], 'online': online,
+        'group': row['device_group'] or '', 'location': row['location'] or '', 'notes': row['notes'] or '',
+        'hostname': status.get('hostname', ''), 'model': status.get('model', ''),
+        'cpu': status.get('cpu'), 'ram': status.get('ram'), 'disk': status.get('disk'), 'temp': status.get('temp'),
+        'uptime': status.get('uptime'), 'load': status.get('load'),
+        'api_ok': status.get('api_ok'), 'api_error': status.get('api_error', ''),
+        'player_online': player.get('player_online'), 'player_error': player.get('error', ''),
+        'current_id': player.get('current_id'), 'current_name': player.get('current_name') or '',
+        'current_kind': player.get('current_kind') or '',
+        'remaining': player.get('remaining'), 'duration': player.get('duration'),
+        'frozen': bool(player.get('frozen')), 'frozen_until': status.get('frozen_until'),
+        'playlist_count': len(assets), 'collection_count': len(collections),
+        'status_age': now - (row['last_seen'] or now),
+        'capabilities': status.get('capabilities') or {},
+        'caracal_version': status.get('caracal_version') or '', 'maintenance': status.get('maintenance') or '',
+        # agents before 4.5 do not report the runtime; they only ran on classic installations
+        'runtime': status['runtime'] if 'runtime' in status else ('host' if status.get('caracal_version') else ''),
+        'caracal_image': status.get('caracal_image') or '',
+        'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in status.get('assets') or []),
+    }
+    d['current_asset_id'] = None
+    if d['current_id'] is not None:
+        match = next((a for a in assets if str(a.get('id')) == str(d['current_id'])), None)
+        if not match and str(d['current_id']).isdigit() and int(d['current_id']) >= 100000:
+            # dashboards of a Grafana collection play as <collection id> * 100000 + index
+            parent = int(d['current_id']) // 100000
+            match = next((a for a in assets if str(a.get('id')) == str(parent) and a['kind'] == COLLECTION_KIND),
+                         None)
+        if match:
+            d['current_asset_id'] = match.get('id')
+            d['current_name'] = d['current_name'] or match['name']
+            d['current_kind'] = d['current_kind'] or match['kind']
+    d['attention'] = attention(d, failed_commands)
+    if isinstance(latest_caracal, dict):   # latest version per runtime: Docker image / classic release
+        latest_caracal = latest_caracal.get(d['runtime'])
+    if latest_caracal and d['online'] and not d['maintenance'] and 'caracal_version' in status \
+            and d['caracal_version'] != latest_caracal:
+        d['attention'].append({'code': 'caracal_outdated', 'level': 'info', 'detail': d['caracal_version'] or '?'})
+    d['needs_attention'] = any(x['level'] in ('critical', 'warning') for x in d['attention'])
+    if full:
+        d['assets'] = assets
+        d['collections'] = collections
+    return d

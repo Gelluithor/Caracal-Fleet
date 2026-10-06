@@ -1,0 +1,9 @@
+# HTTPS reverse proxy for CARACAL Fleet (docker compose --profile https up -d).
+# Caddy obtains and renews a Let's Encrypt certificate for CARACAL_HUB_DOMAIN automatically.
+# Internal hub without public DNS: replace the first line with ":443" and add "tls internal" (self-signed, the
+# nodes must then trust Caddy's root certificate) or "tls /certs/fullchain.pem /certs/key.pem" with your own
+# certificate mounted to /certs.
+{$CARACAL_HUB_DOMAIN} {
+	encode gzip
+	reverse_proxy hub:8090
+}

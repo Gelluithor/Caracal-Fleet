@@ -1,0 +1,49 @@
+# CARACAL node on Docker. Used by CARACAL Fleet (installed to /opt/caracal-node/compose.yml) and for manual
+# installations - see docker/README.md. Settings come from .env next to this file.
+name: caracal
+
+x-node: &node
+  image: ${CARACAL_IMAGE:-ghcr.io/taurannun/caracal-node}:${CARACAL_VERSION:-latest}
+  network_mode: host            # the player and the Fleet Agent talk to the app on 127.0.0.1:8080
+  user: "${CARACAL_UID:-1000}:${CARACAL_GID:-1000}"
+  restart: unless-stopped
+  environment:
+    CARACAL_DATA: /var/lib/caracal
+    CARACAL_FLEET_KEY_FILE: /var/lib/caracal/.fleet-key
+    CARACAL_VERSION: ${CARACAL_VERSION:-latest}
+    DISPLAY: ":0"
+    XAUTHORITY: /home/caracal/.Xauthority
+    HOME: /tmp
+  volumes:
+    - /var/lib/caracal:/var/lib/caracal
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+x-display: &display
+  volumes:
+    - /var/lib/caracal:/var/lib/caracal
+    - /tmp/.X11-unix:/tmp/.X11-unix
+    - /home/caracal/.Xauthority:/home/caracal/.Xauthority:ro
+  devices:
+    - /dev/dri:/dev/dri
+  group_add:                    # host groups "video" and "render" for GPU acceleration
+    - "${CARACAL_VIDEO_GID:-44}"
+    - "${CARACAL_RENDER_GID:-44}"
+
+services:
+  app:
+    <<: *node
+
+  player:
+    <<: [*display, *node]   # display volumes win over the plain data volume
+    command: ["/usr/local/bin/entrypoint-player.sh"]
+    shm_size: 1gb
+    depends_on:
+      app: {condition: service_healthy}
+
+  overlay:
+    <<: [*display, *node]   # display volumes win over the plain data volume
+    command: ["/usr/local/bin/entrypoint-overlay.sh"]
+    depends_on:
+      app: {condition: service_healthy}
