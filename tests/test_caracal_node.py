@@ -242,3 +242,54 @@ def test_agent_moves_to_another_hub_only_when_known(env):
     result = agent.do_set_hub({'hub': env['hub'] + '/'})   # the hub knows this device
     agent.after = None   # do not exit the test process
     assert env['hub'] in result
+
+
+def test_login_profiles_on_many_nodes(env):
+    full, real = env['full'], env['real']
+    assert api(env, 'GET', f"/api/devices/{full['id']}")['capabilities']['add_profile'] is True
+    old = api(env, 'GET', f"/api/devices/{real['id']}")
+    assert old['capabilities']['add_profile'] is False                  # v1 patch: no login endpoints
+    assert [p['name'] for p in old['profiles']] == ['Grafana login']     # but its logins are listed
+
+    login = {'name': 'Intranet', 'login_url': 'https://intra.example/login', 'target_url': 'https://intra.example/',
+             'username': 'tv', 'password': 'tv-secret-1'}
+    res = api(env, 'POST', '/api/bulk/commands', json={'device_ids': [full['id'], real['id']], 'action': 'add_profile',
+                                                       'payload': login})
+    assert len(res['command_ids']) == 2
+    # while queued the credentials are hidden from the UI, the agent still receives them
+    queued = [x for x in api(env, 'GET', '/api/commands') if x['batch'] == res['batch']]
+    assert all('tv-secret-1' not in x['payload_json'] and '•••' in x['payload_json'] for x in queued)
+    full['agent'].run_commands()
+    real['agent'].run_commands()
+    states = {x['device_id']: x for x in api(env, 'GET', '/api/commands') if x['batch'] == res['batch']}
+    assert states[full['id']]['state'] == 'completed'
+    assert states[real['id']]['state'] == 'failed' and 'does not support "add_profile"' in states[real['id']]['result']
+    created = next(p for p in full['mock'].profiles if p['name'] == 'Intranet')
+    assert full['mock'].secrets[created['id']] == ('tv', 'tv-secret-1')
+    full['agent'].heartbeat()
+    d = api(env, 'GET', f"/api/devices/{full['id']}")
+    assert any(p['id'] == created['id'] for p in d['profiles']) and d['profile_count'] == len(full['mock'].profiles)
+    assert 'tv-secret-1' not in str(d)
+
+    # a page with the login of another node is refused before it is queued
+    r = requests.post(f"{env['hub']}/api/devices/{full['id']}/commands", headers=env['h'], json={
+        'action': 'add_web', 'payload': {'name': 'x', 'source': 'https://x.example', 'auth_profile_id': 777}})
+    assert r.status_code == 409 and r.json()['detail'] == 'profile_not_found'
+    row = run(env, full, 'add_web', {'name': 'Intranet TV', 'source': 'https://intra.example/', 'duration': 20,
+                                     'auth_profile_id': created['id']})
+    assert row['state'] == 'completed'
+    page = next(a for a in full['mock'].assets if a['name'] == 'Intranet TV')
+    assert page['auth_profile_id'] == created['id']
+    assert run(env, full, 'delete_profile', {'id': created['id']})['state'] == 'completed'
+    assert page['auth_profile_id'] is None and created not in full['mock'].profiles
+
+
+def test_cancelled_login_command_forgets_credentials(env):
+    from app.core import db
+    full = env['full']
+    cid = api(env, 'POST', f"/api/devices/{full['id']}/commands", json={'action': 'add_profile', 'payload': {
+        'name': 'X', 'login_url': 'https://x.example/', 'target_url': 'https://x.example/', 'username': 'u',
+        'password': 'cancel-me-123'}})['id']
+    api(env, 'POST', f'/api/commands/{cid}/cancel')
+    with db() as c:
+        assert 'cancel-me-123' not in c.execute('SELECT payload_json FROM commands WHERE id=?', (cid,)).fetchone()[0]

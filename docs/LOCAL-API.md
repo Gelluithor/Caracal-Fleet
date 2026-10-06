@@ -17,13 +17,16 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 |---|---|---|
 | State | `GET /snapshot` | `{api_version: 2, runtime, version, assets, profiles, player, requests}` |
 | Control | `POST /control` | `{action: show\|freeze, item_id}`, `{action: show_collection\|freeze_collection, collection_id}`, `{action: next\|unfreeze}` |
-| Web page | `POST /assets/web` | `{name, source, duration, scale}` → `{id}` |
+| Web page | `POST /assets/web` | `{name, source, duration, scale, auth_profile_id}` → `{id}` |
 | Grafana collection | `POST /assets/grafana-tag` | `{name, grafana_url, tag, kiosk, duration, scale}` → `{id}` |
 | Image / video | `POST /assets/upload` | multipart `file`, `name`, `duration` → `{id, kind}`, type from the extension |
 | Media file | `GET /assets/{id}/file` | file content (copying between nodes) |
-| Edit | `PUT /assets/{id}` | `name`, `duration`, `scale`; web: `source`; collection: `grafana_url`, `tag`, `kiosk` |
+| Edit | `PUT /assets/{id}` | `name`, `duration`, `scale`; web: `source`, `auth_profile_id` (`null` = without login); collection: `grafana_url`, `tag`, `kiosk` |
 | Delete | `DELETE /assets/{id}` | deletes the item and its media file |
 | Order | `PUT /playlist/reorder` | `{ids: [...]}`, always the complete list, otherwise 409 |
+| Login profile | `POST /profiles` | `{name, login_url, target_url, username, password, user_selector, pass_selector, submit_selector}` → `{id}` |
+| Edit login | `PUT /profiles/{id}` | the same fields; empty `username`/`password`/selectors keep the stored values |
+| Delete login | `DELETE /profiles/{id}` | pages that used it stay in the playlist without login → `{unassigned}` |
 
 All paths start with `/api/fleet/v1`. CARACAL rules: the display time is at least 5 s (videos loop for the whole
 time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.mp4 .webm .mkv`.
@@ -41,7 +44,9 @@ time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.m
     {"id": 3, "name": "Production", "kind": "grafana-tag", "duration": 60, "scale": 1.0,
      "source": "{\"grafana_url\": \"https://grafana…\", \"tag\": \"production\", \"kiosk\": true}"}
   ],
-  "profiles": [{"id": 1, "name": "Grafana login"}],
+  "profiles": [{"id": 1, "name": "Zabbix", "login_url": "https://zabbix…/index.php",
+                "target_url": "https://zabbix…/zabbix.php?action=dashboard.view", "user_selector": "#name",
+                "pass_selector": "#password", "submit_selector": "#enter"}],
   "player": {"current_id": 300001, "current_name": "Production · Dashboard", "frozen": false,
              "collection_frozen": true, "collection_id": 3, "remaining": 12, "duration": 60,
              "updated": 1791281688.2, "player_online": true},
@@ -51,7 +56,12 @@ time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.m
 
 - `player` is the live state the player sends every second to `/api/v2/player/heartbeat`.
 - Dashboards of a Grafana collection are played with the id `<collection id> * 100000 + position`.
-- `profiles` are login profiles of web pages (without credentials), not Grafana collections.
+- `profiles` are login profiles of web pages, not Grafana collections: `{id, name, login_url, target_url,
+  user_selector, pass_selector, submit_selector}`. The credentials are stored encrypted on the node (`vault.key` in
+  the data folder) and are never returned; only the local player reads them (`/api/player/profile/{id}`).
+  A page with a login opens `login_url`, fills in the form and then shows `target_url`.
+- The hub forwards credentials to the agent only: they are removed from the stored command as soon as the agent
+  fetched it (or it was cancelled or expired) and never appear in the command history or the audit.
 - `requests` counts restarts requested in the node's own admin UI. In Docker the app cannot reboot the host, so
   the agent performs a reboot when the counter increases.
 
@@ -68,7 +78,8 @@ Player and node restart: Docker nodes restart the `player` container and reboot 
 
 ## Older nodes (patch `CARACAL_FLEET_API_V1`)
 
-The manually applied patch has no media upload or export and cannot create Grafana collections. The agent detects
+The manually applied patch has no media upload or export and cannot create Grafana collections or login profiles
+(CARACAL before the login endpoints lists its logins in the snapshot, but they can only be managed in its own UI). The agent detects
 this from the node's `/openapi.json` and reports it to the hub in `capabilities`. The UI hides these actions for
 the node, and copying or deployments skip it with a notice. The agent also determines whether the player runs
 from systemd, because the v1 state file is not updated by newer players. Updating CARACAL is the easiest fix.

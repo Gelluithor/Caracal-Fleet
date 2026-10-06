@@ -56,8 +56,10 @@ function toast(msg, kind = 'ok') {
   el.className = 'toast ' + kind;
   el.textContent = msg;
   $('#toasts').append(el);
-  setTimeout(() => el.classList.add('out'), 3200);
-  setTimeout(() => el.remove(), 3700);
+  const ms = kind === 'ok' ? 3200 : 7000;   // errors and warnings stay long enough to be read
+  el.onclick = () => el.remove();
+  setTimeout(() => el.classList.add('out'), ms);
+  setTimeout(() => el.remove(), ms + 500);
 }
 
 function ago(ts) {
@@ -123,6 +125,7 @@ const ICONS = {
   x: 'M18 6 6 18M6 6l12 12',
   location: 'M12 21s-7-6.2-7-11a7 7 0 1 1 14 0c0 4.8-7 11-7 11zM12 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
   group: 'M3 7h7l2 2h9v11H3z',
+  lock: 'M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4M12 15v2',
 };
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[n] || ICONS.web}"/></svg>`;
 const isTag = k => k === 'grafana-tag';
@@ -518,19 +521,22 @@ function quickFix(d, a, inDetail = false) {
 
 // ---------- device detail
 
-const DEVICE_TABS = ['overview', 'playlist', 'collections', 'history', 'settings'];
+const DEVICE_TABS = ['overview', 'playlist', 'collections', 'logins', 'history', 'settings'];
+const TAB_COUNTS = { playlist: 'playlist_count', collections: 'collection_count', logins: 'profile_count' };
+
+function deviceTabs(d, tab) {
+  return DEVICE_TABS.filter(x => x !== 'settings' || can('manage')).map(x => `<a href="#/device/${encodeURIComponent(d.id)}/${x}" class="${x === tab ? 'active' : ''}">${t('tab_' + x)}${TAB_COUNTS[x] && d[TAB_COUNTS[x]] ? ` <span class="count">${d[TAB_COUNTS[x]]}</span>` : ''}</a>`).join('');
+}
 
 VIEWS.device = {
   mount(root) {
     const d = S.detail;
     if (!d) { setTitle(t('device')); root.innerHTML = `<div class="card empty">${t('err_device_not_found')}</div>`; return; }
     setTitle(d.name, t('nav_devices').toUpperCase());
-    const tab = DEVICE_TABS.includes(S.route.tab) ? S.route.tab : 'overview';
-    const tabs = DEVICE_TABS.filter(x => x !== 'settings' || can('manage'));
     root.innerHTML = `<a class="back" href="#/devices">${icon('back')}${t('nav_devices')}</a>
       <section class="card dev-hero" id="devHero"></section>
       <div id="devAtt"></div>
-      <nav class="tabs">${tabs.map(x => `<a href="#/device/${encodeURIComponent(d.id)}/${x}" class="${x === tab ? 'active' : ''}">${t('tab_' + x)}</a>`).join('')}</nav>
+      <nav class="tabs" id="devTabs"></nav>
       <div id="devTab"></div>`;
   },
   update(root) {
@@ -541,11 +547,13 @@ VIEWS.device = {
       <div class="chips"><span>${esc(d.id)}</span><span>${esc(d.ip || '—')}</span>${d.location ? `<span>${icon('location')}${esc(d.location)}</span>` : ''}${d.group ? `<span>${icon('group')}${esc(d.group)}</span>` : ''}
       <span>CARACAL ${esc(d.caracal_version || '?')} · ${runtimeLabel(d)}</span><span>${t('agent')} ${esc(d.version || '—')}</span>${d.model ? `<span>${esc(d.model)}</span>` : ''}<span>${d.online ? t('uptime') + ' ' + dur(d.uptime) : t('lastSeen') + ' ' + ago(d.last_seen)}</span></div></div>
       <div class="hero-actions">${controlButtons(d)}</div>`);
+    patch($('#devTabs', root), deviceTabs(d, tab));
     patch($('#devAtt', root), d.attention.length ? `<div class="alert-list">${d.attention.map(a => `<div class="alert ${a.level}"><b>${esc(attText(a))}</b><span>${esc(t('hint_' + a.code))}</span>${quickFix(d, a, true)}</div>`).join('')}</div>` : '');
     const el = $('#devTab', root);
     if (tab === 'overview') patch(el, deviceOverview(d));
     else if (tab === 'playlist') renderPlaylist(el, d);
     else if (tab === 'collections') patch(el, renderCollections(d));
+    else if (tab === 'logins') patch(el, renderProfiles(d));
     else if (tab === 'history') patch(el, deviceHistory(d));
     else if (tab === 'settings') { if (!el._html) patch(el, deviceSettings(d)); }
   },
@@ -664,7 +672,7 @@ function renderPlaylist(el, d) {
         <span class="kind k-${esc(a.kind)}">${kindIcon(a.kind)}</span>
         <div class="pl-main"><b>${esc(a.name)}</b><small>${esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' ? ' · ' + esc(a.source) : ''}</small></div>
         <span class="pl-dur">${a.duration ? dur(a.duration) : (a.kind === 'video' ? t('fullLength') : '—')}</span>
-        <span class="pl-tags">${playing ? `<span class="tag ok">${d.frozen ? icon('snow') + t('frozen') : icon('play') + t('playing')}</span>` : ''}${a.enabled ? '' : `<span class="tag">${t('disabled')}</span>`}</span>
+        <span class="pl-tags">${playing ? `<span class="tag ok">${d.frozen ? icon('snow') + t('frozen') : icon('play') + t('playing')}</span>` : ''}${a.enabled ? '' : `<span class="tag">${t('disabled')}</span>`}${loginTag(d, a)}</span>
         <span class="pl-actions">
           ${ctl && a.enabled ? (isTag(a.kind)
             ? `<button class="icon-btn" title="${t('showNow')}" data-do="cmd" data-id="${esc(d.id)}" data-act="show_collection" data-col="${esc(a.id)}">${icon('eye')}</button>
@@ -730,6 +738,36 @@ function renderCollections(d) {
       </div></div>`).join('') || `<div class="empty">${t('noCollections')}</div>`}</div></section>`;
 }
 
+// ---------- login profiles of web pages
+
+// 'ok': the node and its agent manage logins; 'agent': the agent is too old to report them; 'node': CARACAL is too old
+function loginSupport(d) {
+  const cap = (d.capabilities || {}).add_profile;
+  return cap === true ? 'ok' : cap === false ? 'node' : 'agent';
+}
+const profileName = (d, id) => ((d.profiles || []).find(p => String(p.id) === String(id))?.name) || '#' + id;
+const loginTag = (d, a) => (a.kind === 'web' && a.auth_profile_id ? `<span class="tag login-tag" title="${esc(t('login'))}">${icon('lock')}${esc(profileName(d, a.auth_profile_id))}</span>` : '');
+
+function renderProfiles(d) {
+  const support = loginSupport(d), edit = can('content') && support === 'ok';
+  const profiles = d.profiles || [];
+  return `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('loginProfiles')} <span class="muted">(${profiles.length})</span></h2>
+    ${edit ? `<button class="btn primary" data-do="addProfile" data-id="${esc(d.id)}">${icon('plus')}${t('addLogin')}</button>` : ''}</div>
+    ${support !== 'ok' && can('content') ? `<div class="note">${t(support === 'node' ? 'loginsNeedCaracal' : 'loginsNeedAgent')}</div>` : ''}
+    ${!d.online && edit ? `<div class="note">${t('offlineQueued')}</div>` : ''}
+    <div class="col-grid">${profiles.map(p => {
+      const pages = d.assets.filter(a => a.kind === 'web' && String(a.auth_profile_id) === String(p.id));
+      return `<div class="col-card profile-card">
+        <div class="col-head">${icon('lock')}<b>${esc(p.name)}</b><span class="muted">${pages.length ? t('profileUsedBy', { list: esc(pages.map(a => a.name).join(', ')) }) : t('profileUnused')}</span></div>
+        ${p.login_url ? `<dl class="kv small"><dt>${t('loginUrl')}</dt><dd title="${esc(p.login_url)}">${esc(p.login_url)}</dd><dt>${t('targetUrl')}</dt><dd title="${esc(p.target_url)}">${esc(p.target_url)}</dd></dl>` : ''}
+        ${edit ? `<div class="col-actions"><button class="btn sm" data-do="addWebWithLogin" data-id="${esc(d.id)}" data-profile="${esc(p.id)}">${icon('web')}${t('addWebWithLogin')}</button>
+          <button class="icon-btn" title="${t('edit')}" data-do="editProfile" data-id="${esc(d.id)}" data-profile="${esc(p.id)}">${icon('edit')}</button>
+          <button class="icon-btn danger" title="${t('delete')}" data-do="deleteProfile" data-id="${esc(d.id)}" data-profile="${esc(p.id)}" data-name="${esc(p.name)}" data-used="${pages.length}">${icon('trash')}</button></div>` : ''}
+      </div>`;
+    }).join('') || `<div class="empty">${support === 'ok' ? t('noProfiles') : t('noProfilesShort')}</div>`}</div>
+    ${edit ? `<div class="note">${icon('lock')}${t('loginsSecurity')}</div>` : ''}</section>`;
+}
+
 // ---------- playlists view (device picker + editor)
 
 VIEWS.playlists = {
@@ -746,13 +784,14 @@ VIEWS.playlists = {
     const d = S.detail;
     if (!S.route.id || !d) return;
     let ed = $('#pEditor', root);
-    if (!ed.dataset.ready) { ed.innerHTML = '<div id="pHead"></div><div id="pPl"></div><div id="pCol"></div>'; ed.dataset.ready = 1; }
+    if (!ed.dataset.ready) { ed.innerHTML = '<div id="pHead"></div><div id="pPl"></div><div id="pCol"></div><div id="pLog"></div>'; ed.dataset.ready = 1; }
     patch($('#pHead', ed), `<section class="card dev-hero slim"><div class="hero-main"><div class="hero-title">${statusBadge(d)}<h2><a href="#/device/${encodeURIComponent(d.id)}">${esc(d.name)}</a></h2></div>
       <div class="chips"><span>${t('nowPlaying')}: ${esc(d.current_name || '—')}${d.frozen ? ' (' + t('frozen') + ')' : ''}</span></div></div><div class="hero-actions">${can('control') ? `
       <button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze" ${d.online ? '' : 'disabled'}>${icon('play')}${t('act_unfreeze')}</button>
       <button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="next" ${d.online ? '' : 'disabled'}>${icon('next')}${t('act_next')}</button>` : ''}</div></section>`);
     renderPlaylist($('#pPl', ed), d);
     patch($('#pCol', ed), renderCollections(d));
+    patch($('#pLog', ed), renderProfiles(d));
   },
 };
 
@@ -1329,13 +1368,14 @@ function modal({ title, body, submit = t('save'), danger = false, wide = false, 
     if (!form.checkValidity()) { form.reportValidity(); return; }
     const btn = $('#mSubmit', dlg);
     btn.disabled = true;
+    btn.classList.add('busy');
     $('#mErr', dlg).textContent = '';
     try {
       const keep = await onSubmit(Object.fromEntries(new FormData(form)), form);
       if (keep !== false) dlg.close();
     } catch (err) {
       $('#mErr', dlg).textContent = errText(err);
-    } finally { btn.disabled = false; }
+    } finally { btn.disabled = false; btn.classList.remove('busy'); }
   };
   dlg.showModal();
   onOpen && onOpen(form);
@@ -1350,11 +1390,11 @@ function confirmBox(text, danger = true, submit = t('confirm')) {
   });
 }
 
-function targetPicker(excludeId, preselect = []) {
+function targetPicker(excludeId, preselect = [], accept = null) {
   const groups = orgNames('groups');
   return `<div class="targets"><div class="target-tools"><button type="button" class="btn sm ghost" data-tsel="all">${t('selectAll')}</button><button type="button" class="btn sm ghost" data-tsel="none">${t('selectNone')}</button>
     ${groups.map(g => `<button type="button" class="btn sm ghost" data-tsel="g:${esc(g)}">${icon('group')}${esc(g)}</button>`).join('')}</div>
-    <div class="target-list">${S.devices.filter(d => d.id !== excludeId).map(d => `<label class="check"><input type="checkbox" name="t:${esc(d.id)}" data-group="${esc(d.group)}" ${preselect.includes(d.id) ? 'checked' : ''}>${dot(d)}<span>${esc(d.name)}</span><small class="muted">${esc(d.location)}</small></label>`).join('') || `<div class="muted">${t('noOtherDevices')}</div>`}</div></div>`;
+    <div class="target-list">${S.devices.filter(d => d.id !== excludeId && (!accept || accept(d))).map(d => `<label class="check"><input type="checkbox" name="t:${esc(d.id)}" data-group="${esc(d.group)}" ${preselect.includes(d.id) ? 'checked' : ''}>${dot(d)}<span>${esc(d.name)}</span><small class="muted">${esc(d.location)}</small></label>`).join('') || `<div class="muted">${t('noOtherDevices')}</div>`}</div></div>`;
 }
 
 function bindTargetPicker(form) {
@@ -1394,20 +1434,25 @@ function uploadFile(file, onProgress) {
   });
 }
 
-function assetDialog(deviceId, kind, asset = null, targets = null) {
+function assetDialog(deviceId, kind, asset = null, targets = null, preset = {}) {
   const isMedia = kind === 'image' || kind === 'video';
   const multi = !asset;
-  const showEnabled = !(S.detail && S.detail.id === deviceId && !S.detail.supports_enabled);
-  const a = asset || { name: '', source: '', duration: kind === 'web' ? 30 : 15, scale: 1, enabled: true };
+  const here = S.detail && S.detail.id === deviceId ? S.detail : null;
+  const showEnabled = !(here && !here.supports_enabled);
+  // a login profile belongs to one node, so it can be chosen only when the page goes to this node alone
+  const profiles = kind === 'web' && !targets && here && loginSupport(here) === 'ok' ? here.profiles || [] : null;
+  const a = asset || { name: preset.name || '', source: preset.source || '', duration: kind === 'web' ? 30 : 15, scale: 1, enabled: true, auth_profile_id: preset.profileId ?? null };
   const body = `<div class="form">
     ${isMedia && !asset ? `<label>${t('file')}<input type="file" name="file" accept="${kind}/*" required></label><div class="upload-prog" hidden><i></i></div>` : ''}
     <label>${t('name')}<input name="name" value="${esc(a.name)}" ${isMedia ? '' : 'required'}></label>
     ${kind === 'web' ? `<label>URL<input name="source" type="url" value="${esc(a.source)}" placeholder="https://" required></label>` : ''}
+    ${profiles ? `<label>${t('login')}<select name="auth_profile_id"><option value="">${t('noLogin')}</option>${profiles.map(p => `<option value="${esc(p.id)}" ${String(p.id) === String(a.auth_profile_id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+      <small class="muted login-hint"></small></label>` : ''}
     <div class="row2"><label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(a.duration ?? '')}" required></label>
     ${kind === 'web' ? `<label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(a.scale ?? 1)}"></label>` : '<span></span>'}</div>
     ${kind === 'video' ? `<small class="muted">${t('videoDurationHint')}</small>` : ''}
     ${showEnabled ? `<label class="check"><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}>${t('enabledInPlaylist')}</label>` : ''}
-    ${multi && targets === null ? `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId)}</details>` : ''}
+    ${multi && targets === null ? `<details class="also-add"><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId)}</details>` : ''}
     ${multi && targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : ''}</div>`;
   modal({
     title: asset ? t('editItem') : t('add_' + kind), body, wide: multi && targets === null,
@@ -1415,13 +1460,29 @@ function assetDialog(deviceId, kind, asset = null, targets = null) {
       bindTargetPicker(form);
       const f = $('input[name=file]', form);
       if (f) f.onchange = () => { if (f.files[0] && !form.name.value) form.name.value = f.files[0].name.replace(/\.[^.]+$/, ''); };
+      const sel = $('select[name=auth_profile_id]', form);
+      if (!sel) return;
+      const sync = () => {
+        const p = profiles.find(x => String(x.id) === sel.value);
+        // CARACAL opens the target page of the profile after signing in
+        $('.login-hint', form).textContent = p ? t('loginTargetHint', { url: p.target_url || '—' }) : '';
+        if (p && p.target_url && !form.source.value) form.source.value = p.target_url;
+        const also = $('.also-add', form);
+        if (also) {
+          also.hidden = !!p;
+          if (p) $$('.target-list input', form).forEach(i => { i.checked = false; });
+        }
+      };
+      sel.onchange = sync;
+      sync();
     },
     onSubmit: async (data, form) => {
       const payload = { name: data.name.trim(), duration: Number(data.duration || 0) };
       if (showEnabled) payload.enabled = !!data.enabled;
       if (kind === 'web') { payload.source = data.source.trim(); payload.scale = Number(data.scale || 1); }
+      if (profiles) payload.auth_profile_id = data.auth_profile_id ? Number(data.auth_profile_id) : null;
       if (asset) return sendCommand(deviceId, 'update_asset', { id: asset.id, ...payload });
-      const ids = targets || [deviceId, ...pickedTargets(data)];
+      const ids = targets || [deviceId, ...(payload.auth_profile_id ? [] : pickedTargets(data))];
       if (isMedia) {
         const file = form.file.files[0];
         const pr = $('.upload-prog', form);
@@ -1430,6 +1491,48 @@ function assetDialog(deviceId, kind, asset = null, targets = null) {
         Object.assign(payload, { file_id: up.id, kind, name: payload.name || file.name });
       }
       return ids.length === 1 ? sendCommand(ids[0], isMedia ? 'add_media' : 'add_web', payload) : sendBulk(ids, isMedia ? 'add_media' : 'add_web', payload);
+    },
+  });
+}
+
+// Login profile of web pages: CARACAL opens the login page, fills the form and then shows the target page.
+const SELECTOR_DEFAULTS = {
+  user_selector: 'input[name="username"], input[name="user"], input[name="login"], input[name="name"], input[type="email"]',
+  pass_selector: 'input[type="password"]',
+  submit_selector: 'button[type="submit"], input[type="submit"]',
+};
+
+function profileDialog(deviceId, profile = null, targets = null) {
+  const p = profile || { name: '', login_url: '', target_url: '', ...SELECTOR_DEFAULTS };
+  const keep = profile ? `placeholder="${esc(t('leaveEmpty'))}"` : 'required';
+  modal({
+    title: profile ? t('editProfile') : t('add_profile'), submit: profile ? t('save') : t('add'), wide: !profile && !targets,
+    body: `<div class="form"><p class="muted">${t('loginHint')}</p>
+      <label>${t('name')}<input name="name" value="${esc(p.name)}" placeholder="${esc(t('loginNamePlaceholder'))}" required></label>
+      <label>${t('loginUrl')}<input name="login_url" type="url" value="${esc(p.login_url)}" placeholder="https://zabbix.example/index.php" required><small class="muted">${t('loginUrlHint')}</small></label>
+      <label>${t('targetUrl')}<input name="target_url" type="url" value="${esc(p.target_url)}" placeholder="https://zabbix.example/zabbix.php?action=dashboard.view" required><small class="muted">${t('targetUrlHint')}</small></label>
+      <div class="row2"><label>${t('username')}<input name="username" autocomplete="off" spellcheck="false" ${keep}></label>
+      <label>${t('password')}<input name="password" type="password" autocomplete="new-password" ${keep}></label></div>
+      <label class="check"><input type="checkbox" data-reveal>${t('showPassword')}</label>
+      <details><summary>${t('loginSelectors')}</summary><p class="muted">${t('selectorsHint')}</p>
+        <label>${t('selectorUser')}<input name="user_selector" value="${esc(p.user_selector)}" spellcheck="false" required></label>
+        <label>${t('selectorPass')}<input name="pass_selector" value="${esc(p.pass_selector)}" spellcheck="false" required></label>
+        <label>${t('selectorSubmit')}<input name="submit_selector" value="${esc(p.submit_selector)}" spellcheck="false" required></label></details>
+      ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : profile ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], d => loginSupport(d) === 'ok')}</details>`}
+      <div class="note info">${icon('lock')}${t('loginsSecurity')}</div></div>`,
+    onOpen: form => {
+      bindTargetPicker(form);
+      const reveal = $('[data-reveal]', form);
+      reveal.onchange = () => { form.password.type = reveal.checked ? 'text' : 'password'; };
+    },
+    onSubmit: data => {
+      const payload = { name: data.name.trim(), login_url: data.login_url.trim(), target_url: data.target_url.trim(),
+        user_selector: data.user_selector.trim(), pass_selector: data.pass_selector.trim(), submit_selector: data.submit_selector.trim() };
+      if (data.username.trim()) payload.username = data.username.trim();
+      if (data.password) payload.password = data.password;
+      if (profile) return sendCommand(deviceId, 'update_profile', { id: profile.id, ...payload });
+      const ids = targets || [deviceId, ...pickedTargets(data)];
+      return ids.length === 1 ? sendCommand(ids[0], 'add_profile', payload) : sendBulk(ids, 'add_profile', payload);
     },
   });
 }
@@ -1632,6 +1735,7 @@ const ACTIONS_UI = {
         const ids = [...S.selected];
         setTimeout(() => {
           if (data.kind === 'collection') bulkCollection(ids);
+          else if (data.kind === 'profile') profileDialog(ids[0], null, ids);
           else assetDialog(ids[0], data.kind, null, ids);
         }, 50);
       },
@@ -1722,6 +1826,20 @@ const ACTIONS_UI = {
   globalDeploy() { globalDeployDialog(S.global); },
   clearSel() { S.selected.clear(); render(); },
   addAsset(b) { assetDialog(b.dataset.id, b.dataset.kind); },
+  addProfile(b) { profileDialog(b.dataset.id); },
+  editProfile(b) {
+    const p = (S.detail?.profiles || []).find(x => String(x.id) === b.dataset.profile);
+    if (p) profileDialog(b.dataset.id, p);
+  },
+  async deleteProfile(b) {
+    const used = Number(b.dataset.used || 0);
+    if (!await confirmBox(t('confirmDeleteItem', { name: esc(b.dataset.name) }) + (used ? '<br>' + t('confirmDeleteProfileUsed', { n: used }) : ''))) return;
+    await sendCommand(b.dataset.id, 'delete_profile', { id: b.dataset.profile });
+  },
+  addWebWithLogin(b) {
+    const p = (S.detail?.profiles || []).find(x => String(x.id) === b.dataset.profile);
+    if (p) assetDialog(b.dataset.id, 'web', null, null, { profileId: p.id, name: p.name, source: p.target_url });
+  },
   editAsset(b) {
     const a = S.detail.assets.find(x => String(x.id) === b.dataset.item);
     if (a && isTag(a.kind)) collectionDialog(b.dataset.id, a);
@@ -1800,7 +1918,8 @@ const ACTIONS_UI = {
 function bulkKinds() {
   const sel = [...S.selected].map(dev).filter(Boolean);
   const all = cap => sel.every(d => (d.capabilities || {})[cap] !== false);
-  return ['web', ...(all('upload') ? ['image', 'video'] : []), ...(all('add_grafana_tag') ? ['collection'] : [])];
+  const logins = sel.length && sel.every(d => loginSupport(d) === 'ok');
+  return ['web', ...(all('upload') ? ['image', 'video'] : []), ...(all('add_grafana_tag') ? ['collection'] : []), ...(logins ? ['profile'] : [])];
 }
 
 function bulkCollection(ids) { collectionDialog(ids[0], null, ids); }

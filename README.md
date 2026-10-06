@@ -5,8 +5,9 @@ with one `docker compose up`. Every organisation runs its own Fleet; nothing is 
 
 - **Monitoring:** online state, CPU, RAM, disk, temperature and what each screen is playing right now, plus
   a *Needs attention* list with the reason for each issue
-- **Content:** playlists with web pages, images, videos and Grafana collections; show or freeze an item, skip,
-  resume, restart the player or the device
+- **Content:** playlists with web pages, images, videos and Grafana collections; logins for web pages that need
+  a username and password (stored encrypted on the node only); show or freeze an item, skip, resume, restart the
+  player or the device
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations
 - **Zero-touch installation:** prepare an SD card in Fleet, or find a fresh Raspberry Pi in the network and
@@ -88,7 +89,7 @@ Harbor…) anonymously, so the image must be public or reachable without credent
 | Role | Permissions |
 |---|---|
 | viewer | read: state, content, command history |
-| operator | + playback control, player and node restart, playlists, media, collections, copying |
+| operator | + playback control, player and node restart, playlists, media, collections, website logins, copying |
 | manager | + devices, groups, locations, installation and updates, audit |
 | admin | + users, system settings, enrollment token, SD cards, backup |
 

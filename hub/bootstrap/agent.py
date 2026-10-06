@@ -31,7 +31,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.5.0'
+VERSION = '4.6.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -64,8 +64,15 @@ ENDPOINTS = {
     'asset_file': ('GET', '/api/fleet/v1/assets/{id}/file'),
     'reorder': ('PUT', '/api/fleet/v1/playlist/reorder'),
     'add_grafana_tag': ('POST', '/api/fleet/v1/assets/grafana-tag'),
+    'add_profile': ('POST', '/api/fleet/v1/profiles'),
+    'update_profile': ('PUT', '/api/fleet/v1/profiles/{id}'),
+    'delete_profile': ('DELETE', '/api/fleet/v1/profiles/{id}'),
 }
 GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale')
+# Login profiles of web pages: the credentials are stored encrypted on the node and only travel to it.
+PROFILE_FIELDS = ('name', 'login_url', 'target_url', 'username', 'password', 'user_selector', 'pass_selector',
+                  'submit_selector')
+PROFILE_PUBLIC = ('id', 'name', 'login_url', 'target_url', 'user_selector', 'pass_selector', 'submit_selector')
 MEDIA_KINDS = ('image', 'video')
 COLLECTION_KIND = 'grafana-tag'   # Grafana collections are playlist assets of this kind on CARACAL nodes
 PLAYER_STALE = 15                 # seconds without a player heartbeat before the player counts as down
@@ -172,6 +179,12 @@ class Agent:
     @staticmethod
     def assets_of(snap):
         return snap.get('assets') or snap.get('playlist') or []
+
+    @staticmethod
+    def profiles_of(snap):
+        # never more than the node shows (no credentials), also if a node version sent other columns
+        return [{k: p.get(k) for k in PROFILE_PUBLIC if k in p} for p in snap.get('profiles') or []
+                if isinstance(p, dict)]
 
     @classmethod
     def collections_of(cls, snap):
@@ -314,6 +327,7 @@ class Agent:
             'uptime': int(time.time() - psutil.boot_time()), 'load': [round(x, 2) for x in psutil.getloadavg()],
             'api_ok': api_ok, 'api_error': api_error, 'player': player,
             'assets': self.assets_of(snap), 'collections': snap.get('collections') or [],
+            'profiles': self.profiles_of(snap),
             'frozen_until': self.state.get('unfreeze_at'), 'last_error': self.last_error,
             'capabilities': self.capabilities() if api_ok else {},
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
@@ -433,12 +447,34 @@ class Agent:
     def clean(item):
         return {k: v for k, v in item.items() if k not in VOLATILE_KEYS and v is not None}
 
+    def with_profile(self, p):
+        # None in auth_profile_id removes the login from a page, so it is kept although clean() drops None values
+        body = self.clean(p)
+        if 'auth_profile_id' in p:
+            body['auth_profile_id'] = p['auth_profile_id']
+        return body
+
     def do_add_web(self, p):
-        return self.body(self.local('add_web', json=self.clean(p)))
+        return self.body(self.local('add_web', json=self.with_profile(p)))
 
     def do_update_asset(self, p):
         ident = p.pop('id')
-        return self.body(self.local('update_asset', {'id': ident}, json=self.clean(p)))
+        return self.body(self.local('update_asset', {'id': ident}, json=self.with_profile(p)))
+
+    @staticmethod
+    def profile_fields(p):
+        return {k: p[k] for k in PROFILE_FIELDS if p.get(k) is not None}
+
+    def do_add_profile(self, p):
+        res = self.body(self.local('add_profile', json=self.profile_fields(p)))
+        return {'id': item_id(res), 'name': p.get('name')}
+
+    def do_update_profile(self, p):
+        self.local('update_profile', {'id': p['id']}, json=self.profile_fields(p))
+        return {'id': p['id'], 'name': p.get('name')}
+
+    def do_delete_profile(self, p):
+        return self.body(self.local('delete_profile', {'id': p['id']}))
 
     def do_delete_asset(self, p):
         return self.body(self.local('delete_asset', {'id': p['id']}))

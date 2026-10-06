@@ -3,7 +3,8 @@
 It mirrors the real CARACAL node (caracal repository, app/main.py):
 
 * api='v2' - section CARACAL_FLEET_API_V2: live v2 player state, media upload/download, Grafana collections
-  (playlist assets of kind "grafana-tag" with {"grafana_url", "tag", "kiosk"} as JSON source), complete reorder.
+  (playlist assets of kind "grafana-tag" with {"grafana_url", "tag", "kiosk"} as JSON source), complete reorder,
+  login profiles of web pages (credentials are kept in st.secrets, never returned).
 * api='v1' - the hand-applied CARACAL_FLEET_API_V1 patch still running on older nodes: no media or Grafana
   endpoints and a snapshot with the stale v1 player state.
 
@@ -35,6 +36,10 @@ def create_app(key=None, api='v2'):
          'duration': 60, 'scale': 1.0},
     ]
     st.files = {2: b'\x89PNG mock image'}
+    st.profiles = [{'id': 1, 'name': 'Grafana login', 'login_url': 'https://grafana.example/login',
+                    'target_url': 'https://grafana.example/d/home', 'user_selector': 'input[name="user"]',
+                    'pass_selector': 'input[name="password"]', 'submit_selector': 'button[type="submit"]'}]
+    st.secrets = {1: ('viewer', 'viewer-password')}
     st.player = {'current_id': 1, 'frozen': False, 'collection_frozen': False, 'collection_id': None,
                  'started': time.time(), 'updated': time.time(), 'created': time.time(), 'stopped': False}
     st.next_id = 10
@@ -77,6 +82,13 @@ def create_app(key=None, api='v2'):
             raise HTTPException(400, 'Scale must be 0.5 to 3.0')
         return s
 
+    def profile_id(v):
+        if not v2 or v in (None, '', 0, '0'):   # the v1 patch ignores logins
+            return None
+        if not any(x['id'] == int(v) for x in st.profiles):
+            raise HTTPException(400, 'Login profile not found')
+        return int(v)
+
     def grafana(d, current=None):
         current = current or {}
         url = str(d.get('grafana_url', current.get('grafana_url', ''))).strip().rstrip('/')
@@ -100,10 +112,9 @@ def create_app(key=None, api='v2'):
                       'collection_id': p['collection_id'], 'duration': dur,
                       'remaining': None if frozen else max(0, round(dur - (time.time() - p['started']) % dur)),
                       'updated': p['updated'], 'player_online': time.time() - p['updated'] < 8}
-            return {'api_version': 2, 'assets': st.assets, 'profiles': [{'id': 1, 'name': 'Grafana login'}],
-                    'player': player}
+            return {'api_version': 2, 'assets': st.assets, 'profiles': st.profiles, 'player': player}
         # v1 patch: the v1 state file is never refreshed by the v2 player
-        return {'assets': st.assets, 'profiles': [{'id': 1, 'name': 'Grafana login'}],
+        return {'assets': st.assets, 'profiles': [{'id': x['id'], 'name': x['name']} for x in st.profiles],
                 'player': {'current_id': p['current_id'], 'current_name': (cur or {}).get('name', ''),
                            'force_id': None, 'frozen': False, 'remaining': None, 'duration': dur,
                            'updated': p['created'] - 3600, 'player_online': True}}
@@ -145,8 +156,8 @@ def create_app(key=None, api='v2'):
         if not d.get('name') or not str(d.get('source', '')).startswith(('http://', 'https://')):
             raise HTTPException(400, 'Invalid name or URL')
         a = {'id': new_id(), 'name': d['name'], 'kind': 'web', 'source': d['source'],
-             'duration': duration(d.get('duration', 30)), 'position': len(st.assets), 'auth_profile_id': None,
-             'scale': scale(d.get('scale', 1))}
+             'duration': duration(d.get('duration', 30)), 'position': len(st.assets),
+             'auth_profile_id': profile_id(d.get('auth_profile_id')), 'scale': scale(d.get('scale', 1))}
         st.assets.append(a)
         return {'ok': True, 'id': a['id']}
 
@@ -163,6 +174,8 @@ def create_app(key=None, api='v2'):
             if not str(d['source']).startswith(('http://', 'https://')):
                 raise HTTPException(400, 'Invalid URL')
             a['source'] = d['source']
+        if a['kind'] == 'web' and 'auth_profile_id' in d:
+            a['auth_profile_id'] = profile_id(d['auth_profile_id'])
         if a['kind'] == 'grafana-tag' and any(k in d for k in ('grafana_url', 'tag', 'kiosk')):
             a['source'] = json.dumps(grafana(d, json.loads(a['source'])))
         return {'ok': True}
@@ -215,6 +228,51 @@ def create_app(key=None, api='v2'):
         st.files[a['id']] = await f.read()
         st.assets.append(a)
         return {'ok': True, 'id': a['id'], 'kind': kind}
+
+    def profile_fields(d, current=None):
+        current = current or {}
+        out = {k: str(d.get(k, current.get(k, ''))).strip() for k in ('name', 'login_url', 'target_url')}
+        if not out['name'] or not all(out[k].startswith(('http://', 'https://')) for k in ('login_url', 'target_url')):
+            raise HTTPException(400, 'Invalid login profile')
+        for k in ('user_selector', 'pass_selector', 'submit_selector'):
+            out[k] = str(d.get(k) or current.get(k) or 'input')
+        return out
+
+    def find_profile(ident):
+        for x in st.profiles:
+            if x['id'] == int(ident):
+                return x
+        raise HTTPException(404, 'Login profile not found')
+
+    @app.post('/api/fleet/v1/profiles')
+    async def add_profile(r: Request, x_fleet_key: str = Header('')):
+        auth(x_fleet_key)
+        d = await r.json()
+        if not str(d.get('username') or '').strip() or not d.get('password'):
+            raise HTTPException(400, 'Username and password are required')
+        x = {'id': new_id(), **profile_fields(d)}
+        st.profiles.append(x)
+        st.secrets[x['id']] = (d['username'], d['password'])
+        return {'ok': True, 'id': x['id']}
+
+    @app.put('/api/fleet/v1/profiles/{ident}')
+    async def update_profile(ident: int, r: Request, x_fleet_key: str = Header('')):
+        auth(x_fleet_key)
+        x, d = find_profile(ident), await r.json()
+        x.update(profile_fields(d, x))
+        user, password = st.secrets[x['id']]
+        st.secrets[x['id']] = (d.get('username') or user, d.get('password') or password)
+        return {'ok': True}
+
+    @app.delete('/api/fleet/v1/profiles/{ident}')
+    def delete_profile(ident: int, x_fleet_key: str = Header('')):
+        auth(x_fleet_key)
+        st.profiles.remove(find_profile(ident))
+        st.secrets.pop(ident, None)
+        for a in st.assets:
+            if a.get('auth_profile_id') == ident:
+                a['auth_profile_id'] = None
+        return {'ok': True}
 
     @app.get('/api/fleet/v1/assets/{ident}/file')
     def asset_file(ident: int, x_fleet_key: str = Header('')):

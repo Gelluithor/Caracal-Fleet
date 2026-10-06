@@ -26,7 +26,8 @@ def test_all_used_keys_are_translated():
     for prefix, values in {
         'act_': ['next', 'unfreeze', 'show', 'freeze', 'show_collection', 'freeze_collection', 'restart_player',
                  'reboot', 'add_web', 'add_media', 'update_asset', 'delete_asset', 'reorder', 'add_collection',
-                 'update_collection', 'delete_collection', 'import_playlist', 'export_assets', 'update_agent'],
+                 'update_collection', 'delete_collection', 'import_playlist', 'export_assets', 'update_agent',
+                 'add_profile', 'update_profile', 'delete_profile'],
         'att_': ['offline', 'local_api', 'player', 'temperature', 'disk', 'ram', 'cpu', 'commands_failed',
                  'agent_outdated'],
         'state_': ['queued', 'delivered', 'completed', 'failed', 'expired', 'timeout', 'cancelled', 'running',

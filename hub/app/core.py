@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.6.0'
+HUB_VERSION = '4.7.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -59,6 +59,9 @@ ACTIONS = {
     'add_collection': ('content', None),
     'update_collection': ('content', None),
     'delete_collection': ('content', None),
+    'add_profile': ('content', None),
+    'update_profile': ('content', None),
+    'delete_profile': ('content', None),
     'import_playlist': ('content', None),
     'export_assets': ('content', None),
     'update_agent': ('manage', None),
@@ -66,6 +69,27 @@ ACTIONS = {
     'update_caracal': ('manage', 600),
     'convert_to_docker': ('manage', 600),
 }
+
+# Payload keys that must not stay in the hub: login credentials of web pages travel only to the node.
+SECRET_KEYS = ('username', 'password')
+SECRET_ACTIONS = ('add_profile', 'update_profile')
+REDACTED = '•••'
+
+
+def redact(action, payload):
+    """Copy of a command payload without credentials (for the history, the audit and the stored command)."""
+    if action not in SECRET_ACTIONS or not isinstance(payload, dict):
+        return payload
+    return {k: (REDACTED if k in SECRET_KEYS and v else v) for k, v in payload.items()}
+
+
+def redact_json(action, payload_json):
+    if action not in SECRET_ACTIONS:
+        return payload_json
+    try:
+        return json.dumps(redact(action, json.loads(payload_json or '{}')), ensure_ascii=False)
+    except ValueError:
+        return '{}'
 
 
 def _agent_version():
@@ -366,6 +390,18 @@ def queue_command(c, device_id, action, payload, username, batch='', followup=No
     return cur.lastrowid
 
 
+def scrub_secrets(c):
+    """Credentials stay in the queue only until the agent fetched the command (or it was cancelled/expired)."""
+    # rows with a key still holding a real value (not empty, not redacted yet)
+    marks = ' OR '.join(f"(payload_json LIKE '%\"{k}\": \"%' AND payload_json NOT LIKE '%\"{k}\": \"\"%' "
+                        f"AND payload_json NOT LIKE '%\"{k}\": \"{REDACTED}\"%')" for k in SECRET_KEYS)
+    for row in c.execute(f"SELECT id, action, payload_json FROM commands WHERE state != 'queued' AND action IN "
+                         f"({','.join('?' * len(SECRET_ACTIONS))}) AND ({marks})", SECRET_ACTIONS).fetchall():
+        clean = redact_json(row['action'], row['payload_json'])
+        if clean != row['payload_json']:
+            c.execute('UPDATE commands SET payload_json=? WHERE id=?', (clean, row['id']))
+
+
 def sweep_commands(c):
     now = time.time()
     c.execute("UPDATE commands SET state='expired', updated=?, result='not delivered in time' "
@@ -377,6 +413,7 @@ def sweep_commands(c):
     c.execute("UPDATE commands SET state='timeout', updated=?, result='no result from agent' "
               "WHERE state='delivered' AND action IN ('update_caracal','convert_to_docker') AND updated<?",
               (now, now - 4 * 3600))
+    scrub_secrets(c)
 
 
 def new_batch():

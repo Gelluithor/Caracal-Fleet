@@ -39,6 +39,17 @@ def collections_of(status):
             if str(a.get('kind') or a.get('type')) == COLLECTION_KIND]
 
 
+def profiles_of(status):
+    """Login profiles of web pages on the node (agents from 4.6 report them; never with credentials)."""
+    out = []
+    for p in status.get('profiles') or []:
+        if isinstance(p, dict) and p.get('id') is not None:
+            out.append({'id': p['id'], **{k: p.get(k) or '' for k in ('name', 'login_url', 'target_url',
+                                                                      'user_selector', 'pass_selector',
+                                                                      'submit_selector')}})
+    return out
+
+
 def player_of(status):
     """Agent 4 sends a nested player object, agent 3 sent flat keys."""
     p = status.get('player')
@@ -93,6 +104,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
     online = now - (row['last_seen'] or 0) < ONLINE_TIMEOUT
     assets = [normalize_asset(a) for a in status.get('assets') or []]
     collections = collections_of(status)
+    profiles = profiles_of(status)
     d = {
         'id': row['id'], 'name': row['name'] or row['id'], 'ip': status.get('ip') or row['ip'] or '',
         'version': row['version'] or '', 'last_seen': row['last_seen'], 'online': online,
@@ -106,7 +118,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'current_kind': player.get('current_kind') or '',
         'remaining': player.get('remaining'), 'duration': player.get('duration'),
         'frozen': bool(player.get('frozen')), 'frozen_until': status.get('frozen_until'),
-        'playlist_count': len(assets), 'collection_count': len(collections),
+        'playlist_count': len(assets), 'collection_count': len(collections), 'profile_count': len(profiles),
         'status_age': now - (row['last_seen'] or now),
         'capabilities': status.get('capabilities') or {},
         'caracal_version': status.get('caracal_version') or '', 'maintenance': status.get('maintenance') or '',
@@ -137,4 +149,5 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
     if full:
         d['assets'] = assets
         d['collections'] = collections
+        d['profiles'] = profiles
     return d

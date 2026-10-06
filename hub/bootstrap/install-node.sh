@@ -89,6 +89,9 @@ xset -dpms
 xset s off
 xset s noblank
 xsetroot -solid black
+# the CARACAL containers run as this user: let them in also after startx renewed the cookie in ~/.Xauthority
+# (the containers see the file they were started with)
+xhost +SI:localuser:caracal >/dev/null
 xrandr --auto
 unclutter -idle 1 -root &
 exec openbox-session
@@ -105,6 +108,9 @@ cat > /home/caracal/.config/openbox/rc.xml <<'EOF'
 </openbox_config>
 EOF
 chmod 755 /home/caracal/.xinitrc
+# compose.yml mounts this file into the containers; Docker would create a directory if it did not exist yet
+rmdir /home/caracal/.Xauthority 2>/dev/null || true
+[ -f /home/caracal/.Xauthority ] || install -m 600 /dev/null /home/caracal/.Xauthority
 chown -R caracal:caracal /home/caracal
 cat > /etc/systemd/system/caracal-display.service <<'EOF'
 [Unit]

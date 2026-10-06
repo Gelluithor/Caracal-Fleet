@@ -388,3 +388,20 @@ details.legacy summary { display: flex; gap: 10px; align-items: baseline; flex-w
 .mode-pick .check span { display: grid; gap: 2px; }
 .mode-pick .check small { color: var(--muted); font-weight: 400; }
 .mode-pick .check:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---------- login profiles, tab counters, busy buttons */
+.tabs .count { display: inline-block; min-width: 18px; padding: 0 6px; margin-left: 4px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); font-size: 11px; font-weight: 700; text-align: center; color: var(--muted); }
+.tabs a.active .count { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.tag.login-tag { background: var(--accent-soft); color: var(--accent); border-color: transparent; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.pl-tags { min-width: 0; }
+.col-card.profile-card .col-head .ic { color: var(--accent); }
+.col-head svg + b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.kv.small { gap: 4px 12px; font-size: 12.5px; }
+.kv.small dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); word-break: normal; }
+.note .ic { width: 15px; height: 15px; }
+.form label small { font-weight: 400; }
+.btn.busy { position: relative; color: transparent !important; pointer-events: none; }
+.btn.busy::after { content: ""; position: absolute; inset: 0; margin: auto; width: 15px; height: 15px; border-radius: 50%; border: 2px solid #fff; border-right-color: transparent; animation: spin .7s linear infinite; }
+.btn.busy:not(.primary):not(.danger)::after { border-color: var(--ink); border-right-color: transparent; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.toast { cursor: pointer; }

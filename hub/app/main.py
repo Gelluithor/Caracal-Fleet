@@ -14,7 +14,8 @@ from starlette.concurrency import run_in_threadpool
 from . import images, playlists, provisioning, releases, sdcard, system
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
-                   make_session, new_batch, public_user, queue_command, sweep_commands, token_hash)
+                   make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
+                   sweep_commands, token_hash)
 from .devices import COLLECTION_KIND, MEDIA_KINDS, build, collections_of, grafana_config
 
 app = FastAPI(title='CARACAL Fleet Controller', version=HUB_VERSION, docs_url=None, redoc_url=None,
@@ -199,6 +200,8 @@ def device_detail(did: str, r: Request):
         cmds = [dict(x) for x in c.execute(
             'SELECT id, action, payload_json, state, result, created, updated, username FROM commands '
             'WHERE device_id=? ORDER BY id DESC LIMIT 30', (did,))]
+    for x in cmds:
+        x['payload_json'] = redact_json(x['action'], x['payload_json'])
     d = build(row, failed.get(did, 0), full=True, latest_caracal=latest_versions())
     d['commands'] = cmds
     d['pending_commands'] = sum(1 for x in cmds if x['state'] in ('queued', 'delivered'))
@@ -291,6 +294,16 @@ def validate_command(c, row, action, payload):
         payload['name'] = text(payload.get('name'), 200) or src
     if action in ('add_web', 'add_media', 'update_asset', 'add_collection', 'update_collection'):
         payload.update(validate_timing(payload))
+    known_profiles = [str(p.get('id')) for p in status.get('profiles') or []] if 'profiles' in status else None
+    if action in ('add_web', 'update_asset') and 'auth_profile_id' in payload:
+        payload['auth_profile_id'] = validate_profile_ref(payload['auth_profile_id'], known_profiles)
+    if action in ('add_profile', 'update_profile'):
+        payload = {**({'id': payload['id']} if payload.get('id') not in (None, '') else {}),
+                   **validate_profile(payload, required=action == 'add_profile')}
+    if action in ('update_profile', 'delete_profile'):
+        if payload.get('id') in (None, ''):
+            raise HTTPException(400, 'item_required')
+        validate_profile_ref(payload['id'], known_profiles)
     if action == 'add_media':
         f = c.execute('SELECT * FROM files WHERE id=?', (str(payload.get('file_id')),)).fetchone()
         if not f:
@@ -354,6 +367,48 @@ def validate_timing(d):
     return out
 
 
+PROFILE_SELECTORS = ('user_selector', 'pass_selector', 'submit_selector')
+
+
+def validate_profile_ref(value, known):
+    """A login profile of the node: None/''/0 = without login. 'known' is None for agents that do not report them."""
+    if value in (None, '', 0, '0'):
+        return None
+    try:
+        ident = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'invalid_value')
+    if known is not None and str(ident) not in known:
+        raise HTTPException(409, 'profile_not_found')
+    return ident
+
+
+def validate_profile(d, required=True):
+    """Login profile of a web page (CARACAL fills the login form, then opens the target page).
+    On edits an empty username or password keeps the stored one; empty selectors keep theirs."""
+    out = {}
+    if required or 'name' in d:
+        out['name'] = text(d.get('name'), 200)
+        if not out['name']:
+            raise HTTPException(400, 'name_required')
+    for key in ('login_url', 'target_url'):
+        if required or key in d:
+            out[key] = text(d.get(key), 4000)
+            if not out[key].lower().startswith(('http://', 'https://')):
+                raise HTTPException(400, 'invalid_url')
+    for key in PROFILE_SELECTORS:
+        if text(d.get(key), 1000):
+            out[key] = text(d.get(key), 1000)
+    username, password = str(d.get('username') or '').strip()[:500], str(d.get('password') or '')[:500]
+    if required and (not username or not password):
+        raise HTTPException(400, 'credentials_required')
+    if username:
+        out['username'] = username
+    if password:
+        out['password'] = password
+    return out
+
+
 def validate_grafana(d, required=True):
     out = {}
     if required or 'name' in d:
@@ -382,7 +437,7 @@ async def device_command(did: str, r: Request):
         row = get_device_row(c, did)
         payload = validate_command(c, row, action, d.get('payload'))
         cid = queue_command(c, did, action, payload, u['username'])
-    audit(u, 'command.' + action, did, payload)
+    audit(u, 'command.' + action, did, redact(action, payload))
     return {'id': cid}
 
 
@@ -405,7 +460,7 @@ async def bulk_command(r: Request):
                 if e.detail == 'unknown_action':
                     raise
                 skipped.append({'device_id': did, 'reason': e.detail})
-    audit(u, 'bulk.' + action, ','.join(ids), {'payload': d.get('payload') or {}, 'skipped': skipped})
+    audit(u, 'bulk.' + action, ','.join(ids), {'payload': redact(action, d.get('payload') or {}), 'skipped': skipped})
     return {'command_ids': queued, 'skipped': skipped, 'batch': batch}
 
 
@@ -423,7 +478,10 @@ def list_commands(r: Request, device_id: str = '', state: str = '', limit: int =
     args.append(max(1, min(limit, 2000)))
     with db() as c:
         sweep_commands(c)
-        return [dict(x) for x in c.execute(q, args)]
+        rows = [dict(x) for x in c.execute(q, args)]
+    for x in rows:
+        x['payload_json'] = redact_json(x['action'], x['payload_json'])
+    return rows
 
 
 @app.post('/api/commands/{cid}/cancel')
@@ -432,6 +490,7 @@ def cancel_command(cid: int, r: Request):
     with db() as c:
         n = c.execute("UPDATE commands SET state='cancelled', updated=? WHERE id=? AND state='queued'",
                       (time.time(), cid)).rowcount
+        scrub_secrets(c)
     if not n:
         raise HTTPException(409, 'not_cancellable')
     audit(u, 'command.cancel', str(cid))
@@ -840,7 +899,9 @@ def pull_commands(did: str, r: Request):
         rows = c.execute("SELECT * FROM commands WHERE device_id=? AND state='queued' ORDER BY id", (did,)).fetchall()
         now = time.time()
         for x in rows:
-            c.execute("UPDATE commands SET state='delivered', updated=? WHERE id=?", (now, x['id']))
+            # credentials of login profiles are not kept once the agent has them
+            c.execute("UPDATE commands SET state='delivered', updated=?, payload_json=? WHERE id=?",
+                      (now, redact_json(x['action'], x['payload_json']), x['id']))
     return [{'id': x['id'], 'action': x['action'], 'payload': json.loads(x['payload_json'] or '{}')} for x in rows]
 
 

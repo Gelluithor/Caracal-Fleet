@@ -191,3 +191,62 @@ def test_docker_runtime_requests(env):
         assert requests.get(env['node'] + '/api/v6/player/command').json()['restart_id'] == after['requests']['restart_player']
     finally:
         node.RUNTIME = old
+
+
+def test_login_profiles(env):
+    """Logins of web pages: created from Fleet, encrypted on the node, used by the player, never kept in the hub."""
+    from app.core import db
+    assert device(env)['capabilities']['add_profile'] is True
+    zabbix = {'name': 'Zabbix', 'login_url': 'https://zabbix.example/index.php',
+              'target_url': 'https://zabbix.example/zabbix.php?action=dashboard.view', 'username': 'monitor',
+              'password': 'S3cret "pass"', 'user_selector': '#name', 'pass_selector': '#password',
+              'submit_selector': '#enter'}
+    row = run(env, 'add_profile', zabbix)
+    pid = json.loads(row['result'])['id']
+    stored = env['mod'].rows('SELECT * FROM auth_profiles WHERE id=?', (pid,))[0]
+    assert b'S3cret' not in stored['password_enc'] and stored['user_selector'] == '#name'
+    # the player gets the decrypted login (localhost only)
+    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    assert player['username'] == 'monitor' and player['password'] == 'S3cret "pass"'
+    # the hub keeps no credentials: history, audit and the stored command
+    assert 'S3cret' not in row['payload_json'] and 'monitor' not in row['payload_json']
+    with db() as c:
+        assert 'S3cret' not in c.execute('SELECT payload_json FROM commands WHERE id=?', (row['id'],)).fetchone()[0]
+        assert not c.execute("SELECT 1 FROM audit WHERE detail LIKE '%S3cret%' OR detail LIKE '%monitor%'").fetchone()
+    profile = next(p for p in device(env)['profiles'] if p['id'] == pid)
+    assert profile['target_url'] == zabbix['target_url'] and 'password' not in profile and 'username' not in profile
+
+    # a web page with the login, then without it
+    run(env, 'add_web', {'name': 'Dohled', 'source': zabbix['target_url'], 'duration': 30, 'auth_profile_id': pid})
+    page = next(x for x in node_assets(env) if x['name'] == 'Dohled')
+    assert page['auth_profile_id'] == pid
+    run(env, 'update_asset', {'id': page['id'], 'auth_profile_id': None})
+    assert next(x for x in node_assets(env) if x['id'] == page['id'])['auth_profile_id'] is None
+    run(env, 'update_asset', {'id': page['id'], 'auth_profile_id': pid, 'name': 'Dohled 2'})
+    assert next(x for x in node_assets(env) if x['id'] == page['id'])['auth_profile_id'] == pid
+
+    # editing without credentials keeps them, a new password replaces only the password
+    run(env, 'update_profile', {'id': pid, 'name': 'Zabbix NOC', 'login_url': zabbix['login_url'],
+                                'target_url': zabbix['target_url'], 'user_selector': '', 'password': ''})
+    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    assert player['name'] == 'Zabbix NOC' and player['password'] == 'S3cret "pass"' and player['user_selector'] == '#name'
+    run(env, 'update_profile', {'id': pid, 'password': 'new-pass'})
+    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    assert player['username'] == 'monitor' and player['password'] == 'new-pass' and player['name'] == 'Zabbix NOC'
+
+    # the hub rejects what the node would reject, before queueing
+    url = f"{env['hub']}/api/devices/{env['id']}/commands"
+    bad = [('add_profile', {**zabbix, 'password': ''}, 'credentials_required'),
+           ('add_profile', {**zabbix, 'login_url': 'ftp://x'}, 'invalid_url'),
+           ('add_web', {'name': 'x', 'source': 'https://x.example', 'auth_profile_id': 999}, 'profile_not_found'),
+           ('delete_profile', {'id': 999}, 'profile_not_found')]
+    for action, payload, code in bad:
+        r = requests.post(url, headers=env['h'], json={'action': action, 'payload': payload})
+        assert r.json().get('detail') == code, (action, r.text)
+
+    # deleting the login keeps the page, without automatic login
+    run(env, 'delete_profile', {'id': pid})
+    assert not env['mod'].rows('SELECT id FROM auth_profiles WHERE id=?', (pid,))
+    assert next(x for x in node_assets(env) if x['id'] == page['id'])['auth_profile_id'] is None
+    assert pid not in [p['id'] for p in device(env)['profiles']]
+    run(env, 'delete_asset', {'id': page['id']})
