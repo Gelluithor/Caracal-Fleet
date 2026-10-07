@@ -334,7 +334,11 @@ def make_session(u):
 
 
 def current_user(r: Request, perm='view'):
-    raw = r.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+    return user_from_token(r.headers.get('Authorization', '').removeprefix('Bearer ').strip(), perm)
+
+
+def user_from_token(raw, perm='view'):
+    """User of a session token (also used by WebSockets, which cannot send the Authorization header)."""
     try:
         name, exp, fp, sig = raw.rsplit(':', 3)
         body = f'{name}:{exp}:{fp}'

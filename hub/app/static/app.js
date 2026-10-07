@@ -122,6 +122,8 @@ const ICONS = {
   back: 'M15 18l-6-6 6-6',
   agent: 'M12 3v12M7 10l5 5 5-5M5 21h14',
   ssh: 'M4 17l6-5-6-5M12 19h8',
+  console: 'M3 4h18v16H3zM7 9l3 3-3 3M12 15h5',
+  fullscreen: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   x: 'M18 6 6 18M6 6l12 12',
   location: 'M12 21s-7-6.2-7-11a7 7 0 1 1 14 0c0 4.8-7 11-7 11zM12 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
   group: 'M3 7h7l2 2h9v11H3z',
@@ -222,6 +224,7 @@ function applyLogo() {
 }
 
 function logout() {
+  closeConsole();
   S.token = '';
   S.me = null;
   store.set('caracalToken', null);
@@ -329,7 +332,8 @@ async function route() {
     lastRouteKey = key;
     S.pendingOrder = null;
     S.detail = null;
-    if (r.view === 'device' || (r.view === 'playlists' && r.id)) {
+    closeConsole();
+    if (r.view === 'device' || r.view === 'console' || (r.view === 'playlists' && r.id)) {
       S.detail = await api('/api/devices/' + encodeURIComponent(r.id)).catch(() => null);
     }
     $('#sidebar').classList.remove('open');
@@ -567,7 +571,145 @@ function controlButtons(d) {
     + (can('manage') ? `<button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="update_agent" ${d.online ? '' : 'disabled'}>${icon('agent')}<span>${t('act_update_agent')}</span></button>
        ${d.runtime === 'host' ? `<button class="btn" data-do="convertNodes" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('upload')}<span>${t('convertToDocker')}</span></button>` : ''}
        <button class="btn" data-do="caracalUpdate" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('updates')}<span>${t('act_update_caracal')}</span></button>
-       <button class="btn" data-do="provision" data-host="${esc(d.ip)}" data-name="${esc(d.name)}">${icon('ssh')}<span>${t('sshInstall')}</span></button>` : '');
+       <button class="btn" data-do="provision" data-host="${esc(d.ip)}" data-name="${esc(d.name)}">${icon('ssh')}<span>${t('sshInstall')}</span></button>
+       <a class="btn" href="#/console/${encodeURIComponent(d.id)}">${icon('console')}<span>${t('console')}</span></a>` : '');
+}
+
+// ---------- SSH console (#/console/<device id>): the hub opens an SSH shell on the node and relays it over a WebSocket
+
+const CONSOLE = { id: '', ws: null, term: null, ro: null, box: null };
+let xtermLoading = null;
+
+function loadXterm() {
+  // xterm.js is loaded only when a console is opened
+  if (!xtermLoading) {
+    const v = encodeURIComponent(S.me?.hub_version || '');
+    const css = document.createElement('link');
+    css.rel = 'stylesheet';
+    css.href = '/static/vendor/xterm/xterm.css?v=' + v;
+    document.head.append(css);
+    const script = src => new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src + '?v=' + v;
+      el.onload = resolve;
+      el.onerror = () => { el.remove(); reject(new Error('console_load_failed')); };
+      document.head.append(el);
+    });
+    xtermLoading = script('/static/vendor/xterm/xterm.js').then(() => script('/static/vendor/xterm/addon-fit.js'))
+      .catch(e => { xtermLoading = null; throw e; });
+  }
+  return xtermLoading;
+}
+
+function closeConsole() {
+  const c = CONSOLE;
+  if (c.ws) { c.ws.onclose = null; c.ws.close(); }
+  if (c.ro) c.ro.disconnect();
+  if (c.term) c.term.dispose();
+  if (c.box) c.box.remove();
+  Object.assign(c, { id: '', ws: null, term: null, ro: null, box: null });
+}
+
+VIEWS.console = {
+  mount(root) {
+    const d = S.detail;
+    if (!d || !can('manage')) { setTitle(t('console')); root.innerHTML = `<div class="card empty">${t(d ? 'err_forbidden' : 'err_device_not_found')}</div>`; return; }
+    setTitle(t('console') + ' · ' + d.name, t('nav_devices').toUpperCase());
+    root.innerHTML = `<a class="back" href="#/device/${encodeURIComponent(d.id)}">${icon('back')}${esc(d.name)}</a>
+      <form class="card console-login" id="conForm" novalidate><div class="form">
+        <div class="row2"><label>${t('hostIp')}<input name="host" value="${esc(d.ip)}" required></label><label>${t('sshPort')}<input name="port" type="number" min="1" max="65535" value="22"></label></div>
+        <div class="row2"><label>${t('sshUser')}<input name="username" value="${esc(store.get('caracalSshUser', 'pi'))}" autocomplete="off" required></label><label>${t('sshPassword')}<input name="password" type="password" autocomplete="off"></label></div>
+        <details><summary>${t('sshKeyAuth')}</summary><label>${t('privateKey')}<textarea name="private_key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label><label>${t('passphrase')}<input name="passphrase" type="password" autocomplete="off"></label></details>
+        <label class="check"><input type="checkbox" name="forget_host_key">${t('forgetHostKey')}</label>
+        <p class="muted">${t('consoleHint')}</p>
+        <div class="form-error" id="conErr"></div>
+        <div class="form-actions start"><button class="btn primary" id="conConnect">${icon('console')}${t('consoleConnect')}</button></div>
+      </div></form>`;
+    const form = $('#conForm', root);
+    form.onsubmit = async e => {
+      e.preventDefault();
+      if (!form.checkValidity()) { form.reportValidity(); return; }
+      const data = Object.fromEntries(new FormData(form));
+      $('#conErr', form).textContent = '';
+      if (!data.password && !data.private_key) { $('#conErr', form).textContent = errText(new Error('missing_fields')); return; }
+      const btn = $('#conConnect', form);
+      btn.disabled = true;
+      try { await openConsole(d, data, root); } catch (err) { $('#conErr', form).textContent = errText(err); } finally { btn.disabled = false; }
+    };
+    if (CONSOLE.box && CONSOLE.id === d.id) {   // a re-render (e.g. language switch) keeps the running session
+      root.append(CONSOLE.box);
+      form.hidden = !!CONSOLE.ws && CONSOLE.ws.readyState <= 1;
+    }
+  },
+  update() { /* the terminal keeps its own state, periodic refreshes must not touch it */ },
+};
+
+async function openConsole(d, data, root) {
+  await loadXterm();
+  closeConsole();
+  store.set('caracalSshUser', data.username.trim());
+  const form = $('#conForm', root);
+  const box = document.createElement('section');
+  box.className = 'console';
+  box.innerHTML = `<div class="console-bar"><span class="badge" id="conState"></span><b id="conTarget">${esc(data.username.trim() + '@' + data.host.trim())}</b><span class="grow"></span>
+    <button type="button" class="btn sm ghost" id="conFull">${icon('fullscreen')}${t('fullscreen')}</button>
+    <button type="button" class="btn sm danger" id="conClose">${icon('x')}${t('consoleDisconnect')}</button></div><div class="console-term"></div>`;
+  root.append(box);
+  const term = new Terminal({
+    cursorBlink: true, scrollback: 5000, fontSize: 14,
+    fontFamily: 'ui-monospace, "Cascadia Code", Consolas, "DejaVu Sans Mono", monospace',
+    theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#e6edf3', selectionBackground: '#3b5070' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($('.console-term', box));
+  fit.fit();
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/devices/${encodeURIComponent(d.id)}/console`);
+  ws.binaryType = 'arraybuffer';
+  const ro = new ResizeObserver(() => { try { fit.fit(); } catch { /* not visible */ } });
+  ro.observe($('.console-term', box));
+  Object.assign(CONSOLE, { id: d.id, ws, term, ro, box });
+
+  const state = (key, cls) => { const el = $('#conState', box); el.className = 'badge ' + cls; el.textContent = t(key); };
+  const ended = (key, cls, msg) => {
+    state(key, cls);
+    if (msg) term.write(`\r\n\x1b[33m${msg}\x1b[0m\r\n`);
+    $('#conClose', box).hidden = true;
+    form.hidden = false;
+  };
+  state('consoleConnecting', 'st-queued');
+  form.hidden = true;
+  ws.onopen = () => ws.send(JSON.stringify({
+    token: S.token, host: data.host.trim(), port: Number(data.port || 22), username: data.username.trim(),
+    password: data.password, private_key: data.private_key || '', passphrase: data.passphrase || '',
+    forget_host_key: !!data.forget_host_key, cols: term.cols, rows: term.rows,
+  }));
+  ws.onmessage = e => {
+    if (typeof e.data !== 'string') { term.write(new Uint8Array(e.data)); return; }
+    const m = JSON.parse(e.data);
+    if (m.type === 'connected') {
+      state('consoleConnected', 'st-completed');
+      $('#conTarget', box).textContent = m.target;
+      form.forget_host_key.checked = false;
+      term.focus();
+    } else if (m.type === 'error') {
+      ws.onclose = null;
+      ended('consoleFailed', 'st-failed', errText(new Error(m.code)) + (m.detail ? ` (${m.detail})` : ''));
+    } else if (m.type === 'closed') {
+      ws.onclose = null;
+      ended('consoleClosed', 'st-cancelled', t('consoleEnd_' + m.reason));
+    }
+  };
+  ws.onclose = () => ended('consoleClosed', 'st-cancelled', t('consoleEnd_error'));
+  const enc = new TextEncoder();
+  term.onData(s => { if (ws.readyState === 1) ws.send(enc.encode(s)); });
+  term.onBinary(s => { if (ws.readyState === 1) ws.send(Uint8Array.from(s, c => c.charCodeAt(0) & 255)); });
+  term.onResize(({ cols, rows }) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows })); });
+  $('#conClose', box).onclick = () => { ws.onclose = null; ws.close(); ended('consoleClosed', 'st-cancelled', t('consoleEnd_disconnect')); };
+  $('#conFull', box).onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else box.requestFullscreen().then(() => term.focus()).catch(() => {});
+  };
 }
 
 function deviceOverview(d) {

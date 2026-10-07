@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import images, playlists, provisioning, releases, sdcard, system
+from . import console, images, playlists, provisioning, releases, sdcard, system
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -27,6 +27,7 @@ app.include_router(playlists.router)
 app.include_router(releases.router)
 app.include_router(images.router)
 app.include_router(sdcard.router)       # before /api/bootstrap/{name} (node-config)
+app.include_router(console.router)      # SSH web console (WebSocket)
 
 SECURITY_HEADERS = {
     # no inline scripts, no third-party resources; inline styles are used for progress bars

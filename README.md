@@ -12,6 +12,7 @@ with one `docker compose up`. Every organisation runs its own Fleet; nothing is 
   and locations
 - **Zero-touch installation:** prepare an SD card in Fleet, or find a fresh Raspberry Pi in the network and
   install it over SSH
+- **SSH console:** a terminal on any node right in the browser (the hub connects over SSH, nothing to install)
 - **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
 - **Administration:** users with the roles admin, manager, operator and viewer; command history, audit log,
   Czech and English UI, custom logo, full backup and restore for server migrations
@@ -118,7 +119,8 @@ select the devices on the old hub and use *Redirect to another hub*. The backup 
   no caching of API responses, no public OpenAPI.
 - Agents authenticate with per-device tokens; the enrollment token only registers new devices and can be
   rotated at any time without affecting enrolled ones.
-- SSH installation pins the host key on first use; credentials are never stored.
+- SSH installation and the web console (admin and manager only) pin the host key on first use; credentials are
+  never stored. Opening and closing a console is audited; an idle console is closed after 30 minutes.
 - Backups are validated before restore (allowed files only, database integrity, an administrator exists).
 
 Known limitations: the hub container runs as root and backups are not encrypted. Whoever controls the hub controls

@@ -42,13 +42,28 @@ def job_log(job_id, line, state=None, device_id=None):
             c.execute('UPDATE jobs SET device_id=? WHERE id=?', (device_id, job_id))
 
 
-def _load_key(text, passphrase):
+def load_key(text, passphrase):
     for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
         try:
             return cls.from_private_key(io.StringIO(text), password=passphrase or None)
         except (paramiko.SSHException, ValueError):
             continue
     raise ValueError('Unsupported or invalid private key')
+
+
+def ssh_client(host, port, forget_host_key=False):
+    """SSH client with trust on first use: a node's host key is stored on the first connection and verified
+    afterwards (shared by the installation and the web console)."""
+    ssh = paramiko.SSHClient()
+    KNOWN_HOSTS.touch(exist_ok=True)
+    ssh.load_host_keys(str(KNOWN_HOSTS))
+    if forget_host_key:
+        name = host if port == 22 else f'[{host}]:{port}'
+        if name in ssh.get_host_keys():
+            del ssh.get_host_keys()[name]
+            ssh.save_host_keys(str(KNOWN_HOSTS))
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    return ssh
 
 
 def _run(ssh, job_id, cmd, stdin_data=None, timeout=1800):
@@ -90,22 +105,13 @@ def start(job_id, params, user):
 def _provision(job_id, p, user):
     host, port, username = p['host'], int(p.get('port') or 22), p['username']
     password = p.get('password') or ''
-    ssh = paramiko.SSHClient()
-    # Trust on first use: a node's host key is stored on the first connection and verified afterwards.
-    KNOWN_HOSTS.touch(exist_ok=True)
-    ssh.load_host_keys(str(KNOWN_HOSTS))
-    if p.get('forget_host_key'):
-        name = host if port == 22 else f'[{host}]:{port}'
-        if name in ssh.get_host_keys():
-            del ssh.get_host_keys()[name]
-            ssh.save_host_keys(str(KNOWN_HOSTS))
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh = ssh_client(host, port, p.get('forget_host_key'))
     job_log(job_id, f'Connecting to {username}@{host}:{port}', state='running')
     try:
         kw = dict(port=port, username=username, timeout=20, auth_timeout=20, banner_timeout=20,
                   look_for_keys=False, allow_agent=False)
         if p.get('private_key'):
-            kw['pkey'] = _load_key(p['private_key'], p.get('passphrase') or password)
+            kw['pkey'] = load_key(p['private_key'], p.get('passphrase') or password)
         else:
             kw['password'] = password
         ssh.connect(host, **kw)
