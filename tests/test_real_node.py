@@ -303,7 +303,10 @@ def test_watchers_from_fleet(env):
 
     row = run(env, 'add_watcher', {'name': 'Helpdesk', 'url': api_url + '/tickets', 'auth_type': 'bearer',
                                    'secret': 'T0ken-secret', 'list_path': 'items', 'id_field': 'id',
-                                   'title_template': 'Ticket #{id}: {subject}', 'interval': 600})
+                                   'title_template': 'Ticket #{id}: {subject}', 'interval': 600,
+                                   # off: the node's background loop would check a new watcher at once and race
+                                   # with the checks below; "check now" works for watchers that are off as well
+                                   'enabled': False})
     wid = json.loads(row['result'])['id']
     stored = env['mod'].rows('SELECT * FROM notify_watchers WHERE id=?', (wid,))[0]
     assert b'T0ken-secret' not in stored['credentials_enc'] and env['mod']._wch_credentials(stored)['secret'] == 'T0ken-secret'
@@ -322,10 +325,12 @@ def test_watchers_from_fleet(env):
     assert json.loads(run(env, 'check_watcher', {'id': wid})['result'])['new'] == 1
     assert node_notifications(env)[-1]['title'] == 'Ticket #2: Wi-Fi'
 
-    # edits without credentials keep them; turning off and deleting
+    # edits without credentials keep them; turning on and off, deleting
     run(env, 'update_watcher', {'id': wid, 'name': 'Helpdesk 2', 'secret': ''})
     stored = env['mod'].rows('SELECT * FROM notify_watchers WHERE id=?', (wid,))[0]
     assert stored['name'] == 'Helpdesk 2' and env['mod']._wch_credentials(stored)['secret'] == 'T0ken-secret'
+    run(env, 'update_watcher', {'id': wid, 'enabled': True})
+    assert env['mod'].rows('SELECT enabled FROM notify_watchers WHERE id=?', (wid,))[0]['enabled']
     run(env, 'update_watcher', {'id': wid, 'enabled': False})
     assert not env['mod'].rows('SELECT enabled FROM notify_watchers WHERE id=?', (wid,))[0]['enabled']
     url = f"{env['hub']}/api/devices/{env['id']}/commands"
