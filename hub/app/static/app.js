@@ -484,6 +484,8 @@ function renderBulkBar(el) {
   patch(el, `<b>${t('selectedN', { n })}</b>
     ${can('control') ? b('next', t('act_next'), 'next') + b('unfreeze', t('act_unfreeze'), 'play') + b('restart_player', t('act_restart_player'), 'restart') + b('reboot', t('act_reboot'), 'power', 'danger') : ''}
     ${can('content') ? `<button class="btn sm" data-do="bulkAddContent">${icon('plus')}${t('addContent')}</button><button class="btn sm" data-do="bulkCopy">${icon('copy')}${t('copyPlaylistHere')}</button>` : ''}
+    ${can('control') ? `<button class="btn sm" data-do="bulkNotify">${icon('attention')}${t('notifySend')}</button>` : ''}
+    ${can('content') ? `<button class="btn sm" data-do="bulkNotifySettings">${icon('settings')}${t('notifySettings')}</button><button class="btn sm" data-do="bulkWatcher">${icon('eye')}${t('addWatcher')}</button>` : ''}
     ${can('manage') ? b('update_agent', t('act_update_agent'), 'agent') + `<button class="btn sm" data-do="bulkAssign">${icon('group')}${t('assignGroupLocation')}</button>
       <button class="btn sm" data-do="bulkSetHub">${icon('upload')}${t('act_set_hub')}</button>
       <button class="btn sm" data-do="caracalUpdate">${icon('updates')}${t('act_update_caracal')}</button>` : ''}
@@ -525,8 +527,8 @@ function quickFix(d, a, inDetail = false) {
 
 // ---------- device detail
 
-const DEVICE_TABS = ['overview', 'playlist', 'collections', 'logins', 'history', 'settings'];
-const TAB_COUNTS = { playlist: 'playlist_count', collections: 'collection_count', logins: 'profile_count' };
+const DEVICE_TABS = ['overview', 'playlist', 'collections', 'logins', 'notify', 'history', 'settings'];
+const TAB_COUNTS = { playlist: 'playlist_count', collections: 'collection_count', logins: 'profile_count', notify: 'watcher_count' };
 
 function deviceTabs(d, tab) {
   return DEVICE_TABS.filter(x => x !== 'settings' || can('manage')).map(x => `<a href="#/device/${encodeURIComponent(d.id)}/${x}" class="${x === tab ? 'active' : ''}">${t('tab_' + x)}${TAB_COUNTS[x] && d[TAB_COUNTS[x]] ? ` <span class="count">${d[TAB_COUNTS[x]]}</span>` : ''}</a>`).join('');
@@ -558,6 +560,7 @@ VIEWS.device = {
     else if (tab === 'playlist') renderPlaylist(el, d);
     else if (tab === 'collections') patch(el, renderCollections(d));
     else if (tab === 'logins') patch(el, renderProfiles(d));
+    else if (tab === 'notify') patch(el, renderNotifications(d));
     else if (tab === 'history') patch(el, deviceHistory(d));
     else if (tab === 'settings') { if (!el._html) patch(el, deviceSettings(d)); }
   },
@@ -751,6 +754,7 @@ function payloadSummary(json) {
   try { p = JSON.parse(json || '{}'); } catch { return ''; }
   const parts = [];
   if (p.name) parts.push(p.name);
+  else if (p.title || p.message) parts.push(p.title || p.message);
   if (p.item_id != null) parts.push('#' + p.item_id);
   if (p.collection_id != null) parts.push(t('collection') + ' #' + p.collection_id);
   if (p.id != null) parts.push('#' + p.id);
@@ -901,13 +905,250 @@ function renderProfiles(d) {
       const pages = d.assets.filter(a => a.kind === 'web' && String(a.auth_profile_id) === String(p.id));
       return `<div class="col-card profile-card">
         <div class="col-head">${icon('lock')}<b>${esc(p.name)}</b><span class="muted">${pages.length ? t('profileUsedBy', { list: esc(pages.map(a => a.name).join(', ')) }) : t('profileUnused')}</span></div>
-        ${p.login_url ? `<dl class="kv small"><dt>${t('loginUrl')}</dt><dd title="${esc(p.login_url)}">${esc(p.login_url)}</dd><dt>${t('targetUrl')}</dt><dd title="${esc(p.target_url)}">${esc(p.target_url)}</dd></dl>` : ''}
+        ${p.auth_type === 'http' ? `<span class="tag info">${t('loginType_http')}</span><dl class="kv small"><dt>${t('httpLoginServer')}</dt><dd title="${esc(p.target_url)}">${esc(p.target_url)}</dd></dl>`
+          : p.login_url ? `<dl class="kv small"><dt>${t('loginUrl')}</dt><dd title="${esc(p.login_url)}">${esc(p.login_url)}</dd><dt>${t('targetUrl')}</dt><dd title="${esc(p.target_url)}">${esc(p.target_url)}</dd></dl>` : ''}
         ${edit ? `<div class="col-actions"><button class="btn sm" data-do="addWebWithLogin" data-id="${esc(d.id)}" data-profile="${esc(p.id)}">${icon('web')}${t('addWebWithLogin')}</button>
           <button class="icon-btn" title="${t('edit')}" data-do="editProfile" data-id="${esc(d.id)}" data-profile="${esc(p.id)}">${icon('edit')}</button>
           <button class="icon-btn danger" title="${t('delete')}" data-do="deleteProfile" data-id="${esc(d.id)}" data-profile="${esc(p.id)}" data-name="${esc(p.name)}" data-used="${pages.length}">${icon('trash')}</button></div>` : ''}
       </div>`;
     }).join('') || `<div class="empty">${support === 'ok' ? t('noProfiles') : t('noProfilesShort')}</div>`}</div>
     ${edit ? `<div class="note">${icon('lock')}${t('loginsSecurity')}</div>` : ''}</section>`;
+}
+
+// ---------- on-screen notifications of a node: settings, queue and watchers
+
+// 'ok': the node and its agent support notifications; 'agent': the agent is too old; 'node': CARACAL is too old
+function notifySupport(d) {
+  const cap = (d.capabilities || {}).notify_settings;
+  return cap === true ? 'ok' : cap === false ? 'node' : 'agent';
+}
+const NOTIFY_LEVELS = ['info', 'success', 'warning', 'critical'];
+const NOTIFY_POSITIONS = ['top-right', 'top', 'top-left', 'bottom-right', 'bottom', 'bottom-left', 'center'];
+const NOTIFY_SOUNDS = ['off', 'critical', 'warning', 'all'];
+const LEVEL_TAG = { info: 'info', success: 'ok', warning: 'frozen', critical: 'critical' };
+const NOTIFY_DEFAULTS = { enabled: true, position: 'top-right', duration: 8, scale: 100, max_queue: 20, sound: 'off', volume: 70, sound_device: '', history_max: 500, history_days: 7 };
+const hostOf = url => { try { return new URL(url).host; } catch { return url || ''; } };
+// translation keys use _ instead of - (top-right -> notifyPos_top_right)
+const choice = (list, sel, prefix) => list.map(x => `<option value="${x}" ${x === sel ? 'selected' : ''}>${t(prefix + x.replace(/-/g, '_'))}</option>`).join('');
+
+function renderNotifications(d) {
+  const support = notifySupport(d), n = d.notifications;
+  if (support !== 'ok' || !n) return `<section class="card"><div class="note">${t(support === 'node' ? 'notifyNeedCaracal' : 'notifyNeedAgent')}</div></section>`;
+  const s = { ...NOTIFY_DEFAULTS, ...n.settings }, edit = can('content'), ctl = can('control');
+  const cur = n.current;
+  return `<div class="grid two">
+    <section class="card"><div class="card-head"><h2>${t('notifyScreen')}</h2><span class="tag ${s.enabled ? 'ok' : ''}">${t(s.enabled ? 'notifyOn' : 'notifyOff')}</span></div>
+      <dl class="kv"><dt>${t('notifyCurrent')}</dt><dd>${cur ? `<span class="tag ${LEVEL_TAG[cur.level] || 'info'}">${t('notifyLevel_' + (cur.level || 'info'))}</span> ${esc(cur.title || cur.message)}` : '—'}</dd>
+        <dt>${t('notifyWaiting')}</dt><dd>${n.waiting}</dd><dt>${t('notifyNodeTokens')}</dt><dd>${n.tokens}</dd></dl>
+      ${!d.online ? `<p class="muted">${t('notifyOfflineHint')}</p>` : ''}
+      ${ctl ? `<div class="form-actions start"><button class="btn primary" data-do="notifySend" data-id="${esc(d.id)}">${icon('plus')}${t('notifySend')}</button>
+        <button class="btn" data-do="notifyClear" data-id="${esc(d.id)}" ${n.waiting || cur ? '' : 'disabled'}>${icon('trash')}${t('notifyClear')}</button></div>` : ''}</section>
+    <section class="card"><div class="card-head"><h2>${t('notifySettings')}</h2>${edit ? `<button class="btn sm" data-do="notifySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</div>
+      <dl class="kv"><dt>${t('notifyPosition')}</dt><dd>${t('notifyPos_' + s.position.replace(/-/g, '_'))}</dd>
+        <dt>${t('notifyDuration')}</dt><dd>${s.duration} s</dd><dt>${t('notifySize')}</dt><dd>${s.scale} %</dd>
+        <dt>${t('notifyMaxQueue')}</dt><dd>${s.max_queue}</dd>
+        <dt>${t('notifySound')}</dt><dd>${t('notifySound_' + s.sound)}${s.sound !== 'off' ? ` · ${s.volume} %` : ''}</dd>
+        <dt>${t('notifyHistory')}</dt><dd>${t('notifyHistoryValue', { n: s.history_max, days: s.history_days })}</dd></dl></section></div>
+  <section class="card flush"><div class="toolbar"><h2 class="grow">${t('watchers')} <span class="muted">(${n.watchers.length})</span></h2>
+    ${edit ? `<button class="btn primary" data-do="addWatcher" data-id="${esc(d.id)}">${icon('plus')}${t('addWatcher')}</button>` : ''}</div>
+    <div class="note">${t('watchersHint')}</div>
+    <div class="col-grid">${n.watchers.map(w => `<div class="col-card">
+      <div class="col-head">${icon('eye')}<b>${esc(w.name)}</b><span class="muted">${esc(hostOf(w.url))}</span></div>
+      <div class="tag-row"><span class="tag ${w.enabled ? 'ok' : ''}">${t(w.enabled ? 'watcherOn' : 'watcherOff')}</span><span class="tag">${t('watcherEvery', { n: w.interval })}</span>
+        <span class="tag">${t('watcherAuth_' + (w.auth_type || 'none'))}</span>${w.last_count != null && !w.last_error ? `<span class="tag">${t('nItems', { n: w.last_count })}</span>` : ''}</div>
+      <small class="muted">${t('watcherChecked')}: ${w.last_check ? ago(w.last_check) : t('watcherNever')}</small>
+      ${w.last_error ? `<small class="tag critical" title="${esc(w.last_error)}">${esc(w.last_error.slice(0, 160))}</small>` : ''}
+      ${edit ? `<div class="col-actions"><button class="btn sm" data-do="checkWatcher" data-id="${esc(d.id)}" data-watcher="${esc(w.id)}" ${d.online ? '' : 'disabled'}>${icon('refresh')}${t('watcherCheck')}</button>
+        <button class="btn sm" data-do="toggleWatcher" data-id="${esc(d.id)}" data-watcher="${esc(w.id)}" data-on="${w.enabled ? 0 : 1}">${t(w.enabled ? 'watcherTurnOff' : 'watcherTurnOn')}</button>
+        <button class="icon-btn" title="${t('edit')}" data-do="editWatcher" data-id="${esc(d.id)}" data-watcher="${esc(w.id)}">${icon('edit')}</button>
+        <button class="icon-btn danger" title="${t('delete')}" data-do="deleteWatcher" data-id="${esc(d.id)}" data-watcher="${esc(w.id)}" data-name="${esc(w.name)}">${icon('trash')}</button></div>` : ''}
+    </div>`).join('') || `<div class="empty">${t('noWatchers')}</div>`}</div>
+    ${edit ? `<div class="note">${icon('lock')}${t('watchersSecurity')}</div>` : ''}</section>`;
+}
+
+function notifyDialog(ids) {
+  modal({
+    title: t('notifySend'), submit: t('notifySendSubmit'),
+    body: `<div class="form">${ids.length > 1 ? `<p class="muted">${t('notifyToSelected', { n: ids.length })}</p>` : ''}
+      <label>${t('notifyTitle')}<input name="title" maxlength="120"></label>
+      <label>${t('notifyMessage')}<textarea name="message" rows="3" maxlength="600"></textarea></label>
+      <div class="row2"><label>${t('notifyLevel')}<select name="level">${choice(NOTIFY_LEVELS, 'info', 'notifyLevel_')}</select></label>
+      <label>${t('notifyDuration')}<input name="duration" type="number" min="3" max="120" placeholder="${esc(t('notifyDurationDefault'))}"></label></div>
+      <label>${t('notifySound')}<select name="sound"><option value="">${t('notifySoundBySettings')}</option><option value="1">${t('notifySoundPlay')}</option><option value="0">${t('notifySoundSilent')}</option></select></label></div>`,
+    onSubmit: data => {
+      if (!data.title.trim() && !data.message.trim()) throw new Error('notification_text_required');
+      const payload = { title: data.title.trim(), message: data.message.trim(), level: data.level };
+      if (data.duration) payload.duration = Number(data.duration);
+      if (data.sound) payload.sound = data.sound === '1';
+      return ids.length === 1 ? sendCommand(ids[0], 'notify', payload) : sendBulk(ids, 'notify', payload);
+    },
+  });
+}
+
+function notifySettingsDialog(ids, current) {
+  const s = { ...NOTIFY_DEFAULTS, ...(current || {}) };
+  const numIn = (name, min, max, step = 1) => `<input name="${name}" type="number" min="${min}" max="${max}" step="${step}" value="${esc(s[name])}" required>`;
+  modal({
+    title: t('notifySettings'), wide: true,
+    body: `<div class="form">${ids.length > 1 ? `<p class="muted">${t('notifySettingsToSelected', { n: ids.length })}</p>` : ''}
+      <label class="check"><input type="checkbox" name="enabled" ${s.enabled ? 'checked' : ''}>${t('notifyEnabled')}</label>
+      <div class="row2"><label>${t('notifyPosition')}<select name="position">${choice(NOTIFY_POSITIONS, s.position, 'notifyPos_')}</select></label>
+      <label>${t('notifyDuration')}${numIn('duration', 3, 120)}</label></div>
+      <div class="row2"><label>${t('notifySize')}${numIn('scale', 50, 300, 10)}</label><label>${t('notifyMaxQueue')}${numIn('max_queue', 1, 200)}</label></div>
+      <div class="row2"><label>${t('notifySound')}<select name="sound">${choice(NOTIFY_SOUNDS, s.sound, 'notifySound_')}</select></label><label>${t('notifyVolume')}${numIn('volume', 0, 100, 10)}</label></div>
+      <label>${t('notifySoundDevice')}<input name="sound_device" value="${esc(s.sound_device)}" pattern="[A-Za-z0-9:=,._\\-]*" placeholder="hdmi:CARD=vc4hdmi0,DEV=0"><small class="muted">${t('notifySoundDeviceHint')}</small></label>
+      <div class="row2"><label>${t('notifyHistoryMax')}${numIn('history_max', 50, 5000, 50)}</label><label>${t('notifyHistoryDays')}${numIn('history_days', 1, 90)}</label></div></div>`,
+    onSubmit: data => {
+      const payload = { enabled: !!data.enabled, position: data.position, sound: data.sound, sound_device: data.sound_device.trim() };
+      for (const k of ['duration', 'scale', 'max_queue', 'volume', 'history_max', 'history_days']) payload[k] = Number(data[k]);
+      return ids.length === 1 ? sendCommand(ids[0], 'notify_settings', payload) : sendBulk(ids, 'notify_settings', payload);
+    },
+  });
+}
+
+// Presets of watchers (the same as in the node's admin UI); addresses are examples to replace.
+const WATCHER_PRESETS = {
+  custom: {},
+  zammad: { url: 'https://zammad.example/api/v1/tickets/search?query=state.name:new&sort_by=created_at&order_by=desc&limit=50&expand=true', auth_type: 'header', auth_header: 'Authorization', list_path: '', id_field: 'id', title_template: 'Nový ticket #{number}: {title}', message_template: '{customer} · {group}', level_field: '' },
+  jira: { url: 'https://example.atlassian.net/rest/api/3/search/jql?jql=project%3DSD%20AND%20statusCategory%3D%22To%20Do%22%20ORDER%20BY%20created%20DESC&fields=summary,priority,reporter&maxResults=50', auth_type: 'basic', list_path: 'issues', id_field: 'key', title_template: '{key}: {fields.summary}', message_template: '{fields.reporter.displayName}', level_field: 'fields.priority.name' },
+  redmine: { url: 'https://redmine.example/issues.json?status_id=open&sort=created_on:desc&limit=50', auth_type: 'header', auth_header: 'X-Redmine-API-Key', list_path: 'issues', id_field: 'id', title_template: '#{id}: {subject}', message_template: '{project.name} · {author.name}', level_field: 'priority.name' },
+  freshdesk: { url: 'https://example.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=50', auth_type: 'basic', list_path: '', id_field: 'id', title_template: 'Nový ticket #{id}: {subject}', message_template: '', level_field: '' },
+  gitlab: { url: 'https://gitlab.example/api/v4/projects/123/issues?state=opened&order_by=created_at&per_page=50', auth_type: 'header', auth_header: 'PRIVATE-TOKEN', list_path: '', id_field: 'id', title_template: '#{iid}: {title}', message_template: '{author.name}', level_field: '' },
+  github: { url: 'https://api.github.com/repos/OWNER/REPO/issues?state=open&sort=created&per_page=50', auth_type: 'bearer', list_path: '', id_field: 'id', title_template: '#{number}: {title}', message_template: '{user.login}', level_field: '' },
+  graph: { url: 'https://graph.microsoft.com/v1.0/users/helpdesk@example.com/mailFolders/inbox/messages?$top=25&$orderby=receivedDateTime%20desc&$select=subject,from,receivedDateTime,importance', auth_type: 'oauth2', oauth_token_url: 'https://login.microsoftonline.com/<TENANT-ID>/oauth2/v2.0/token', oauth_grant: 'client_credentials', oauth_scope: 'https://graph.microsoft.com/.default', oauth_client_auth: 'body', list_path: 'value', id_field: 'id', title_template: '{subject}', message_template: '{from.emailAddress.name}', level_field: '' },
+  servicenow: { url: 'https://example.service-now.com/api/now/table/incident?sysparm_query=active%3Dtrue%5EORDERBYDESCsys_created_on&sysparm_limit=50&sysparm_fields=sys_id,number,short_description,priority,category', auth_type: 'oauth2', oauth_token_url: 'https://example.service-now.com/oauth_token.do', oauth_grant: 'password', oauth_client_auth: 'body', list_path: 'result', id_field: 'sys_id', title_template: '{number}: {short_description}', message_template: '{category}', level_field: '' },
+};
+const WATCHER_AUTH = ['none', 'bearer', 'basic', 'header', 'oauth2'];
+const OAUTH_GRANTS = ['client_credentials', 'password', 'refresh_token'];
+const WATCHER_TEXT = ['name', 'url', 'auth_header', 'list_path', 'id_field', 'title_template', 'message_template', 'level_field', 'oauth_token_url', 'oauth_client_id', 'oauth_scope', 'oauth_extra'];
+
+function watcherDialog(deviceId, w = null, targets = null) {
+  const v = { name: '', url: '', auth_type: 'none', auth_header: '', list_path: '', id_field: 'id', title_template: '', message_template: '', level: 'info', level_field: '', interval: 60, verify_tls: 1, enabled: 1, oauth_token_url: '', oauth_grant: 'client_credentials', oauth_client_id: '', oauth_scope: '', oauth_extra: '', oauth_client_auth: 'body', ...(w || {}) };
+  const keep = w && w.has_credentials ? `placeholder="${esc(t('leaveEmpty'))}"` : '';
+  const field = (name, label, attrs = '') => `<label>${label}<input name="${name}" value="${esc(v[name] ?? '')}" spellcheck="false" ${attrs}></label>`;
+  const secret = name => `<input name="${name}" type="password" autocomplete="new-password" ${keep}>`;
+  modal({
+    title: w ? t('editWatcher') : t('addWatcher'), submit: w ? t('save') : t('add'), wide: true,
+    body: `<div class="form"><p class="muted">${t('watcherDialogHint')}</p>
+      ${w ? '' : `<label>${t('watcherPreset')}<select name="preset">${Object.keys(WATCHER_PRESETS).map(k => `<option value="${k}">${t('watcherPreset_' + k)}</option>`).join('')}</select></label>`}
+      ${field('name', t('watcherName'), 'required maxlength="60"')}
+      ${field('url', t('watcherUrl'), 'type="url" required placeholder="https://"')}
+      <div class="row2"><label>${t('watcherAuth')}<select name="auth_type">${choice(WATCHER_AUTH, v.auth_type, 'watcherAuth_')}</select></label>
+        <span data-auth="header">${field('auth_header', t('watcherHeader'), 'placeholder="X-API-Key"')}</span></div>
+      <div data-auth="oauth2">${field('oauth_token_url', t('watcherTokenUrl'), 'type="url" placeholder="https://login…/oauth2/token"')}
+        <div class="row2"><label>${t('watcherGrant')}<select name="oauth_grant">${choice(OAUTH_GRANTS, v.oauth_grant, 'watcherGrant_')}</select></label>${field('oauth_client_id', 'Client ID')}</div>
+        <div class="row2"><label>Client Secret${secret('client_secret')}</label>${field('oauth_scope', 'Scope')}</div>
+        <div class="row2"><label>${t('watcherClientAuth')}<select name="oauth_client_auth"><option value="body" ${v.oauth_client_auth !== 'basic' ? 'selected' : ''}>client_secret_post</option><option value="basic" ${v.oauth_client_auth === 'basic' ? 'selected' : ''}>client_secret_basic</option></select></label>${field('oauth_extra', t('watcherTokenExtra'), 'placeholder="audience=https://api.example"')}</div>
+        <label data-grant="refresh_token">Refresh token${secret('refresh_token')}</label></div>
+      <div class="row2"><label data-auth="basic oauth2" data-grant="password">${t('watcherUser')}<input name="username" autocomplete="off" spellcheck="false" ${keep}></label>
+        <label data-auth="bearer basic header oauth2" data-grant="password">${t('watcherSecret')}${secret('secret')}</label></div>
+      <div class="row2">${field('list_path', t('watcherListPath'), `placeholder="${esc(t('watcherListPathHint'))}"`)}${field('id_field', t('watcherIdField'), 'required')}</div>
+      ${field('title_template', t('watcherTitle'), `placeholder="${esc(t('watcherTitleHint'))}"`)}
+      ${field('message_template', t('watcherMessage'), 'placeholder="{customer.name} · {group}"')}
+      <div class="row2"><label>${t('notifyLevel')}<select name="level">${choice(NOTIFY_LEVELS, v.level, 'notifyLevel_')}</select></label>${field('level_field', t('watcherLevelField'), 'placeholder="priority.name"')}</div>
+      <div class="row2"><label>${t('watcherInterval')}<input name="interval" type="number" min="15" max="86400" value="${esc(v.interval)}" required></label><span></span></div>
+      <label class="check"><input type="checkbox" name="verify_tls" ${v.verify_tls ? 'checked' : ''}>${t('watcherVerifyTls')}</label>
+      <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? 'checked' : ''}>${t('watcherEnabled')}</label>
+      <p class="muted">${t('watcherTemplateHint')}</p>
+      ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : w ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], d => notifySupport(d) === 'ok')}</details>`}
+      <div class="note info">${icon('lock')}${t('watchersSecurity')}</div></div>`,
+    onOpen: form => {
+      bindTargetPicker(form);
+      const sync = () => {
+        const auth = form.auth_type.value, grant = form.oauth_grant.value;
+        $$('[data-auth]', form).forEach(el => { el.hidden = !el.dataset.auth.split(' ').includes(auth) || (auth === 'oauth2' && el.dataset.grant !== undefined && !el.dataset.grant.split(' ').includes(grant)); });
+        $$('[data-auth="oauth2"] [data-grant]', form).forEach(el => { el.hidden = !el.dataset.grant.split(' ').includes(grant); });
+      };
+      form.auth_type.onchange = sync;
+      form.oauth_grant.onchange = sync;
+      if (form.preset) {
+        form.preset.onchange = () => {
+          const p = WATCHER_PRESETS[form.preset.value];
+          for (const [k, val] of Object.entries(p)) if (form[k]) form[k].value = val;
+          if (!form.name.value && form.preset.value !== 'custom') form.name.value = t('watcherPreset_' + form.preset.value).split(' – ')[0];
+          sync();
+        };
+      }
+      sync();
+    },
+    onSubmit: data => {
+      const payload = {};
+      for (const k of WATCHER_TEXT) payload[k] = (data[k] || '').trim();
+      Object.assign(payload, { auth_type: data.auth_type, oauth_grant: data.oauth_grant, oauth_client_auth: data.oauth_client_auth, level: data.level,
+        interval: Number(data.interval), verify_tls: !!data.verify_tls, enabled: !!data.enabled });
+      // empty credentials keep the stored ones
+      for (const k of ['username', 'secret', 'client_secret', 'refresh_token']) if ((data[k] || '').trim()) payload[k] = data[k].trim();
+      if (w) return sendCommand(deviceId, 'update_watcher', { id: w.id, ...payload });
+      const ids = targets || [deviceId, ...pickedTargets(data)];
+      return ids.length === 1 ? sendCommand(ids[0], 'add_watcher', payload) : sendBulk(ids, 'add_watcher', payload);
+    },
+  });
+}
+
+// Tokens of the notification API (Settings): an app sends one request, Fleet shows it on the screens in the scope.
+function scopeText(s) {
+  if (s.all) return t('scopeAll');
+  const names = (s.devices || []).map(id => dev(id)?.name || id);
+  return [...(s.groups || []).map(g => t('group') + ' ' + g), ...(s.locations || []).map(l => t('location') + ' ' + l), ...names].join(', ');
+}
+
+async function notifyTokensCard(el) {
+  const list = await api('/api/notify-tokens').catch(() => null);
+  if (!list) { el.remove(); return; }
+  el.innerHTML = `<div class="card-head"><h2>${t('notifyApi')}</h2><button class="btn sm primary" data-do="notifyTokenEdit">${icon('plus')}${t('notifyTokenNew')}</button></div>
+    <p class="muted">${t('notifyApiHint')}</p>
+    <div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('notifyScope')}</th><th>${t('notifyRate')}</th><th>${t('notifyLastUsed')}</th><th></th></tr></thead>
+    <tbody>${list.map(x => `<tr><td><b>${esc(x.name)}</b><br><small class="muted">${esc(x.prefix)}… · ${esc(x.created_by || '')}</small>${x.enabled ? '' : ` <span class="tag">${t('disabled')}</span>`}</td>
+      <td><small>${esc(scopeText(x.scope))}</small></td><td>${x.rate_per_min}/min</td><td class="muted nowrap">${x.last_used ? ago(x.last_used) : '—'}</td>
+      <td class="actions-cell"><button class="icon-btn" title="${t('edit')}" data-do="notifyTokenEdit" data-tid="${x.id}">${icon('edit')}</button>
+        <button class="icon-btn danger" title="${t('delete')}" data-do="notifyTokenDelete" data-tid="${x.id}" data-name="${esc(x.name)}">${icon('trash')}</button></td></tr>`).join('')
+      || `<tr><td colspan="5" class="empty">${t('notifyNoTokens')}</td></tr>`}</tbody></table></div>`;
+  el._tokens = list;
+}
+
+function notifyTokenDialog(token = null) {
+  const s = token ? token.scope : { all: true };
+  const mode = s.all ? 'all' : 'some';
+  const checks = (kind, values) => values.map(v => `<label class="check"><input type="checkbox" name="${kind}:${esc(v.id)}" ${(s[kind] || []).includes(v.id) ? 'checked' : ''}><span>${esc(v.label)}</span></label>`).join('') || `<span class="muted">—</span>`;
+  modal({
+    title: token ? t('notifyTokenEdit') : t('notifyTokenNew'), submit: token ? t('save') : t('add'), wide: true,
+    body: `<div class="form"><label>${t('notifyTokenName')}<input name="name" value="${esc(token?.name || '')}" maxlength="60" required placeholder="Grafana"></label>
+      <div class="radios"><label class="check"><input type="radio" name="mode" value="all" ${mode === 'all' ? 'checked' : ''}>${t('scopeAll')}</label>
+        <label class="check"><input type="radio" name="mode" value="some" ${mode === 'some' ? 'checked' : ''}>${t('scopeSome')}</label></div>
+      <div class="scope-pick" ${mode === 'all' ? 'hidden' : ''}>
+        <h3>${t('groups')}</h3><div class="target-list">${checks('groups', orgNames('groups').map(g => ({ id: g, label: g })))}</div>
+        <h3>${t('locations')}</h3><div class="target-list">${checks('locations', orgNames('locations').map(l => ({ id: l, label: l })))}</div>
+        <h3>${t('nav_devices')}</h3><div class="target-list">${checks('devices', S.devices.map(d => ({ id: d.id, label: d.name })))}</div></div>
+      <div class="row2"><label>${t('notifyRate')}<input name="rate_per_min" type="number" min="1" max="600" value="${esc(token?.rate_per_min ?? 30)}" required></label>
+        ${token ? `<label class="check"><input type="checkbox" name="enabled" ${token.enabled ? 'checked' : ''}>${t('active')}</label>` : '<span></span>'}</div></div>`,
+    onOpen: form => {
+      const sync = () => { $('.scope-pick', form).hidden = form.querySelector('[name=mode]:checked').value === 'all'; };
+      $$('[name=mode]', form).forEach(r => { r.onchange = sync; });
+    },
+    onSubmit: async data => {
+      const pick = kind => Object.keys(data).filter(k => k.startsWith(kind + ':')).map(k => k.slice(kind.length + 1));
+      const scope = data.mode === 'all' ? { all: true } : { groups: pick('groups'), locations: pick('locations'), devices: pick('devices') };
+      const body = { name: data.name.trim(), scope, rate_per_min: Number(data.rate_per_min) };
+      if (token) {
+        await api('/api/notify-tokens/' + token.id, { method: 'PATCH', json: { ...body, enabled: !!data.enabled } });
+        toast(t('saved'));
+      } else {
+        const r = await api('/api/notify-tokens', { method: 'POST', json: body });
+        setTimeout(() => notifyTokenShow(r.token), 50);
+      }
+      render(true);
+    },
+  });
+}
+
+function notifyTokenShow(token) {
+  const url = location.origin + '/api/notify';
+  const ex = `curl -X POST ${url} \\\n  -H "Authorization: Bearer ${token}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"title":"Záloha dokončena","message":"Server DB01","level":"success"}'`;
+  modal({ title: t('notifyTokenCreated'), wide: true,
+    body: `<div class="form"><p class="muted">${t('notifyTokenOnce')}</p><pre class="code">${esc(token)}</pre>
+      <h3>${t('notifyExample')}</h3><pre class="code">${esc(ex)}</pre><p class="muted">${t('notifyNarrowHint')}</p>
+      <div class="form-actions start"><button type="button" class="btn sm" id="ntCopy">${icon('copy')}${t('copy')}</button></div></div>`,
+    onOpen: form => { $('#ntCopy', form).onclick = () => navigator.clipboard.writeText(token).then(() => toast(t('copied'))); } });
 }
 
 // ---------- playlists view (device picker + editor)
@@ -1044,6 +1285,10 @@ VIEWS.settings = {
         <label>${t('newPassword')}<input type="password" name="new_password" minlength="10" autocomplete="new-password" required></label>
         <div class="form-actions"><button class="btn primary">${t('changePassword')}</button></div></form></section>
       <section class="card" id="sysCard"></section></div>`;
+    if (can('manage')) {
+      root.insertAdjacentHTML('beforeend', '<section class="card" id="ntfTokens"></section>');
+      notifyTokensCard($('#ntfTokens', root));
+    }
     if (!can('admin')) { $('#sysCard', root).innerHTML = `<h2>${t('system')}</h2><dl class="kv"><dt>${t('hubVersion')}</dt><dd>${esc(S.me.hub_version)}</dd><dt>${t('agentVersion')}</dt><dd>${esc(S.me.agent_version)}</dd></dl>`; return; }
     const s = await api('/api/settings').catch(() => null);
     if (!s) return;
@@ -1646,19 +1891,21 @@ const SELECTOR_DEFAULTS = {
   submit_selector: 'button[type="submit"], input[type="submit"]',
 };
 
+// 'http' log-ins answer the browser's own user name / password pop-up (HTTP Basic/Digest): no login page, no form.
 function profileDialog(deviceId, profile = null, targets = null) {
-  const p = profile || { name: '', login_url: '', target_url: '', ...SELECTOR_DEFAULTS };
+  const p = profile || { name: '', login_url: '', target_url: '', auth_type: 'form', ...SELECTOR_DEFAULTS };
   const keep = profile ? `placeholder="${esc(t('leaveEmpty'))}"` : 'required';
   modal({
     title: profile ? t('editProfile') : t('add_profile'), submit: profile ? t('save') : t('add'), wide: !profile && !targets,
-    body: `<div class="form"><p class="muted">${t('loginHint')}</p>
+    body: `<div class="form"><p class="muted" data-type-only="form">${t('loginHint')}</p><p class="muted" data-type-only="http" hidden>${t('httpLoginHint')}</p>
+      <label>${t('loginType')}<select name="auth_type"><option value="form" ${p.auth_type !== 'http' ? 'selected' : ''}>${t('loginType_form')}</option><option value="http" ${p.auth_type === 'http' ? 'selected' : ''}>${t('loginType_http')}</option></select></label>
       <label>${t('name')}<input name="name" value="${esc(p.name)}" placeholder="${esc(t('loginNamePlaceholder'))}" required></label>
-      <label>${t('loginUrl')}<input name="login_url" type="url" value="${esc(p.login_url)}" placeholder="https://zabbix.example/index.php" required><small class="muted">${t('loginUrlHint')}</small></label>
-      <label>${t('targetUrl')}<input name="target_url" type="url" value="${esc(p.target_url)}" placeholder="https://zabbix.example/zabbix.php?action=dashboard.view" required><small class="muted">${t('targetUrlHint')}</small></label>
+      <label data-type-only="form">${t('loginUrl')}<input name="login_url" type="url" value="${esc(p.login_url)}" placeholder="https://zabbix.example/index.php" required><small class="muted">${t('loginUrlHint')}</small></label>
+      <label>${t('targetUrl')}<input name="target_url" type="url" value="${esc(p.target_url)}" placeholder="https://zabbix.example/zabbix.php?action=dashboard.view" required><small class="muted" data-type-only="form">${t('targetUrlHint')}</small><small class="muted" data-type-only="http" hidden>${t('httpLoginServerHint')}</small></label>
       <div class="row2"><label>${t('username')}<input name="username" autocomplete="off" spellcheck="false" ${keep}></label>
       <label>${t('password')}<input name="password" type="password" autocomplete="new-password" ${keep}></label></div>
       <label class="check"><input type="checkbox" data-reveal>${t('showPassword')}</label>
-      <details><summary>${t('loginSelectors')}</summary><p class="muted">${t('selectorsHint')}</p>
+      <details data-type-only="form"><summary>${t('loginSelectors')}</summary><p class="muted">${t('selectorsHint')}</p>
         <label>${t('selectorUser')}<input name="user_selector" value="${esc(p.user_selector)}" spellcheck="false" required></label>
         <label>${t('selectorPass')}<input name="pass_selector" value="${esc(p.pass_selector)}" spellcheck="false" required></label>
         <label>${t('selectorSubmit')}<input name="submit_selector" value="${esc(p.submit_selector)}" spellcheck="false" required></label></details>
@@ -1668,9 +1915,18 @@ function profileDialog(deviceId, profile = null, targets = null) {
       bindTargetPicker(form);
       const reveal = $('[data-reveal]', form);
       reveal.onchange = () => { form.password.type = reveal.checked ? 'text' : 'password'; };
+      // hidden fields must not block the form: the login page and the selectors are not used by HTTP log-ins
+      const sync = () => {
+        const type = form.auth_type.value;
+        $$('[data-type-only]', form).forEach(el => { el.hidden = el.dataset.typeOnly !== type; });
+        for (const name of ['login_url', 'user_selector', 'pass_selector', 'submit_selector']) form[name].required = type === 'form';
+      };
+      form.auth_type.onchange = sync;
+      sync();
     },
     onSubmit: data => {
-      const payload = { name: data.name.trim(), login_url: data.login_url.trim(), target_url: data.target_url.trim(),
+      const http = data.auth_type === 'http';
+      const payload = { name: data.name.trim(), auth_type: http ? 'http' : 'form', login_url: http ? '' : data.login_url.trim(), target_url: data.target_url.trim(),
         user_selector: data.user_selector.trim(), pass_selector: data.pass_selector.trim(), submit_selector: data.submit_selector.trim() };
       if (data.username.trim()) payload.username = data.username.trim();
       if (data.password) payload.password = data.password;
@@ -1971,6 +2227,40 @@ const ACTIONS_UI = {
   clearSel() { S.selected.clear(); render(); },
   addAsset(b) { assetDialog(b.dataset.id, b.dataset.kind); },
   addProfile(b) { profileDialog(b.dataset.id); },
+  notifySend(b) { notifyDialog([b.dataset.id]); },
+  async notifyClear(b) {
+    if (!await confirmBox(t('confirmNotifyClear'))) return;
+    await sendCommand(b.dataset.id, 'notify_clear');
+  },
+  notifySettings(b) { notifySettingsDialog([b.dataset.id], S.detail?.notifications?.settings); },
+  addWatcher(b) { watcherDialog(b.dataset.id); },
+  editWatcher(b) {
+    const w = (S.detail?.notifications?.watchers || []).find(x => String(x.id) === b.dataset.watcher);
+    if (w) watcherDialog(b.dataset.id, w);
+  },
+  toggleWatcher(b) { return sendCommand(b.dataset.id, 'update_watcher', { id: b.dataset.watcher, enabled: b.dataset.on === '1' }); },
+  checkWatcher(b) { return sendCommand(b.dataset.id, 'check_watcher', { id: b.dataset.watcher }); },
+  async deleteWatcher(b) {
+    if (!await confirmBox(t('confirmDeleteItem', { name: esc(b.dataset.name) }))) return;
+    await sendCommand(b.dataset.id, 'delete_watcher', { id: b.dataset.watcher });
+  },
+  bulkNotify() { notifyDialog([...S.selected]); },
+  bulkNotifySettings() {
+    const ids = [...S.selected];
+    if (!ids.every(id => dev(id) && notifySupport(dev(id)) === 'ok')) toast(t('notifySomeUnsupported'), 'warn');
+    notifySettingsDialog(ids, null);
+  },
+  bulkWatcher() { const ids = [...S.selected]; watcherDialog(ids[0], null, ids); },
+  notifyTokenEdit(b) {
+    const tok = b.dataset.tid ? ($('#ntfTokens')?._tokens || []).find(x => String(x.id) === b.dataset.tid) : null;
+    notifyTokenDialog(tok);
+  },
+  async notifyTokenDelete(b) {
+    if (!await confirmBox(t('confirmDeleteNotifyToken', { name: esc(b.dataset.name) }))) return;
+    await api('/api/notify-tokens/' + b.dataset.tid, { method: 'DELETE' });
+    toast(t('deleted'));
+    render(true);
+  },
   editProfile(b) {
     const p = (S.detail?.profiles || []).find(x => String(x.id) === b.dataset.profile);
     if (p) profileDialog(b.dataset.id, p);

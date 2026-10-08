@@ -31,7 +31,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.6.1'
+VERSION = '4.7.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -67,12 +67,34 @@ ENDPOINTS = {
     'add_profile': ('POST', '/api/fleet/v1/profiles'),
     'update_profile': ('PUT', '/api/fleet/v1/profiles/{id}'),
     'delete_profile': ('DELETE', '/api/fleet/v1/profiles/{id}'),
+    # on-screen notifications (CARACAL 2026.10.08 and newer)
+    'notify': ('POST', '/api/fleet/v1/notify'),
+    'notify_settings': ('PUT', '/api/fleet/v1/notify/settings'),
+    'notify_clear': ('POST', '/api/fleet/v1/notify/clear'),
+    'add_watcher': ('POST', '/api/fleet/v1/notify/watchers'),
+    'update_watcher': ('PUT', '/api/fleet/v1/notify/watchers/{id}'),
+    'delete_watcher': ('DELETE', '/api/fleet/v1/notify/watchers/{id}'),
+    'check_watcher': ('POST', '/api/fleet/v1/notify/watchers/{id}/check'),
 }
 GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale')
 # Login profiles of web pages: the credentials are stored encrypted on the node and only travel to it.
+# auth_type: 'form' (log-in form on the page) or 'http' (HTTP Basic/Digest, the browser's pop-up)
 PROFILE_FIELDS = ('name', 'login_url', 'target_url', 'username', 'password', 'user_selector', 'pass_selector',
-                  'submit_selector')
-PROFILE_PUBLIC = ('id', 'name', 'login_url', 'target_url', 'user_selector', 'pass_selector', 'submit_selector')
+                  'submit_selector', 'auth_type')
+PROFILE_PUBLIC = ('id', 'name', 'login_url', 'target_url', 'user_selector', 'pass_selector', 'submit_selector',
+                  'auth_type')
+# Notification settings and watchers of the node. Watcher credentials (username, secret, client_secret,
+# refresh_token) only travel to the node like login credentials; the node never reports them back.
+NOTIFY_SETTINGS = ('enabled', 'position', 'duration', 'max_queue', 'scale', 'sound', 'volume', 'sound_device',
+                   'history_max', 'history_days')
+WATCHER_FIELDS = ('name', 'url', 'auth_type', 'auth_header', 'username', 'secret', 'client_secret', 'refresh_token',
+                  'list_path', 'id_field', 'title_template', 'message_template', 'level', 'level_field', 'interval',
+                  'verify_tls', 'enabled', 'oauth_token_url', 'oauth_grant', 'oauth_client_id', 'oauth_scope',
+                  'oauth_extra', 'oauth_client_auth')
+WATCHER_PUBLIC = ('id', 'name', 'url', 'auth_type', 'auth_header', 'list_path', 'id_field', 'title_template',
+                  'message_template', 'level', 'level_field', 'interval', 'verify_tls', 'enabled', 'initialized',
+                  'last_check', 'last_error', 'last_count', 'last_new', 'oauth_token_url', 'oauth_grant',
+                  'oauth_client_id', 'oauth_scope', 'oauth_extra', 'oauth_client_auth', 'has_credentials')
 MEDIA_KINDS = ('image', 'video')
 COLLECTION_KIND = 'grafana-tag'   # Grafana collections are playlist assets of this kind on CARACAL nodes
 PLAYER_STALE = 15                 # seconds without a player heartbeat before the player counts as down
@@ -185,6 +207,18 @@ class Agent:
         # never more than the node shows (no credentials), also if a node version sent other columns
         return [{k: p.get(k) for k in PROFILE_PUBLIC if k in p} for p in snap.get('profiles') or []
                 if isinstance(p, dict)]
+
+    @staticmethod
+    def notifications_of(snap):
+        # None for nodes without notifications, so the hub can tell them apart from an empty configuration
+        n = snap.get('notifications')
+        if not isinstance(n, dict):
+            return None
+        settings = n.get('settings') if isinstance(n.get('settings'), dict) else {}
+        return {'settings': {k: settings[k] for k in NOTIFY_SETTINGS if k in settings},
+                'waiting': n.get('waiting'), 'current': n.get('current'), 'tokens': n.get('tokens'),
+                'watchers': [{k: w.get(k) for k in WATCHER_PUBLIC if k in w} for w in n.get('watchers') or []
+                             if isinstance(w, dict)]}
 
     @classmethod
     def collections_of(cls, snap):
@@ -327,7 +361,7 @@ class Agent:
             'uptime': int(time.time() - psutil.boot_time()), 'load': [round(x, 2) for x in psutil.getloadavg()],
             'api_ok': api_ok, 'api_error': api_error, 'player': player,
             'assets': self.assets_of(snap), 'collections': snap.get('collections') or [],
-            'profiles': self.profiles_of(snap),
+            'profiles': self.profiles_of(snap), 'notifications': self.notifications_of(snap),
             'frozen_until': self.state.get('unfreeze_at'), 'last_error': self.last_error,
             'capabilities': self.capabilities() if api_ok else {},
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
@@ -475,6 +509,36 @@ class Agent:
 
     def do_delete_profile(self, p):
         return self.body(self.local('delete_profile', {'id': p['id']}))
+
+    # notifications ------------------------------------------------
+
+    def do_notify(self, p):
+        # the payload is what the node accepts on /api/notify/v1: {title, message, level, ...} or a webhook body
+        return self.body(self.local('notify', json=p))
+
+    def do_notify_settings(self, p):
+        return self.body(self.local('notify_settings', json={k: p[k] for k in NOTIFY_SETTINGS if k in p}))
+
+    def do_notify_clear(self, p):
+        return self.body(self.local('notify_clear'))
+
+    @staticmethod
+    def watcher_fields(p):
+        return {k: p[k] for k in WATCHER_FIELDS if p.get(k) is not None}
+
+    def do_add_watcher(self, p):
+        res = self.body(self.local('add_watcher', json=self.watcher_fields(p)))
+        return {'id': item_id(res), 'name': p.get('name')}
+
+    def do_update_watcher(self, p):
+        res = self.body(self.local('update_watcher', {'id': p['id']}, json=self.watcher_fields(p)))
+        return {'id': p['id'], 'name': p.get('name'), 'reset': bool(isinstance(res, dict) and res.get('reset'))}
+
+    def do_delete_watcher(self, p):
+        return self.body(self.local('delete_watcher', {'id': p['id']}))
+
+    def do_check_watcher(self, p):
+        return self.body(self.local('check_watcher', {'id': p['id']}, timeout=60))
 
     def do_delete_asset(self, p):
         return self.body(self.local('delete_asset', {'id': p['id']}))
@@ -663,17 +727,31 @@ class Agent:
         env['CARACAL_VERSION'] = version
         if p.get('image'):
             env['CARACAL_IMAGE'] = str(p['image'])
+        # the compose file of the hub comes with every update, so existing nodes get new container settings too
+        # (e.g. the sound device of the overlay); it is restored with the previous version on failure
+        compose_file = NODE_DIR / 'compose.yml'
+        old_compose = compose_file.read_text() if compose_file.is_file() else None
+        new_compose = self.hub_compose()
+        env.setdefault('CARACAL_AUDIO_GID', group_id('audio') or '29')
+
+        def restore():
+            write_env(previous)
+            if old_compose is not None:
+                write_text_file(compose_file, old_compose)
+
         log('CARACAL update', previous.get('CARACAL_VERSION', '?'), '->', version)
         self.maintenance = 'caracal_update'
         try:
             write_env(env)
+            if new_compose and new_compose != old_compose:
+                write_text_file(compose_file, new_compose)
             code, out = self.run_with_heartbeats(['docker', 'compose', '--project-directory', str(NODE_DIR), 'pull'])
             if code != 0:
-                write_env(previous)
+                restore()
                 raise RuntimeError(f'Image download failed, nothing changed:\n{out[-3000:]}')
             code, up = self.compose('up', '-d', '--remove-orphans')
             if code != 0 or not self.wait_for_caracal():
-                write_env(previous)
+                restore()
                 self.compose('up', '-d', '--remove-orphans')
                 raise RuntimeError(f'CARACAL {version} did not start, previous version restored:\n{up[-3000:]}')
             try:  # free untagged layers; tagged previous versions stay available for a manual rollback
@@ -684,6 +762,16 @@ class Agent:
             return {'version': version, 'image': env.get('CARACAL_IMAGE')}
         finally:
             self.maintenance = ''
+
+    def hub_compose(self):
+        """The current compose file of the CARACAL node from the hub; None keeps the node's own."""
+        try:
+            r = self.session.get(f'{self.hub_url}/api/bootstrap/caracal-compose.yml', timeout=30)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            log('compose file not downloaded, the current one is kept:', e)
+            return None
+        return r.text if 'services:' in r.text else None
 
     def do_convert_to_docker(self, p):
         """Convert a classic CARACAL node (or a bare system) to CARACAL on Docker with install-node.sh.
@@ -872,6 +960,22 @@ def read_env():
     except OSError:
         pass
     return out
+
+
+def group_id(name):
+    """Host group id as text (e.g. audio), None when it does not exist."""
+    try:
+        import grp
+        return str(grp.getgrnam(name).gr_gid)
+    except (ImportError, KeyError):
+        return None
+
+
+def write_text_file(path, text):
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    tmp.write_text(text)
+    os.chmod(tmp, 0o644)
+    tmp.replace(path)
 
 
 def write_env(values):

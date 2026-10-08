@@ -27,6 +27,13 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Login profile | `POST /profiles` | `{name, login_url, target_url, username, password, user_selector, pass_selector, submit_selector}` → `{id}` |
 | Edit login | `PUT /profiles/{id}` | the same fields; empty `username`/`password`/selectors keep the stored values |
 | Delete login | `DELETE /profiles/{id}` | pages that used it stay in the playlist without login → `{unassigned}` |
+| Notification | `POST /notify` | `{title, message, level, duration, key, sound}` or a webhook body (Grafana, Alertmanager, Uptime Kuma) |
+| Notification settings | `PUT /notify/settings` | any of `enabled, position, duration, max_queue, scale, sound, volume, sound_device, history_max, history_days`; missing keys stay |
+| Clear notifications | `POST /notify/clear` | removes waiting notifications and the one on screen → `{cleared}` |
+| Watcher | `POST /notify/watchers` | `{name, url, auth_type, auth_header, username, secret, client_secret, refresh_token, list_path, id_field, title_template, message_template, level, level_field, interval, verify_tls, enabled, oauth_*}` → `{id}` |
+| Edit watcher | `PUT /notify/watchers/{id}` | the same fields; empty credentials keep the stored ones → `{reset}` (true when the URL or list changed) |
+| Delete watcher | `DELETE /notify/watchers/{id}` | |
+| Check watcher | `POST /notify/watchers/{id}/check` | checks now → `{ok, count, new, sent, first}` or `{ok: false, error}` |
 
 All paths start with `/api/fleet/v1`. CARACAL rules: the display time is at least 5 s (videos loop for the whole
 time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.mp4 .webm .mkv`.
@@ -50,7 +57,12 @@ time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.m
   "player": {"current_id": 300001, "current_name": "Production · Dashboard", "frozen": false,
              "collection_frozen": true, "collection_id": 3, "remaining": 12, "duration": 60,
              "updated": 1791281688.2, "player_online": true},
-  "requests": {"reboot": 0, "restart_player": 0}
+  "requests": {"reboot": 0, "restart_player": 0},
+  "notifications": {"settings": {"enabled": true, "position": "top-right", "duration": 8, "sound": "off", "...": "..."},
+                    "waiting": 0, "current": null, "tokens": 1,
+                    "watchers": [{"id": 1, "name": "Helpdesk", "url": "https://…", "auth_type": "bearer", "interval": 60,
+                                  "enabled": 1, "last_check": 1791281688.2, "last_count": 12, "last_error": null,
+                                  "has_credentials": 1}]}
 }
 ```
 
@@ -62,6 +74,12 @@ time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.m
   A page with a login opens `login_url`, fills in the form and then shows `target_url`.
 - The hub forwards credentials to the agent only: they are removed from the stored command as soon as the agent
   fetched it (or it was cancelled or expired) and never appear in the command history or the audit.
+- `profiles[].auth_type` is `form` (the player fills the log-in form) or `http` (HTTP Basic/Digest, the browser's
+  pop-up: only `target_url` and the credentials are used; `login_url` may be empty and becomes `target_url`).
+- `notifications` exists on CARACAL with on-screen notifications (2026.10.08 and newer). Watchers never contain
+  their credentials or the IDs they have seen; put API keys into the authentication fields rather than into the URL,
+  because the URL is reported to the hub. Changes made through the Fleet API appear in the node's notification audit
+  log as "CARACAL Fleet".
 - `requests` counts restarts requested in the node's own admin UI. In Docker the app cannot reboot the host, so
   the agent performs a reboot when the counter increases.
 

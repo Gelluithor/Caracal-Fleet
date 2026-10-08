@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import re
 import secrets
 import time
 from urllib.parse import unquote
@@ -11,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import console, images, playlists, provisioning, releases, sdcard, system
+from . import console, images, notify, playlists, provisioning, releases, sdcard, system
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -28,6 +29,7 @@ app.include_router(releases.router)
 app.include_router(images.router)
 app.include_router(sdcard.router)       # before /api/bootstrap/{name} (node-config)
 app.include_router(console.router)      # SSH web console (WebSocket)
+app.include_router(notify.router)       # notification API for other apps and its tokens
 
 SECURITY_HEADERS = {
     # no inline scripts, no third-party resources; inline styles are used for progress bars
@@ -343,6 +345,21 @@ def validate_command(c, row, action, payload):
         if action == 'convert_to_docker' and rt == 'docker':
             raise HTTPException(409, 'already_docker')
         payload = {'version': version, 'image': images.node_image()}
+    if action in NOTIFY_CAPABILITY and (status.get('capabilities') or {}).get(NOTIFY_CAPABILITY[action]) is False:
+        raise HTTPException(409, 'notifications_unsupported')
+    if action == 'notify':
+        payload = validate_notification(payload)
+    if action == 'notify_settings':
+        payload = validate_notify_settings(payload)
+    if action in ('add_watcher', 'update_watcher'):
+        payload = {**({'id': payload['id']} if payload.get('id') not in (None, '') else {}),
+                   **validate_watcher(payload, required=action == 'add_watcher')}
+    if action in ('update_watcher', 'delete_watcher', 'check_watcher'):
+        if payload.get('id') in (None, ''):
+            raise HTTPException(400, 'item_required')
+        watchers = (status.get('notifications') or {}).get('watchers')
+        if watchers is not None and str(payload['id']) not in [str(w.get('id')) for w in watchers]:
+            raise HTTPException(409, 'watcher_not_found')
     if action == 'set_hub':
         hub = text(payload.get('hub'), 500).rstrip('/')
         if not hub.lower().startswith(('https://', 'http://')):
@@ -385,14 +402,21 @@ def validate_profile_ref(value, known):
 
 
 def validate_profile(d, required=True):
-    """Login profile of a web page (CARACAL fills the login form, then opens the target page).
+    """Login profile of a web page: 'form' = CARACAL fills the login form, then opens the target page;
+    'http' = HTTP Basic/Digest (the browser's pop-up), only the target address and the credentials matter.
     On edits an empty username or password keeps the stored one; empty selectors keep theirs."""
     out = {}
+    if 'auth_type' in d:
+        out['auth_type'] = text(d.get('auth_type'), 10) or 'form'
+        if out['auth_type'] not in PROFILE_TYPES:
+            raise HTTPException(400, 'invalid_value')
     if required or 'name' in d:
         out['name'] = text(d.get('name'), 200)
         if not out['name']:
             raise HTTPException(400, 'name_required')
     for key in ('login_url', 'target_url'):
+        if key == 'login_url' and out.get('auth_type') == 'http' and not text(d.get(key), 4000):
+            continue   # the node uses the target address
         if required or key in d:
             out[key] = text(d.get(key), 4000)
             if not out[key].lower().startswith(('http://', 'https://')):
@@ -407,6 +431,105 @@ def validate_profile(d, required=True):
         out['username'] = username
     if password:
         out['password'] = password
+    return out
+
+
+PROFILE_TYPES = ('form', 'http')
+NOTIFY_LEVELS = ('info', 'success', 'warning', 'critical')
+NOTIFY_POSITIONS = ('top-right', 'top-left', 'top', 'bottom-right', 'bottom-left', 'bottom', 'center')
+NOTIFY_SOUNDS = ('off', 'critical', 'warning', 'all')
+NOTIFY_LIMITS = {'duration': (3, 120), 'max_queue': (1, 200), 'scale': (50, 300), 'volume': (0, 100),
+                 'history_max': (50, 5000), 'history_days': (1, 90)}
+WATCHER_AUTH = ('none', 'bearer', 'basic', 'header', 'oauth2')
+WATCHER_TEXT = {'name': 60, 'url': 4000, 'auth_header': 100, 'list_path': 200, 'id_field': 200,
+                'title_template': 500, 'message_template': 1000, 'level_field': 200, 'oauth_token_url': 4000,
+                'oauth_client_id': 500, 'oauth_scope': 1000, 'oauth_extra': 1000}
+WATCHER_CHOICES = {'auth_type': WATCHER_AUTH, 'oauth_grant': ('client_credentials', 'password', 'refresh_token'),
+                   'oauth_client_auth': ('body', 'basic'), 'level': NOTIFY_LEVELS}
+WATCHER_SECRETS = ('username', 'secret', 'client_secret', 'refresh_token')
+# command -> local endpoint of the node (capability reported by the agent)
+NOTIFY_CAPABILITY = {'notify': 'notify', 'notify_clear': 'notify_clear', 'notify_settings': 'notify_settings',
+                     'add_watcher': 'add_watcher', 'update_watcher': 'update_watcher',
+                     'delete_watcher': 'delete_watcher', 'check_watcher': 'check_watcher'}
+
+
+def flag(v):
+    return v not in (False, 0, '0', 'false', 'off', 'no', '', None)
+
+
+def bounded(v, lo, hi):
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'invalid_value')
+    if not lo <= n <= hi:
+        raise HTTPException(400, 'invalid_value')
+    return n
+
+
+def validate_notification(d):
+    """A notification typed in Fleet (the same fields as the node's notification API)."""
+    out = {'title': text(d.get('title'), 120), 'message': text(d.get('message'), 600)}
+    if not out['title'] and not out['message']:
+        raise HTTPException(400, 'notification_text_required')
+    out = {k: v for k, v in out.items() if v}
+    out['level'] = text(d.get('level'), 20) or 'info'
+    if out['level'] not in NOTIFY_LEVELS:
+        raise HTTPException(400, 'invalid_value')
+    if d.get('duration') not in (None, ''):
+        out['duration'] = bounded(d['duration'], 3, 120)
+    if d.get('sound') not in (None, ''):
+        out['sound'] = flag(d['sound'])
+    if text(d.get('key'), 200):
+        out['key'] = text(d.get('key'), 200)
+    return out
+
+
+def validate_notify_settings(d):
+    """Notification settings of a node; keys that are not sent stay as they are on the node."""
+    out = {}
+    if 'enabled' in d:
+        out['enabled'] = flag(d['enabled'])
+    for key, choices in (('position', NOTIFY_POSITIONS), ('sound', NOTIFY_SOUNDS)):
+        if key in d:
+            if d[key] not in choices:
+                raise HTTPException(400, 'invalid_value')
+            out[key] = d[key]
+    for key, (lo, hi) in NOTIFY_LIMITS.items():
+        if d.get(key) not in (None, ''):
+            out[key] = bounded(d[key], lo, hi)
+    if 'sound_device' in d:
+        out['sound_device'] = text(d['sound_device'], 100)
+        if not re.fullmatch(r'[A-Za-z0-9:=,._-]*', out['sound_device']):
+            raise HTTPException(400, 'invalid_value')
+    if not out:
+        raise HTTPException(400, 'nothing_to_change')
+    return out
+
+
+def validate_watcher(d, required=True):
+    """A watcher: the node asks another app's JSON API and announces new items. Credentials only reach the node;
+    on edits empty credentials keep the stored ones. The node checks the rest (e.g. OAuth2 fields)."""
+    out = {k: text(d[k], limit) for k, limit in WATCHER_TEXT.items() if k in d}
+    if (required or 'name' in out) and not out.get('name'):
+        raise HTTPException(400, 'name_required')
+    for key in ('url', 'oauth_token_url'):
+        if (out.get(key) or (required and key == 'url')) and not out.get(key, '').lower().startswith(('http://', 'https://')):
+            raise HTTPException(400, 'invalid_url')
+    for key, choices in WATCHER_CHOICES.items():
+        if key in d:
+            if d[key] not in choices:
+                raise HTTPException(400, 'invalid_value')
+            out[key] = d[key]
+    if d.get('interval') not in (None, ''):
+        out['interval'] = bounded(d['interval'], 15, 86400)
+    for key in ('verify_tls', 'enabled'):
+        if key in d:
+            out[key] = flag(d[key])
+    for key in WATCHER_SECRETS:
+        value = str(d.get(key) or '').strip()[:4000]
+        if value:
+            out[key] = value
     return out
 
 

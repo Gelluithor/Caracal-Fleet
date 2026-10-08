@@ -46,8 +46,19 @@ def profiles_of(status):
         if isinstance(p, dict) and p.get('id') is not None:
             out.append({'id': p['id'], **{k: p.get(k) or '' for k in ('name', 'login_url', 'target_url',
                                                                       'user_selector', 'pass_selector',
-                                                                      'submit_selector')}})
+                                                                      'submit_selector')},
+                        'auth_type': 'http' if p.get('auth_type') == 'http' else 'form'})
     return out
+
+
+def notifications_of(status):
+    """On-screen notifications of the node (agents from 4.7 on CARACAL with notifications); None = not reported."""
+    n = status.get('notifications')
+    if not isinstance(n, dict):
+        return None
+    return {'settings': n.get('settings') if isinstance(n.get('settings'), dict) else {},
+            'waiting': n.get('waiting') or 0, 'current': n.get('current'), 'tokens': n.get('tokens') or 0,
+            'watchers': [w for w in n.get('watchers') or [] if isinstance(w, dict)]}
 
 
 def player_of(status):
@@ -105,6 +116,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
     assets = [normalize_asset(a) for a in status.get('assets') or []]
     collections = collections_of(status)
     profiles = profiles_of(status)
+    notifications = notifications_of(status)
     d = {
         'id': row['id'], 'name': row['name'] or row['id'], 'ip': status.get('ip') or row['ip'] or '',
         'version': row['version'] or '', 'last_seen': row['last_seen'], 'online': online,
@@ -119,6 +131,8 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'remaining': player.get('remaining'), 'duration': player.get('duration'),
         'frozen': bool(player.get('frozen')), 'frozen_until': status.get('frozen_until'),
         'playlist_count': len(assets), 'collection_count': len(collections), 'profile_count': len(profiles),
+        'notify_waiting': notifications['waiting'] if notifications else None,
+        'watcher_count': len(notifications['watchers']) if notifications else 0,
         'status_age': now - (row['last_seen'] or now),
         'capabilities': status.get('capabilities') or {},
         'caracal_version': status.get('caracal_version') or '', 'maintenance': status.get('maintenance') or '',
@@ -150,4 +164,5 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         d['assets'] = assets
         d['collections'] = collections
         d['profiles'] = profiles
+        d['notifications'] = notifications
     return d

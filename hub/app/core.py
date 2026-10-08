@@ -68,11 +68,20 @@ ACTIONS = {
     'set_hub': ('manage', None),
     'update_caracal': ('manage', 600),
     'convert_to_docker': ('manage', 600),
+    # on-screen notifications of the nodes
+    'notify': ('control', 600),
+    'notify_clear': ('control', 600),
+    'notify_settings': ('content', None),
+    'add_watcher': ('content', None),
+    'update_watcher': ('content', None),
+    'delete_watcher': ('content', None),
+    'check_watcher': ('content', 600),
 }
 
-# Payload keys that must not stay in the hub: login credentials of web pages travel only to the node.
-SECRET_KEYS = ('username', 'password')
-SECRET_ACTIONS = ('add_profile', 'update_profile')
+# Payload keys that must not stay in the hub: login credentials of web pages and of notification watchers travel
+# only to the node.
+SECRET_KEYS = ('username', 'password', 'secret', 'client_secret', 'refresh_token')
+SECRET_ACTIONS = ('add_profile', 'update_profile', 'add_watcher', 'update_watcher')
 REDACTED = '•••'
 
 
@@ -145,6 +154,9 @@ CREATE TABLE IF NOT EXISTS node_releases(id INTEGER PRIMARY KEY AUTOINCREMENT, v
   file_id TEXT, filename TEXT, size INTEGER, sha256 TEXT, username TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS global_deployments(id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER,
   batch TEXT, mode TEXT, targets_json TEXT, username TEXT, created REAL);
+CREATE TABLE IF NOT EXISTS notify_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token_hash TEXT UNIQUE,
+  prefix TEXT, scope_json TEXT DEFAULT '{}', rate_per_min INTEGER DEFAULT 30, enabled INTEGER DEFAULT 1, created REAL,
+  created_by TEXT DEFAULT '', last_used REAL);
 CREATE INDEX IF NOT EXISTS idx_commands_device_state ON commands(device_id, state);
 """
 

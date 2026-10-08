@@ -6,8 +6,11 @@ with one `docker compose up`. Every organisation runs its own Fleet; nothing is 
 - **Monitoring:** online state, CPU, RAM, disk, temperature and what each screen is playing right now, plus
   a *Needs attention* list with the reason for each issue
 - **Content:** playlists with web pages, images, videos and Grafana collections; logins for web pages that need
-  a username and password (stored encrypted on the node only); show or freeze an item, skip, resume, restart the
-  player or the device
+  a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
+  show or freeze an item, skip, resume, restart the player or the device
+- **On-screen notifications:** send a notification to one screen or many, change the notification settings (position,
+  size, sound, limits) and manage watchers that announce new tickets or issues from other apps; a notification API
+  lets other apps reach many screens with one request
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations
 - **Zero-touch installation:** prepare an SD card in Fleet, or find a fresh Raspberry Pi in the network and
@@ -70,6 +73,24 @@ the CARACAL containers and the Fleet Agent.
 
 Diagnostics on a node: `sudo python3 /opt/caracal-agent/agent.py check`, `journalctl -u caracal-agent -f`,
 `/var/log/caracal-firstboot.log` (SD card installation).
+
+## Notification API for other apps
+
+*Settings → Notification API* (manager and admin) creates a token per app. A token is shown once, Fleet keeps its hash,
+and it reaches either all screens or chosen groups, locations and devices. The app sends:
+
+```bash
+curl -X POST https://fleet.example/api/notify \
+  -H "Authorization: Bearer cft_..." -H "Content-Type: application/json" \
+  -d '{"title":"Backup finished","message":"DB01","level":"success"}'
+```
+
+Fleet queues one notification per screen; every node keeps its own queue and limits. The body is passed to the nodes
+unchanged, so JSON (`title`, `message`, `level` info/success/warning/critical, `duration`, `key`, `sound`), Grafana
+and Alertmanager webhooks, Uptime Kuma webhooks and plain text with the `Title` and `X-Level` headers all work. The
+token can also be sent as `X-Caracal-Token` or as the Basic auth password. `?group=`, `?location=` and `?device=`
+narrow the request to part of the token's screens. Each token has a rate limit (30 requests per minute by default);
+refused tokens are audited. Screens whose CARACAL has no notifications are skipped (`skipped` in the response).
 
 ## Updating CARACAL on the nodes
 

@@ -216,6 +216,7 @@ CARACAL_UID=$(id -u caracal)
 CARACAL_GID=$(id -g caracal)
 CARACAL_VIDEO_GID=$(gid_of video || echo 44)
 CARACAL_RENDER_GID=$(gid_of render || gid_of video || echo 44)
+CARACAL_AUDIO_GID=$(gid_of audio || echo 29)
 EOF
 cd "$NODE_DIR"
 docker compose pull

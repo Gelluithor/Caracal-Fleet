@@ -250,3 +250,158 @@ def test_login_profiles(env):
     assert next(x for x in node_assets(env) if x['id'] == page['id'])['auth_profile_id'] is None
     assert pid not in [p['id'] for p in device(env)['profiles']]
     run(env, 'delete_asset', {'id': page['id']})
+
+
+def node_notifications(env, where='done=0'):
+    return env['mod'].rows(f'SELECT * FROM notifications WHERE {where} ORDER BY id')
+
+
+def test_notifications_from_fleet(env):
+    """Sending, clearing and the settings of on-screen notifications go through the node's Fleet API."""
+    d = device(env)
+    assert all(d['capabilities'][k] for k in ('notify', 'notify_settings', 'notify_clear', 'add_watcher'))
+    assert d['notifications']['settings']['position'] == 'top-right' and d['notifications']['watchers'] == []
+
+    run(env, 'notify', {'title': 'Porada', 'message': 'Za 5 minut v zasedačce', 'level': 'warning', 'sound': True})
+    n = node_notifications(env)[-1]
+    assert (n['title'], n['level'], n['source'], n['sound']) == ('Porada', 'warning', 'CARACAL Fleet', 1)
+    env['agent'].heartbeat()
+    assert device(env)['notifications']['waiting'] >= 1
+
+    run(env, 'notify_settings', {'position': 'bottom-left', 'sound': 'critical', 'volume': 40, 'history_max': 100})
+    s = env['mod']._ntf_settings()
+    assert (s['position'], s['sound'], s['volume'], s['history_max'], s['duration']) == ('bottom-left', 'critical', 40, 100, 8)
+    assert device(env)['notifications']['settings']['position'] == 'bottom-left'
+    audit = env['mod'].rows("SELECT * FROM notify_audit WHERE action='Nastavení změněno' ORDER BY id DESC LIMIT 1")[0]
+    assert audit['actor'] == 'CARACAL Fleet' and 'bottom-left' in audit['detail']
+
+    run(env, 'notify_clear')
+    assert node_notifications(env) == []
+
+    # the hub rejects what the node would reject, before queueing
+    url = f"{env['hub']}/api/devices/{env['id']}/commands"
+    bad = [('notify', {'level': 'info'}, 'notification_text_required'),
+           ('notify', {'title': 'x', 'level': 'loud'}, 'invalid_value'),
+           ('notify_settings', {'position': 'left'}, 'invalid_value'),
+           ('notify_settings', {'volume': 101}, 'invalid_value'),
+           ('notify_settings', {'sound_device': 'hw;reboot'}, 'invalid_value'),
+           ('notify_settings', {}, 'nothing_to_change')]
+    for action, payload, code in bad:
+        r = requests.post(url, headers=env['h'], json={'action': action, 'payload': payload})
+        assert r.json().get('detail') == code, (action, r.text)
+    run(env, 'notify_settings', {'position': 'top-right', 'sound': 'off', 'volume': 70, 'history_max': 500})
+
+
+def test_watchers_from_fleet(env):
+    """Watchers are created from Fleet; their credentials reach only the node, encrypted, like login profiles."""
+    from fastapi import FastAPI
+    from app.core import db
+    api = FastAPI()
+    tickets = [{'id': 1, 'subject': 'Tiskárna'}]
+    api.get('/tickets')(lambda: {'items': tickets})
+    api_url, _ = serve(api)
+
+    row = run(env, 'add_watcher', {'name': 'Helpdesk', 'url': api_url + '/tickets', 'auth_type': 'bearer',
+                                   'secret': 'T0ken-secret', 'list_path': 'items', 'id_field': 'id',
+                                   'title_template': 'Ticket #{id}: {subject}', 'interval': 600})
+    wid = json.loads(row['result'])['id']
+    stored = env['mod'].rows('SELECT * FROM notify_watchers WHERE id=?', (wid,))[0]
+    assert b'T0ken-secret' not in stored['credentials_enc'] and env['mod']._wch_credentials(stored)['secret'] == 'T0ken-secret'
+    # the hub keeps no credentials: history, audit, the stored command and the reported state
+    assert 'T0ken' not in row['payload_json']
+    with db() as c:
+        assert 'T0ken' not in c.execute('SELECT payload_json FROM commands WHERE id=?', (row['id'],)).fetchone()[0]
+        assert not c.execute("SELECT 1 FROM audit WHERE detail LIKE '%T0ken%'").fetchone()
+        assert 'T0ken' not in c.execute('SELECT status_json FROM devices WHERE id=?', (env['id'],)).fetchone()[0]
+    w = next(x for x in device(env)['notifications']['watchers'] if x['id'] == wid)
+    assert w['name'] == 'Helpdesk' and w['has_credentials'] and 'secret' not in w and 'seen' not in w
+
+    # the first check remembers, the next one announces a new ticket
+    assert json.loads(run(env, 'check_watcher', {'id': wid})['result'])['first'] is True
+    tickets.append({'id': 2, 'subject': 'Wi-Fi'})
+    assert json.loads(run(env, 'check_watcher', {'id': wid})['result'])['new'] == 1
+    assert node_notifications(env)[-1]['title'] == 'Ticket #2: Wi-Fi'
+
+    # edits without credentials keep them; turning off and deleting
+    run(env, 'update_watcher', {'id': wid, 'name': 'Helpdesk 2', 'secret': ''})
+    stored = env['mod'].rows('SELECT * FROM notify_watchers WHERE id=?', (wid,))[0]
+    assert stored['name'] == 'Helpdesk 2' and env['mod']._wch_credentials(stored)['secret'] == 'T0ken-secret'
+    run(env, 'update_watcher', {'id': wid, 'enabled': False})
+    assert not env['mod'].rows('SELECT enabled FROM notify_watchers WHERE id=?', (wid,))[0]['enabled']
+    url = f"{env['hub']}/api/devices/{env['id']}/commands"
+    for action, payload, code in [('add_watcher', {'name': 'x', 'url': 'ftp://x'}, 'invalid_url'),
+                                  ('add_watcher', {'url': 'https://x.example'}, 'name_required'),
+                                  ('add_watcher', {'name': 'x', 'url': 'https://x.example', 'interval': 5}, 'invalid_value'),
+                                  ('delete_watcher', {'id': 999}, 'watcher_not_found')]:
+        r = requests.post(url, headers=env['h'], json={'action': action, 'payload': payload})
+        assert r.json().get('detail') == code, (action, r.text)
+    run(env, 'delete_watcher', {'id': wid})
+    assert not env['mod'].rows('SELECT id FROM notify_watchers WHERE id=?', (wid,))
+    run(env, 'notify_clear')
+
+
+def test_http_login_profile(env):
+    """HTTP Basic/Digest log-ins (the browser pop-up) need only the server address and the credentials."""
+    row = run(env, 'add_profile', {'auth_type': 'http', 'name': 'Router', 'target_url': 'https://router.example/',
+                                   'username': 'admin', 'password': 'R0uter-pw'})
+    pid = json.loads(row['result'])['id']
+    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    assert player['auth_type'] == 'http' and player['login_url'] == 'https://router.example/' and player['password'] == 'R0uter-pw'
+    assert next(p for p in device(env)['profiles'] if p['id'] == pid)['auth_type'] == 'http'
+    assert 'R0uter' not in row['payload_json']
+    run(env, 'update_profile', {'id': pid, 'name': 'Router 2'})
+    assert requests.get(f"{env['node']}/api/player/profile/{pid}").json()['auth_type'] == 'http'
+    run(env, 'delete_profile', {'id': pid})
+
+
+def test_notification_api_for_apps(env):
+    """An app sends one request to Fleet; Fleet queues it for the screens of the token's scope."""
+    from app import notify
+    h, hub = env['h'], env['hub']
+    created = requests.post(hub + '/api/notify-tokens', headers=h, json={'name': 'Grafana', 'scope': {'all': True}, 'rate_per_min': 3}).json()
+    token, tid = created['token'], created['id']
+    listed = requests.get(hub + '/api/notify-tokens', headers=h).json()
+    assert [x['name'] for x in listed] == ['Grafana'] and 'token_hash' not in listed[0] and listed[0]['prefix'] == token[:10]
+
+    send = lambda body=None, **kw: requests.post(hub + '/api/notify', json=body, **kw)
+    r = send({'title': 'Deploy', 'message': 'Verze 2.4', 'level': 'warning'}, headers={'Authorization': 'Bearer ' + token})
+    # other tests' devices share the hub: the ones without notifications are skipped, not failed
+    assert r.status_code == 200 and env['id'] in r.json()['devices'], r.text
+    assert all(x['reason'] == 'notifications_unsupported' for x in r.json()['skipped'])
+    requests.patch(f'{hub}/api/notify-tokens/{tid}', headers=h, json={'scope': {'devices': [env['id']]}})
+    env['agent'].run_commands()
+    assert node_notifications(env)[-1]['title'] == 'Deploy'
+    cmd = requests.get(f"{hub}/api/commands?device_id={env['id']}", headers=h).json()[0]
+    assert cmd['action'] == 'notify' and cmd['username'] == 'api:Grafana'
+
+    # Grafana webhook body, forwarded unchanged and parsed by the node; Basic auth with the token as password
+    grafana = {'status': 'firing', 'alerts': [{'status': 'firing', 'labels': {'alertname': 'CPU', 'severity': 'critical'},
+                                               'annotations': {'summary': 'CPU 99 %'}, 'fingerprint': 'f1'}]}
+    assert send(grafana, auth=('grafana', token)).status_code == 200
+    # plain text with headers, token in X-Caracal-Token
+    r = requests.post(hub + '/api/notify', data='Záloha hotová'.encode(), headers={'X-Caracal-Token': token, 'Title': 'Záloha', 'X-Level': 'success', 'Content-Type': 'text/plain; charset=utf-8'})
+    assert r.status_code == 200, r.text
+    env['agent'].run_commands()
+    last = node_notifications(env)[-2:]
+    assert (last[0]['title'], last[0]['level']) == ('CPU', 'critical') and (last[1]['title'], last[1]['level']) == ('Záloha', 'success')
+
+    # rate limit, wrong tokens, scope and narrowing
+    assert send({'title': 'x'}, headers={'Authorization': 'Bearer ' + token}).json()['detail'] == 'rate_limited'
+    notify._hits.clear()
+    assert send({'title': 'x'}, headers={'Authorization': 'Bearer cft_wrong'}).status_code == 401
+    assert send({'title': 'x'}).status_code == 401
+    assert send({'level': 'info'}, headers={'Authorization': 'Bearer ' + token}).json()['detail'] == 'notification_text_required'
+    assert send({'title': 'x'}, headers={'Authorization': 'Bearer ' + token}, params={'group': 'Nikde'}).json()['detail'] == 'no_devices'
+    requests.patch(f'{hub}/api/notify-tokens/{tid}', headers=h, json={'scope': {'groups': ['Recepce']}})
+    assert send({'title': 'x'}, headers={'Authorization': 'Bearer ' + token}).json()['detail'] == 'no_devices'
+    requests.patch(f'{hub}/api/notify-tokens/{tid}', headers=h, json={'scope': {'devices': [env['id']]}, 'enabled': False})
+    assert send({'title': 'x'}, headers={'Authorization': 'Bearer ' + token}).status_code == 401
+    assert requests.post(hub + '/api/notify-tokens', headers=h, json={'name': 'x', 'scope': {}}).json()['detail'] == 'invalid_scope'
+    assert requests.delete(f'{hub}/api/notify-tokens/{tid}', headers=h).status_code == 200
+    from app.core import db
+    with db() as c:
+        assert not c.execute('SELECT 1 FROM audit WHERE detail LIKE ?', ('%' + token + '%',)).fetchone()
+        actions = [x[0] for x in c.execute("SELECT action FROM audit WHERE action LIKE 'notify%'")]
+    assert {'notify_token.create', 'notify_token.edit', 'notify_token.delete', 'notify.token_rejected'} <= set(actions)
+    env['agent'].run_commands()
+    run(env, 'notify_clear')

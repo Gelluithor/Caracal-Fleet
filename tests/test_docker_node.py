@@ -10,7 +10,7 @@ import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from conftest import TMP, load_agent, serve
+from conftest import ROOT, TMP, load_agent, serve
 from dev.mock_node import create_app
 
 PW = 'admin-password-123'
@@ -123,6 +123,10 @@ def test_docker_update_and_rollback(env):
     envfile = (NODE_DIR / '.env').read_text()
     assert 'CARACAL_VERSION=2026.10.10' in envfile and f"CARACAL_IMAGE={env['image']}" in envfile
     assert 'CARACAL_UID=1000' in envfile and any('pull' in c for c in calls)
+    # the update brings the hub's compose file (sound for the overlay) and the audio group
+    hub_compose = (ROOT / 'hub' / 'bootstrap' / 'caracal-compose.yml').read_text()
+    assert (NODE_DIR / 'compose.yml').read_text() == hub_compose and '/dev/snd' in hub_compose
+    assert 'CARACAL_AUDIO_GID=' in envfile
     agent.heartbeat()
     d = api(env, 'GET', f"/api/devices/{env['id']}").json()
     assert d['caracal_version'] == '2026.10.10' and 'caracal_outdated' not in [a['code'] for a in d['attention']]
@@ -130,10 +134,12 @@ def test_docker_update_and_rollback(env):
     # the new containers do not start -> previous version restored
     agent.compose = lambda *args, timeout=600: (1, 'container exited') if args[:1] == ('up',) else (0, '')
     r = api(env, 'POST', '/api/node-image/deploy', json={'version': '2026.10.1', 'device_ids': [env['id']]}).json()
+    (NODE_DIR / 'compose.yml').write_text('services: {old: {}}\n')
     agent.run_commands()
     row = command_result(env, r['command_ids'][0])
     assert row['state'] == 'failed' and 'previous version restored' in row['result']
     assert 'CARACAL_VERSION=2026.10.10' in (NODE_DIR / '.env').read_text()
+    assert (NODE_DIR / 'compose.yml').read_text() == 'services: {old: {}}\n'
 
     # the image cannot be downloaded -> nothing changes
     agent.run_with_heartbeats = lambda cmd, cwd=None: (1, 'manifest unknown')
@@ -141,6 +147,7 @@ def test_docker_update_and_rollback(env):
     agent.run_commands()
     assert 'nothing changed' in command_result(env, r['command_ids'][0])['result']
     assert 'CARACAL_VERSION=2026.10.10' in (NODE_DIR / '.env').read_text()
+    assert (NODE_DIR / 'compose.yml').read_text() == 'services: {old: {}}\n'
 
 
 def test_convert_only_classic_nodes(env):

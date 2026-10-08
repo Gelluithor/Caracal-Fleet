@@ -45,5 +45,18 @@ services:
   overlay:
     <<: [*display, *node]   # display volumes win over the plain data volume
     command: ["/usr/local/bin/entrypoint-overlay.sh"]
+    # notification sounds through ALSA. /dev/snd is bind-mounted with a device rule (major 116 = ALSA) instead of
+    # "devices:", so the overlay still starts on hosts without a sound card.
+    volumes:
+      - /var/lib/caracal:/var/lib/caracal
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /home/caracal/.Xauthority:/home/caracal/.Xauthority:ro
+      - /dev/snd:/dev/snd
+    device_cgroup_rules:
+      - "c 116:* rmw"
+    group_add:                  # host groups "video", "render" and "audio"
+      - "${CARACAL_VIDEO_GID:-44}"
+      - "${CARACAL_RENDER_GID:-44}"
+      - "${CARACAL_AUDIO_GID:-29}"
     depends_on:
       app: {condition: service_healthy}

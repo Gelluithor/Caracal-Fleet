@@ -415,3 +415,7 @@ details.legacy summary { display: flex; gap: 10px; align-items: baseline; flex-w
 .console:fullscreen { border: 0; border-radius: 0; }
 .console:fullscreen .console-term { height: auto; flex: 1; }
 @media (max-width: 640px) { .console-term { height: calc(100vh - 220px); } }
+
+/* on-screen notifications of a node */
+.tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.scope-pick h3 { margin: 6px 0 2px; font-size: 13px; }
