@@ -310,7 +310,7 @@ def test_sd_card_dietpi_without_internet(env):
     online = sd_files(env, os='dietpi', dietpi_txt=DIETPI_TXT)
     assert 'Automation_Custom_PreScript.sh' not in online and 'CONFIG_CHECK_CONNECTION_IP=9.9.9.9' in online['dietpi.txt']
     script = (ROOT / 'hub/bootstrap/caracal-firstboot.sh').read_text(encoding='utf-8')
-    assert 'echo 1 > /boot/dietpi/.install_stage' in script and 'After=dietpi-firstboot.service' in script
+    assert 'STAGE=${CARACAL_DIETPI_STAGE:-/boot/dietpi/.install_stage}' in script and '/etc/bashrc.d/00-caracal-offline.sh' in script
 
 
 @pytest.mark.skipif(not shutil.which('bash'), reason='bash not available')
@@ -349,3 +349,33 @@ def test_agent_follows_the_hub_clock(env, monkeypatch):
     monkeypatch.setattr(mod, 'set_clock', lambda ts: seen.append(ts) or True)
     agent = mod.Agent({'hub': env['hub'], 'local_api': 'http://127.0.0.1:9', **env['enrolled']})
     assert agent.clock_from_hub() is True and abs(seen[0] - time.time()) < 60
+
+
+@pytest.mark.skipif(not shutil.which('bash'), reason='bash not available')
+def test_dietpi_first_login_without_internet(env, tmp_path):
+    """The login hook runs before DietPi's first-run setup: hub reachable -> clock, apt via the hub, stage 0 -> 1."""
+    root = apt_tree(tmp_path / 'apt')
+    (root / 'sources.list.d' / 'dietpi.list').write_text('deb https://dietpi.com/apt trixie main\n')
+    stage, hook, conf = tmp_path / 'install_stage', tmp_path / 'bashrc.d' / '00-caracal-offline.sh', tmp_path / 'firstboot.conf'
+    stage.write_text('0\n')
+    conf.write_text(f"HUB='{env['hub']}'\nTOKEN='enroll-test-token'\nDOWNLOAD_SOURCE=fleet\n")
+    script = (ROOT / 'hub/bootstrap/caracal-firstboot.sh').as_posix()
+    paths = {'CARACAL_APT_DIR': root.as_posix(), 'CARACAL_DIETPI_STAGE': stage.as_posix(), 'CARACAL_DIETPI_HOOK': hook.as_posix(),
+             'CARACAL_FIRSTBOOT_CONF': conf.as_posix(), 'CARACAL_FIRSTBOOT_LOG': (tmp_path / 'firstboot.log').as_posix(),
+             'CARACAL_FIRSTBOOT_LIB': (tmp_path / 'lib').as_posix()}
+    run = lambda *args: subprocess.run([shutil.which('bash'), *args], capture_output=True, text=True, env={**os.environ, **paths})
+    r = run(script, 'dietpi-prepare')
+    assert r.returncode == 0, r.stderr
+    assert hook.is_file() and (tmp_path / 'lib' / 'caracal-firstboot.sh').is_file()
+    assert run('-n', hook.as_posix()).returncode == 0
+    # the first login shell: root, flock replaced for the test; the hook finishes before DietPi's own script
+    login = run('-c', f'id() {{ echo 0; }}; flock() {{ shift; "$@"; }}; . "{hook.as_posix()}"; echo "dietpi-login sees stage $(cat "{stage.as_posix()}")"')
+    assert login.returncode == 0, login.stderr
+    assert 'dietpi-login sees stage 1' in login.stdout and 'DietPi online update of the first boot skipped' in login.stdout
+    assert not hook.exists()
+    assert (root / 'sources.list.d/dietpi.list').read_text() == f"deb {env['hub']}/apt/dietpi.com/apt trixie main\n"
+    auth = (root / 'auth.conf.d/caracal-fleet.conf').read_text()
+    assert 'login enroll password enroll-test-token' in auth
+    # another login later does nothing (stage 1); a hub that cannot be reached keeps stage 0 (no GitHub detour)
+    stage.write_text('1\n')
+    assert run(script, 'dietpi-offline').stdout == ''

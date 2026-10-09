@@ -105,9 +105,9 @@ Switching a node back to *From the internet* restores its apt sources.
   certificate checks, only when no time server synchronised the clock). The agent keeps following the hub's clock.
 - **Raspberry Pi OS** installs completely through the hub.
 - **DietPi** works without internet access as well: the SD card sets its connectivity check to the device and the
-  hub, skips DietPi's online update from GitHub during the first boot (`Automation_Custom_PreScript.sh` registers a
-  one-time service that runs before DietPi's first-run setup) and points its apt sources, `dietpi.com` included, to
-  the hub. DietPi's daily check for its own updates is switched off.
+  hub, skips DietPi's online update from GitHub during the first boot (`Automation_Custom_PreScript.sh` installs a
+  hook in `/etc/bashrc.d` that runs in the first login shell right before DietPi's first-run setup) and points its
+  apt sources, `dietpi.com` included, to the hub. DietPi's daily check for its own updates is switched off.
 
 ## Notification API for other apps
 

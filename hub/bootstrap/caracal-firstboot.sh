@@ -12,17 +12,21 @@
 #
 # Without internet access (download source "fleet" on the card) the clock is set from the hub when no time server
 # synchronised it (a Raspberry Pi has no clock battery; HTTPS and apt need the right time). DietPi additionally:
-#   dietpi-prepare  (Automation_Custom_PreScript.sh, early in DietPi's first boot) registers the one-time service
-#   dietpi-offline  (that service, after DietPi's first-boot settings, before its first-run setup starts) points apt
-#                   to the hub and skips DietPi's online update from GitHub, which cannot work without internet
+#   dietpi-prepare  (Automation_Custom_PreScript.sh, early in DietPi's first boot) installs a login hook
+#   dietpi-offline  (that hook, /etc/bashrc.d/00-caracal-offline.sh) runs in the first login shell right before
+#                   DietPi's first-run setup (dietpi-login from /etc/bashrc.d/dietpi.bash, *.sh files come first):
+#                   it waits for the hub, sets the clock, points apt to the hub and skips DietPi's online update
+#                   from GitHub, which cannot work without internet. Running in the login shell itself, it cannot
+#                   come too late.
 #
 # Log: /var/log/caracal-firstboot.log, progress also with "journalctl -u caracal-firstboot".
 set -uo pipefail
 
-LIB=/usr/local/lib/caracal-firstboot
-CONF=/etc/caracal-firstboot.conf
+LIB=${CARACAL_FIRSTBOOT_LIB:-/usr/local/lib/caracal-firstboot}   # paths can be changed for tests
+CONF=${CARACAL_FIRSTBOOT_CONF:-/etc/caracal-firstboot.conf}
 DONE=/var/lib/caracal-firstboot.done
-LOG=/var/log/caracal-firstboot.log
+LOG=${CARACAL_FIRSTBOOT_LOG:-/var/log/caracal-firstboot.log}
+STAGE=${CARACAL_DIETPI_STAGE:-/boot/dietpi/.install_stage}   # DietPi's install stage (0 online update, 1 setup, 2 done)
 
 # --- download through the hub (keep in sync with install-node.sh, the agent and the hub) ---
 APT_DIR=${CARACAL_APT_DIR:-/etc/apt}
@@ -112,7 +116,7 @@ wait_for_os_setup() {
     if command -v cloud-init >/dev/null && ! cloud-init status 2>/dev/null | grep -qE 'done|disabled|error'; then
       busy='cloud-init'
     fi
-    if [ -f /boot/dietpi/.install_stage ] && [ "$(cat /boot/dietpi/.install_stage)" != 2 ]; then busy='DietPi setup'; fi
+    if [ -f "$STAGE" ] && [ "$(cat "$STAGE")" != 2 ]; then busy='DietPi setup'; fi
     if pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null; then busy='apt'; fi
     [ -z "$busy" ] && return 0
     [ $((i % 6)) -eq 1 ] && echo "Waiting for $busy to finish…"
@@ -190,55 +194,52 @@ run_install() {
   return 1
 }
 
+HOOK=${CARACAL_DIETPI_HOOK:-/etc/bashrc.d/00-caracal-offline.sh}
+
 dietpi_prepare() {
-  # runs inside DietPi's first-boot service, before the network is up: only registers the one-time service
-  install -d -m 755 "$LIB"
+  # runs inside DietPi's first-boot service, before the network is up: copies this script and installs the hook
+  install -d -m 755 "$LIB" "$(dirname "$HOOK")"
   local src
   src=$(boot_file caracal-firstboot.sh) || src=$0
   install -m 755 "$src" "$LIB/caracal-firstboot.sh"
-  cat > /etc/systemd/system/caracal-dietpi-offline.service <<EOF
-[Unit]
-Description=CARACAL: DietPi first boot without internet access
-After=dietpi-firstboot.service network-online.target
-Wants=network-online.target
-Before=getty@tty1.service
-
-[Service]
-Type=oneshot
-ExecStart=$LIB/caracal-firstboot.sh dietpi-offline
-TimeoutStartSec=15min
-
-[Install]
-WantedBy=multi-user.target
+  cat > "$HOOK" <<EOF
+# CARACAL zero-touch without internet access (removed when done). Sourced by interactive bash shells before
+# /etc/bashrc.d/dietpi.bash starts DietPi's first-run setup; one shell at a time (tty1 autologin, SSH).
+if [ "\$(id -u)" = 0 ] && [ "\$(cat $STAGE 2>/dev/null)" = 0 ]; then
+  flock /run/caracal-dietpi-offline.lock bash $LIB/caracal-firstboot.sh dietpi-offline
+fi
 EOF
-  systemctl daemon-reload
-  systemctl enable caracal-dietpi-offline.service >/dev/null 2>&1
-  systemctl start --no-block caracal-dietpi-offline.service
+  chmod 644 "$HOOK"
+  echo "CARACAL: DietPi first boot without internet access prepared ($HOOK)"
 }
 
 dietpi_offline() {
+  # stage 0 = DietPi's online update (GitHub) still to do; another shell may have finished meanwhile
+  [ "$(cat "$STAGE" 2>/dev/null)" = 0 ] || return 0
   exec > >(tee -a "$LOG") 2>&1
   echo "===== $(date -Is) CARACAL: DietPi first boot without internet access"
   local conf i
   conf=$(boot_file caracal-firstboot.conf) || conf=$CONF
   # shellcheck disable=SC1090
   . "$conf"
-  for i in $(seq 1 60); do
-    curl -ksS --max-time 10 -o /dev/null "$HUB/api/health" && break
-    sleep 5
+  echo "Waiting for the hub $HUB"
+  for i in $(seq 1 180); do                 # at most 30 minutes
+    curl -ksS --max-time 10 -o /dev/null "$HUB/api/health" 2>/dev/null && break
+    if [ "$i" -eq 180 ]; then
+      echo 'The hub is not reachable: check the network, the DNS and the hub address; log in again to retry.'
+      return 1
+    fi
+    [ $((i % 6)) -eq 1 ] && echo 'The hub is not reachable yet, waiting…'
+    sleep 10
   done
   sync_clock_from_hub || echo 'The clock could not be read from the hub.'
   # DietPi wrote its sources (Debian, Raspberry Pi, dietpi.com) during its first-boot settings
   apt_via_fleet "$HUB" enroll "$TOKEN"
   echo 'apt downloads through the hub'
-  if [ "$(cat /boot/dietpi/.install_stage 2>/dev/null)" = 0 ]; then
-    # stage 1 = DietPi's online update (GitHub) done; the first-run setup then upgrades the packages through the hub
-    echo 1 > /boot/dietpi/.install_stage
-    echo 'DietPi online update of the first boot skipped'
-    # if the first-run setup already started on tty1 (and waits after the failed online update), start it again
-    if pgrep -f /boot/dietpi/dietpi-login >/dev/null; then systemctl restart getty@tty1.service; fi
-  fi
-  systemctl disable caracal-dietpi-offline.service >/dev/null 2>&1
+  # stage 1 = DietPi's online update done; its first-run setup then upgrades the packages through the hub
+  echo 1 > "$STAGE"
+  rm -f "$HOOK"
+  echo 'DietPi online update of the first boot skipped, DietPi continues with its first-run setup'
 }
 
 case "${1:-install}" in
