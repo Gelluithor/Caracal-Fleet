@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import console, images, notify, playlists, provisioning, releases, sdcard, system
+from . import console, images, notify, playlists, provisioning, proxy, releases, sdcard, system
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -30,6 +30,7 @@ app.include_router(images.router)
 app.include_router(sdcard.router)       # before /api/bootstrap/{name} (node-config)
 app.include_router(console.router)      # SSH web console (WebSocket)
 app.include_router(notify.router)       # notification API for other apps and its tokens
+app.include_router(proxy.router)        # Fleet as the download source of nodes without internet access
 
 SECURITY_HEADERS = {
     # no inline scripts, no third-party resources; inline styles are used for progress bars
@@ -364,6 +365,11 @@ def validate_command(c, row, action, payload):
         watchers = (status.get('notifications') or {}).get('watchers')
         if watchers is not None and str(payload['id']) not in [str(w.get('id')) for w in watchers]:
             raise HTTPException(409, 'watcher_not_found')
+    if action == 'set_download_source':
+        # where the node downloads CARACAL images and system packages: the internet or this hub
+        if payload.get('source') not in ('internet', 'fleet'):
+            raise HTTPException(400, 'invalid_value')
+        payload = {'source': payload['source']}
     if action == 'set_hub':
         hub = text(payload.get('hub'), 500).rstrip('/')
         if not hub.lower().startswith(('https://', 'http://')):
@@ -929,6 +935,7 @@ async def provision(r: Request):
     params['port'] = int(d.get('port') or 22)
     params['reenroll'] = bool(d.get('reenroll'))
     params['forget_host_key'] = bool(d.get('forget_host_key'))
+    params['via_fleet'] = bool(d.get('via_fleet'))
     params['password'] = str(d.get('password') or '')  # keep exact password (no trimming)
     params['mode'] = 'node' if d.get('mode') == 'node' else 'agent'
     if not params['host'] or not params['username'] or not params['hub_url']:

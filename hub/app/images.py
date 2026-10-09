@@ -138,12 +138,22 @@ async def _deploy_body(r):
     return version, ids, image
 
 
+def _prepare_for_fleet_nodes(ids, image, version):
+    """Nodes that download through the hub get the image from its cache: start preparing it right away."""
+    from . import proxy
+    with db() as c:
+        rows = [c.execute('SELECT * FROM devices WHERE id=?', (did,)).fetchone() for did in ids]
+    for arch in {build(x)['arch'] for x in rows if x and build(x)['download_source'] == 'fleet'} & set(proxy.ARCHES):
+        proxy.prepare(image, version, arch)
+
+
 @router.post('/api/node-image/deploy')
 async def deploy_version(r: Request):
     """Update Docker nodes to an image version."""
     u = current_user(r, 'manage')
     version, ids, image = await _deploy_body(r)
     res = _queue(u, ids, 'update_caracal', {'version': version, 'image': image}, 'docker')
+    _prepare_for_fleet_nodes(ids, image, version)
     audit(u, 'image.deploy', version, {'devices': ids, 'skipped': res['skipped']})
     return res
 

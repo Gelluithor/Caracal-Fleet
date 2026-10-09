@@ -11,7 +11,7 @@
 #   curl -fsSL https://HUB/api/bootstrap/install-agent.sh | sudo bash -s -- --hub https://HUB --token TOKEN
 set -euo pipefail
 
-HUB=''; TOKEN=''; NAME=''; REENROLL=''; LOCAL_API=''
+HUB=''; TOKEN=''; NAME=''; REENROLL=''; LOCAL_API=''; DOWNLOAD_SOURCE=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -19,6 +19,7 @@ while [ $# -gt 0 ]; do
     --name) NAME=$2; shift 2;;
     --reenroll) REENROLL=--reenroll; shift;;
     --local-api) LOCAL_API=$2; shift 2;;
+    --download-source) DOWNLOAD_SOURCE=$2; shift 2;;   # internet or fleet (apt and CARACAL through the hub)
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
 done
@@ -68,6 +69,7 @@ ARGS=(enroll --hub "$HUB" --token "$TOKEN")
 [ -n "$REENROLL" ] && ARGS+=("$REENROLL")
 [ -n "$LOCAL_API" ] && ARGS+=(--local-api "$LOCAL_API")
 python3 /opt/caracal-agent/agent.py "${ARGS[@]}"
+[ -n "$DOWNLOAD_SOURCE" ] && python3 /opt/caracal-agent/agent.py download-source "$DOWNLOAD_SOURCE"
 
 UNIT=/etc/systemd/system/caracal-agent.service
 cat > "$UNIT.new" <<'EOF'

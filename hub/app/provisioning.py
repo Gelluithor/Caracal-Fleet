@@ -131,9 +131,13 @@ def _provision(job_id, p, user):
             args += ['--name', p['name']]
         if node:
             args += ['--image', p['image'], '--version', p['version']]
+            if p.get('via_fleet'):   # apt, Docker and CARACAL through the hub
+                args.append('--via-fleet')
             job_log(job_id, f"Installing CARACAL node {p['image']}:{p['version']} (Docker)")
         elif p.get('reenroll'):
             args.append('--reenroll')
+        if not node and p.get('via_fleet'):
+            args += ['--download-source', 'fleet']
         script = 'install-node.sh' if node else 'install-agent.sh'
         cmd = f'bash {shlex.quote(tmp + "/" + script)} ' + ' '.join(shlex.quote(a) for a in args)
         stdin_data = None

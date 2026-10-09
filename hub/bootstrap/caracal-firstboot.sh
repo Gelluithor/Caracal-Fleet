@@ -122,6 +122,7 @@ run_install() {
   echo "Installing $image:${version:-latest} as $name"
   local code=0 extra=()
   [ -n "${DOCKER_POOL:-}" ] && extra+=(--docker-pool "$DOCKER_POOL")
+  [ "${DOWNLOAD_SOURCE:-}" = fleet ] && extra+=(--via-fleet)
   bash "$work/install-node.sh" --hub "$HUB" --token "$TOKEN" --name "$name" --image "$image" \
     --version "${version:-latest}" "${extra[@]}" || code=$?
   rm -rf "$work"

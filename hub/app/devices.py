@@ -140,6 +140,8 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         # agents before 4.5 do not report the runtime; they only ran on classic installations
         'runtime': status['runtime'] if 'runtime' in status else ('host' if status.get('caracal_version') else ''),
         'caracal_image': status.get('caracal_image') or '',
+        # where the node downloads CARACAL and system packages ('' = agent too old to report it)
+        'download_source': status.get('download_source') or '', 'arch': status.get('arch') or '',
         'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in status.get('assets') or []),
     }
     d['current_asset_id'] = None

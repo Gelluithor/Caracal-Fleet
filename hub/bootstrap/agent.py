@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import socket
@@ -31,7 +32,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.7.1'
+VERSION = '4.8.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -45,6 +46,11 @@ NODE_DIR = Path(os.getenv('CARACAL_NODE_DIR', '/opt/caracal-node'))
 DATA_DIR = Path(os.getenv('CARACAL_DATA_DIR', '/var/lib/caracal'))
 COMPOSE_SERVICES = {'caracal.service': 'app', 'caracal-player.service': 'player', 'caracal-overlay.service': 'overlay'}
 INSTALL_TIMEOUT = 3000   # apt + pip on a Raspberry Pi can take a while
+# Download source "fleet": apt and CARACAL images come through the hub (no internet access needed). The apt sources
+# of these repositories point to <hub>/apt/<host>/...; keep the list in sync with DEFAULT_APT_HOSTS of the hub.
+APT_DIR = Path(os.getenv('CARACAL_APT_DIR', '/etc/apt'))
+APT_HOSTS = ('deb.debian.org', 'security.debian.org', 'ftp.debian.org', 'archive.raspberrypi.com',
+             'archive.raspberrypi.org', 'raspbian.raspberrypi.com', 'raspbian.raspberrypi.org', 'download.docker.com')
 
 DEFAULTS = {
     'local_api': 'http://127.0.0.1:8080',
@@ -371,6 +377,7 @@ class Agent:
             'capabilities': self.capabilities() if api_ok else {},
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
             'caracal_image': read_env().get('CARACAL_IMAGE', '') if is_docker() else '',
+            'download_source': self.download_source(), 'arch': machine_arch(),
         }
         self.hub('POST', '/heartbeat', json=data)
 
@@ -763,7 +770,10 @@ class Agent:
             write_env(env)
             if new_compose and new_compose != old_compose:
                 write_text_file(compose_file, new_compose)
-            code, out = self.run_with_heartbeats(['docker', 'compose', '--project-directory', str(NODE_DIR), 'pull'])
+            if self.download_source() == 'fleet':
+                code, out = self.load_image_from_hub(version)
+            else:
+                code, out = self.run_with_heartbeats(['docker', 'compose', '--project-directory', str(NODE_DIR), 'pull'])
             if code != 0:
                 restore()
                 raise RuntimeError(f'Image download failed, nothing changed:\n{out[-3000:]}')
@@ -780,6 +790,67 @@ class Agent:
             return {'version': version, 'image': env.get('CARACAL_IMAGE')}
         finally:
             self.maintenance = ''
+
+    def load_image_from_hub(self, version):
+        """CARACAL image through the hub (download source "fleet"): the hub prepares it from its registry, the agent
+        checks its SHA-256 and loads it into Docker. Returns (exit code, output) like run_with_heartbeats."""
+        params = {'version': version, 'arch': machine_arch()}
+        auth = (self.conf['device_id'], self.conf['device_token'])
+        fd, path = tempfile.mkstemp(prefix='caracal-image-', suffix='.tar', dir=self.tmp_dir())
+        os.close(fd)
+        deadline = time.time() + INSTALL_TIMEOUT
+        try:
+            while True:
+                r = requests.get(f'{self.hub_url}/api/proxy/image', params=params, auth=auth, stream=True,
+                                 timeout=(20, 600))
+                if r.status_code == 202:   # the hub is still downloading the image from its registry
+                    r.close()
+                    if time.time() > deadline:
+                        return 1, 'The hub did not prepare the image in time'
+                    self.quiet_heartbeat()
+                    time.sleep(10)
+                    continue
+                if r.status_code != 200:
+                    return 1, f'Image download from the hub failed: HTTP {r.status_code} {r.text[:300]}'
+                h = hashlib.sha256()
+                with r, open(path, 'wb') as f:
+                    for chunk in r.iter_content(1024 * 1024):
+                        h.update(chunk)
+                        f.write(chunk)
+                if h.hexdigest() != r.headers.get('X-Sha256'):
+                    return 1, 'Image from the hub: checksum mismatch'
+                break
+            log('image from the hub downloaded, loading it into Docker')
+            return self.run_with_heartbeats(['docker', 'load', '-i', path])
+        except requests.RequestException as e:
+            return 1, f'Image download from the hub failed: {e}'
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def quiet_heartbeat(self):
+        try:
+            self.heartbeat()
+        except Exception as e:  # noqa: BLE001 - the local API may be down during an update
+            log('heartbeat during update:', e)
+
+    # download source -------------------------------------------------
+
+    def download_source(self):
+        return 'fleet' if self.conf.get('download_source') == 'fleet' else 'internet'
+
+    def apply_download_source(self):
+        """Point apt to the hub (fleet) or back to the repositories (internet); returns the changed source files."""
+        fleet = self.download_source() == 'fleet'
+        return apt_use(self.hub_url if fleet else None, self.conf['device_id'], self.conf['device_token'])
+
+    def do_set_download_source(self, p):
+        source = 'fleet' if p.get('source') == 'fleet' else 'internet'
+        conf = read_json(CONFIG, {})
+        conf['download_source'] = self.conf['download_source'] = source
+        write_json(CONFIG, conf, 0o600)
+        changed = self.apply_download_source()
+        log('download source:', source, 'apt sources changed:', ', '.join(changed) or 'none')
+        return {'source': source, 'apt_sources_changed': changed}
 
     def hub_compose(self):
         """The current compose file of the CARACAL node from the hub; None keeps the node's own."""
@@ -801,9 +872,15 @@ class Agent:
                 r.raise_for_status()
                 (work / name).write_bytes(r.content)
             self.maintenance = 'caracal_update'
-            code, out = self.run_with_heartbeats(
-                [shutil.which('bash') or 'bash', 'install-node.sh', '--hub', self.hub_url, '--skip-agent',
-                 '--image', str(p['image']), '--version', str(p.get('version') or 'latest')], cwd=work)
+            cmd = [shutil.which('bash') or 'bash', 'install-node.sh', '--hub', self.hub_url, '--skip-agent',
+                   '--image', str(p['image']), '--version', str(p.get('version') or 'latest')]
+            if self.download_source() == 'fleet':
+                # the device's credentials in a file, not on the command line (visible in the process list)
+                auth = work / 'fleet-auth'
+                auth.write_text(f"{self.conf['device_id']}:{self.conf['device_token']}")
+                os.chmod(auth, 0o600)
+                cmd += ['--via-fleet', '--fleet-auth-file', str(auth)]
+            code, out = self.run_with_heartbeats(cmd, cwd=work)
             write_key_file(self.conf['device_token'])
             if code == 5:   # the graphics driver was enabled (e.g. DietPi); nothing was converted yet
                 self.after = lambda: subprocess.Popen(['systemctl', 'reboot'])
@@ -933,6 +1010,11 @@ class Agent:
             write_key_file(self.conf['device_token'])   # also provides the key to CARACAL containers
         except OSError as e:
             log('fleet key file:', e)
+        if self.download_source() == 'fleet':
+            try:
+                self.apply_download_source()
+            except OSError as e:
+                log('apt sources:', e)
         next_hb = 0
         while True:
             try:
@@ -978,6 +1060,51 @@ def read_env():
     except OSError:
         pass
     return out
+
+
+def machine_arch():
+    """Docker platform architecture of this device (arm64 on a 64-bit Raspberry Pi OS)."""
+    m = platform.machine().lower()
+    return {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'amd64', 'amd64': 'amd64'}.get(m, m)
+
+
+def apt_source_files():
+    d = APT_DIR / 'sources.list.d'
+    files = [APT_DIR / 'sources.list'] + sorted(d.glob('*.list')) + sorted(d.glob('*.sources'))
+    return [f for f in files if f.is_file()]
+
+
+def apt_rewrite(text, hub=None):
+    """apt source URIs of the known repositories: through the hub (<hub>/apt/<host>/...) or, with hub=None,
+    directly again. Addresses of an earlier hub are replaced too."""
+    hosts = '|'.join(re.escape(h) for h in APT_HOSTS)
+    text = re.sub(rf'https?://[^\s/]+(?:/[^\s]*?)?/apt/({hosts})(?=[/\s]|$)', r'https://\1', text)
+    if hub:
+        text = re.sub(rf'https?://({hosts})(?=[/\s]|$)', lambda m: f'{hub}/apt/{m.group(1)}', text)
+    return text
+
+
+def apt_use(hub=None, user='', password=''):
+    """Point apt to the hub (credentials in auth.conf.d, readable by root only) or back to the repositories."""
+    changed = []
+    for f in apt_source_files():
+        old = f.read_text()
+        new = apt_rewrite(old, hub)
+        if new != old:
+            write_text_file(f, new)
+            changed.append(f.name)
+    auth = APT_DIR / 'auth.conf.d' / 'caracal-fleet.conf'
+    if hub:
+        scheme, _, rest = hub.partition('://')
+        machine = rest if scheme == 'https' else hub   # apt uses entries without a protocol for https only
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        tmp = auth.with_suffix('.tmp')
+        tmp.write_text(f'machine {machine}/apt login {user} password {password}\n')
+        os.chmod(tmp, 0o600)
+        tmp.replace(auth)
+    else:
+        auth.unlink(missing_ok=True)
+    return changed
 
 
 def group_id(name):
@@ -1182,12 +1309,22 @@ def main(argv=None):
     e.add_argument('--name', default='')
     e.add_argument('--reenroll', action='store_true')
     e.add_argument('--local-api', default='')
+    ds = sub.add_parser('download-source', help='where CARACAL and system packages are downloaded from')
+    ds.add_argument('source', choices=('internet', 'fleet'))
     sub.add_parser('run')
     sub.add_parser('check')
     sub.add_parser('version')
     a = ap.parse_args(argv)
     if a.cmd == 'enroll':
         enroll(a.hub, a.token, a.name, a.reenroll, a.local_api or None)
+    elif a.cmd == 'download-source':
+        conf = read_json(CONFIG, None)
+        if not conf:
+            raise SystemExit(f'{CONFIG} missing - run "agent.py enroll" first')
+        print(Agent(conf).do_set_download_source({'source': a.source}))
+        # a running agent reads its configuration at start
+        subprocess.run(['systemctl', 'try-restart', 'caracal-agent.service'], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
     elif a.cmd == 'check':
         return check()
     elif a.cmd == 'version':

@@ -17,6 +17,8 @@ with one `docker compose up`. Every organisation runs its own Fleet; nothing is 
   install it over SSH
 - **SSH console:** a terminal on any node right in the browser (the hub connects over SSH, nothing to install)
 - **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
+- **Nodes without internet access:** Fleet can be the only download source of a node (system packages, Docker and
+  CARACAL go through the hub), chosen for the SD card, the SSH installation or per device
 - **Administration:** users with the roles admin, manager, operator and viewer; command history, audit log,
   Czech and English UI, custom logo, full backup and restore for server migrations
 
@@ -51,6 +53,8 @@ All settings are optional (`.env.example`):
 | `CARACAL_NODE_IMAGE` | default CARACAL node image (`ghcr.io/gelluithor/caracal-node`), can be changed in the UI |
 | `CARACAL_HUB_ADMIN_PASSWORD` | password of the `admin` account, applied on every start; empty = create the administrator in the UI |
 | `CARACAL_HUB_ENROLL_TOKEN` | enrollment token of the agents; empty = generated, shown and rotated in *Settings* |
+| `CARACAL_HUB_PROXY_CACHE_GB` | cache of images and packages for nodes that download through the hub (default `20`) |
+| `CARACAL_HUB_APT_HOSTS` | more apt repositories the hub mirrors, comma separated (Debian, Raspberry Pi and Docker always) |
 
 Data live in the volume `hub-data` (`hub.db`, `config.json`, logo, media). Update the hub with
 `docker compose pull && docker compose up -d`; the database is migrated automatically.
@@ -73,6 +77,28 @@ the CARACAL containers and the Fleet Agent.
 
 Diagnostics on a node: `sudo python3 /opt/caracal-agent/agent.py check`, `journalctl -u caracal-agent -f`,
 `/var/log/caracal-firstboot.log` (SD card installation).
+
+## Nodes without internet access (Fleet as the download source)
+
+Every node has a **download source**: *From the internet* (default) or *Through CARACAL Fleet*. It is chosen when
+preparing the SD card, in the SSH installation (*Download through CARACAL Fleet*) and later per device or in bulk
+(*Download source*). With *Through CARACAL Fleet* the node only needs to reach the hub:
+
+- **CARACAL images:** the hub downloads the image for the node's architecture from the registry, checks every
+  digest and keeps it in a cache; the agent downloads it from the hub, checks its SHA-256 and loads it with
+  `docker load`. Updates from Fleet work the same way, with the usual rollback.
+- **System packages and Docker:** the node's apt sources of the Debian, Raspberry Pi and Docker repositories point to
+  `<hub>/apt/<host>/…`, a read-only mirror. apt checks the repository signatures itself, so the hub cannot alter
+  packages; only these repositories are mirrored (more with `CARACAL_HUB_APT_HOSTS`). Docker is installed from
+  Docker's repository through the hub.
+- **Credentials:** both need the device's token (HTTP Basic, stored for apt in `/etc/apt/auth.conf.d`, readable by
+  root only); the installation uses the enrollment token until the device is enrolled.
+
+Requirements and limits: the hub itself needs internet access and disk space for the cache (images and packages,
+20 GB by default, `CARACAL_HUB_PROXY_CACHE_GB`; *Settings → Fleet as the download source* shows it and clears it).
+The nodes must trust the hub's HTTPS certificate (Let's Encrypt works; with an internal CA install it on the nodes).
+DietPi's own first-boot setup may still need the internet; Raspberry Pi OS installs completely through the hub.
+Switching a node back to *From the internet* restores its apt sources.
 
 ## Notification API for other apps
 

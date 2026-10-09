@@ -149,6 +149,20 @@ def test_docker_update_and_rollback(env):
     assert 'CARACAL_VERSION=2026.10.10' in (NODE_DIR / '.env').read_text()
     assert (NODE_DIR / 'compose.yml').read_text() == 'services: {old: {}}\n'
 
+    # download source "fleet": the image comes from the hub (docker load), nothing is pulled from the registry
+    calls.clear()
+    agent.run_with_heartbeats = lambda cmd, cwd=None: (calls.append(cmd) or (0, 'pulled'))
+    agent.compose = lambda *args, timeout=600: (calls.append(args) or (0, 'up'))
+    agent.load_image_from_hub = lambda version: (calls.append(('hub', version)) or (0, 'Loaded image'))
+    agent.conf['download_source'] = 'fleet'
+    try:
+        r = api(env, 'POST', '/api/node-image/deploy', json={'version': '2026.10.1', 'device_ids': [env['id']]}).json()
+        agent.run_commands()
+        assert command_result(env, r['command_ids'][0])['state'] == 'completed'
+        assert ('hub', '2026.10.1') in calls and not any('pull' in c for c in calls)
+    finally:
+        agent.conf['download_source'] = 'internet'
+
 
 def test_convert_only_classic_nodes(env):
     classic = requests.post(env['hub'] + '/api/device/enroll', json={

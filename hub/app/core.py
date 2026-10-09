@@ -77,6 +77,7 @@ ACTIONS = {
     'delete_watcher': ('content', None),
     'check_watcher': ('content', 600),
     'notify_sound': ('content', None),
+    'set_download_source': ('manage', None),
 }
 
 # Payload keys that must not stay in the hub: login credentials of web pages and of notification watchers travel

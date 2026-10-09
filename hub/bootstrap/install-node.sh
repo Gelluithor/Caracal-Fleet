@@ -3,7 +3,12 @@
 # running on Docker, and connects it to CARACAL Fleet.
 #
 #   sudo bash install-node.sh --hub https://fleet.example --token ENROLL_TOKEN \
-#        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME] [--docker-pool 10.200.0.0/16]
+#        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME] [--docker-pool 10.200.0.0/16] \
+#        [--via-fleet [--fleet-auth-file FILE]]
+#
+# --via-fleet downloads everything through the hub instead of the internet: apt (Debian, Raspberry Pi and Docker
+# repositories, the sources point to <hub>/apt/<host>), Docker itself and the CARACAL image (prepared by the hub,
+# loaded with docker load). Credentials: the enrollment token, or "user:password" of a device in --fleet-auth-file.
 #
 # --docker-pool moves Docker's own networks out of 172.16.0.0/12 (e.g. when the LAN uses those addresses): the first
 # half of the private /16-/23 range is the default bridge, the second half the pool for networks Docker creates.
@@ -14,7 +19,7 @@
 # to /opt/caracal.legacy-<date>.
 set -euo pipefail
 
-HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''; DOCKER_POOL=''
+HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''; DOCKER_POOL=''; VIA_FLEET=''; AUTH_FILE=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -24,6 +29,8 @@ while [ $# -gt 0 ]; do
     --version) VERSION=$2; shift 2;;
     --docker-pool) DOCKER_POOL=$2; shift 2;;
     --skip-agent) SKIP_AGENT=1; shift;;   # used when the running Fleet Agent converts its own node
+    --via-fleet) VIA_FLEET=1; shift;;
+    --fleet-auth-file) AUTH_FILE=$2; shift 2;;
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
 done
@@ -35,6 +42,65 @@ NODE_DIR=/opt/caracal-node
 export DEBIAN_FRONTEND=noninteractive
 
 step() { echo "==> $*"; }
+
+# --- download through the hub (keep APT_HOSTS in sync with the agent and the hub) ---
+APT_DIR=${CARACAL_APT_DIR:-/etc/apt}
+APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com'
+apt_source_files() {
+  local f
+  for f in "$APT_DIR/sources.list" "$APT_DIR"/sources.list.d/*.list "$APT_DIR"/sources.list.d/*.sources; do
+    [ -f "$f" ] && echo "$f"
+  done
+}
+# apt sources of the known repositories -> <hub>/apt/<host>/...; credentials in auth.conf.d (root only)
+apt_via_fleet() {
+  local hub=$1 user=$2 password=$3 f h re machine
+  for f in $(apt_source_files); do
+    for h in $APT_HOSTS; do
+      re=${h//./\\.}
+      sed -i -E "s#https?://[^[:space:]/]+(/[^[:space:]]*)?/apt/$re(/|[[:space:]]|\$)#https://$h\2#g; s#https?://$re(/|[[:space:]]|\$)#$hub/apt/$h\1#g" "$f"
+    done
+  done
+  case "$hub" in https://*) machine=${hub#https://};; *) machine=$hub;; esac   # apt: no protocol = https only
+  install -d -m 755 "$APT_DIR/auth.conf.d"
+  ( umask 077; printf 'machine %s/apt login %s password %s\n' "$machine" "$user" "$password" > "$APT_DIR/auth.conf.d/caracal-fleet.conf" )
+}
+# CARACAL image prepared by the hub (202 while it downloads it), checked and loaded
+image_from_fleet() {
+  local arch tmp code i want got
+  arch=$(dpkg --print-architecture)
+  tmp=$(mktemp -p /var/tmp caracal-image-XXXXXX.tar)
+  for i in $(seq 1 360); do
+    code=$(curl -sS -u "$FLEET_USER:$FLEET_PASSWORD" -D "$tmp.headers" -o "$tmp" -w '%{http_code}' \
+      "$HUB/api/proxy/image?version=$VERSION&arch=$arch") || code=000
+    [ "$code" = 200 ] && break
+    if [ "$code" != 202 ]; then
+      echo "Image download from the hub failed (HTTP $code): $(head -c 300 "$tmp")" >&2
+      rm -f "$tmp" "$tmp.headers"; return 1
+    fi
+    [ $((i % 6)) -eq 1 ] && echo 'The hub is downloading the CARACAL image…'
+    sleep 10
+  done
+  want=$(sed -n 's/^[Xx]-[Ss]ha256:[[:space:]]*//p' "$tmp.headers" | tr -d '\r')
+  got=$(sha256sum "$tmp" | cut -d' ' -f1)
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    echo 'CARACAL image from the hub: checksum mismatch' >&2; rm -f "$tmp" "$tmp.headers"; return 1
+  fi
+  docker load -i "$tmp"
+  rm -f "$tmp" "$tmp.headers"
+}
+# --- end of download through the hub ---
+
+if [ -n "$VIA_FLEET" ]; then
+  if [ -n "$AUTH_FILE" ]; then
+    FLEET_USER=$(cut -d: -f1 "$AUTH_FILE"); FLEET_PASSWORD=$(cut -d: -f2- "$AUTH_FILE")
+  else
+    FLEET_USER=enroll; FLEET_PASSWORD=$TOKEN
+  fi
+  [ -n "$FLEET_PASSWORD" ] || { echo '--via-fleet needs --token or --fleet-auth-file' >&2; exit 2; }
+  step 'Downloads go through the hub (apt, Docker, CARACAL)'
+  apt_via_fleet "$HUB" "$FLEET_USER" "$FLEET_PASSWORD"
+fi
 
 step '[1/7] System packages (X display, Openbox)'
 apt-get update -qq
@@ -72,8 +138,22 @@ PY
   ) || exit 2
 fi
 if ! docker compose version >/dev/null 2>&1; then
-  # official Docker packages (include "docker compose"); Debian's docker.io as a fallback
-  curl -fsSL https://get.docker.com | sh || apt-get install -y -qq docker.io docker-compose
+  if [ -n "$VIA_FLEET" ]; then
+    # Docker's own repository through the hub (what get.docker.com would set up)
+    . /etc/os-release
+    DIST=debian; [ "${ID:-}" = ubuntu ] && DIST=ubuntu
+    install -d -m 755 /etc/apt/keyrings
+    curl -fsSL -u "$FLEET_USER:$FLEET_PASSWORD" "$HUB/apt/download.docker.com/linux/$DIST/gpg" -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $HUB/apt/download.docker.com/linux/$DIST ${VERSION_CODENAME:-bookworm} stable" \
+      > /etc/apt/sources.list.d/docker.list
+    apt-get update -qq
+    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null \
+      || apt-get install -y -qq docker.io docker-compose
+  else
+    # official Docker packages (include "docker compose"); Debian's docker.io as a fallback
+    curl -fsSL https://get.docker.com | sh || apt-get install -y -qq docker.io docker-compose
+  fi
 fi
 systemctl enable --now docker >/dev/null
 # a Docker that was already running reads daemon.json only when it starts
@@ -219,7 +299,11 @@ CARACAL_RENDER_GID=$(gid_of render || gid_of video || echo 44)
 CARACAL_AUDIO_GID=$(gid_of audio || echo 29)
 EOF
 cd "$NODE_DIR"
-docker compose pull
+if [ -n "$VIA_FLEET" ]; then
+  image_from_fleet
+else
+  docker compose pull
+fi
 docker compose up -d
 for i in $(seq 1 60); do
   curl -fsS http://127.0.0.1:8080/api/setup-status >/dev/null 2>&1 && break
@@ -234,6 +318,8 @@ if [ -n "$SKIP_AGENT" ]; then
 else
   ARGS=(--hub "$HUB" --token "$TOKEN")
   [ -n "$NAME" ] && ARGS+=(--name "$NAME")
+  # the enrolled agent switches apt to its own device credentials
+  [ -n "$VIA_FLEET" ] && ARGS+=(--download-source fleet)
   bash "$SRC_DIR/install-agent.sh" "${ARGS[@]}"
 fi
 IP=$(hostname -I | awk '{print $1}')

@@ -20,6 +20,8 @@ services:
       CARACAL_NODE_IMAGE: ${CARACAL_NODE_IMAGE:-ghcr.io/gelluithor/caracal-node}
       CARACAL_HUB_ADMIN_PASSWORD: ${CARACAL_HUB_ADMIN_PASSWORD:-}
       CARACAL_HUB_ENROLL_TOKEN: ${CARACAL_HUB_ENROLL_TOKEN:-}
+      CARACAL_HUB_PROXY_CACHE_GB: ${CARACAL_HUB_PROXY_CACHE_GB:-20}
+      CARACAL_HUB_APT_HOSTS: ${CARACAL_HUB_APT_HOSTS:-}
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "5"}

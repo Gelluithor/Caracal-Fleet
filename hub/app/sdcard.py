@@ -84,6 +84,8 @@ def _options(d):
         'password': str(d.get('password') or ''),
         'ssh_key': _clean(d.get('ssh_key'), 2000),
         'docker_pool': _clean(d.get('docker_pool'), 18),
+        # 'fleet': apt, Docker and CARACAL are downloaded through the hub, the device needs no internet access
+        'download_source': 'fleet' if d.get('download_source') == 'fleet' else 'internet',
     }
     checks = (
         (o['os'], 'invalid_os'),
@@ -122,7 +124,8 @@ def firstboot_conf(o):
     return ('# CARACAL zero-touch: hub and enrollment token (removed from the card on the first boot)\n'
             f"HUB={shlex.quote(o['hub_url'])}\nTOKEN={shlex.quote(cfg()['enroll_token'])}\n"
             f"NAME_PREFIX={shlex.quote(o['prefix'])}\n"
-            + (f'DOCKER_POOL={shlex.quote(pool)}\n' if pool else ''))
+            + (f'DOCKER_POOL={shlex.quote(pool)}\n' if pool else '')
+            + ('DOWNLOAD_SOURCE=fleet\n' if o.get('download_source') == 'fleet' else ''))
 
 
 def _yaml(value):
@@ -243,6 +246,12 @@ Log on the device: /var/log/caracal-firstboot.log
 }
 
 
+FLEET_NOTE = """
+Downloads through CARACAL Fleet: system packages, Docker and CARACAL come from the hub, the device only needs to
+reach the hub (no internet access). DietPi's own first-boot setup may still need the internet.
+"""
+
+
 @router.post('/api/sdcard')
 async def sd_card(r: Request):
     u = current_user(r, 'admin')     # the files contain the enrollment token
@@ -264,7 +273,8 @@ async def sd_card(r: Request):
         files = raspios_files(o)
     files['caracal-firstboot.sh'] = (BOOT / 'caracal-firstboot.sh').read_text(encoding='utf-8')
     files['caracal-firstboot.conf'] = firstboot_conf(o)
-    files['CARACAL-README.txt'] = README[o['os']].format(prefix=o['prefix'])
+    files['CARACAL-README.txt'] = README[o['os']].format(prefix=o['prefix']) + \
+        (FLEET_NOTE if o['download_source'] == 'fleet' else '')
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -274,6 +284,6 @@ async def sd_card(r: Request):
             info.external_attr = (0o755 if name.endswith('.sh') else 0o644) << 16
             z.writestr(info, content.replace('\r\n', '\n'))
     audit(u, 'sdcard.create', o['os'], {'hub_url': o['hub_url'], 'prefix': o['prefix'], 'wifi': bool(o['wifi_ssid']),
-                                        'docker_pool': o['docker_pool']})
+                                        'docker_pool': o['docker_pool'], 'download_source': o['download_source']})
     return Response(buf.getvalue(), media_type='application/zip', headers={
         'Content-Disposition': f'attachment; filename="caracal-sdcard-{o["os"]}.zip"'})

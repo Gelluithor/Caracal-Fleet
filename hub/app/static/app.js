@@ -488,6 +488,7 @@ function renderBulkBar(el) {
     ${can('content') ? `<button class="btn sm" data-do="bulkNotifySettings">${icon('settings')}${t('notifySettings')}</button><button class="btn sm" data-do="bulkNotifySound">${icon('upload')}${t('notifySoundUpload')}</button><button class="btn sm" data-do="bulkWatcher">${icon('eye')}${t('addWatcher')}</button>` : ''}
     ${can('manage') ? b('update_agent', t('act_update_agent'), 'agent') + `<button class="btn sm" data-do="bulkAssign">${icon('group')}${t('assignGroupLocation')}</button>
       <button class="btn sm" data-do="bulkSetHub">${icon('upload')}${t('act_set_hub')}</button>
+      <button class="btn sm" data-do="bulkDownloadSource">${icon('download')}${t('downloadSource')}</button>
       <button class="btn sm" data-do="caracalUpdate">${icon('updates')}${t('act_update_caracal')}</button>` : ''}
     <button class="btn sm ghost" data-do="clearSel">${icon('x')}${t('clearSelection')}</button>`);
 }
@@ -732,6 +733,7 @@ function deviceOverview(d) {
         <dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>${t('uptime')}</dt><dd>${d.online ? dur(d.uptime) : '—'}</dd>
         <dt>${t('lastSeen')}</dt><dd>${dt(d.last_seen)}</dd><dt>${t('agent')}</dt><dd>${esc(d.version || '—')} (${t('latest')} ${esc(S.agentVersion)})</dd>
         <dt>${t('localApi')}</dt><dd>${d.api_ok === false ? `<span class="tag critical">${t('unavailable')}</span>` : d.api_ok ? `<span class="tag ok">OK</span>` : '—'}</dd>
+        <dt>${t('downloadSource')}</dt><dd>${d.download_source ? t('downloadSource_' + d.download_source) : '—'}${can('manage') && d.download_source ? ` <button class="btn sm ghost" data-do="downloadSource" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
         <dt>${t('pendingCommands')}</dt><dd>${d.pending_commands}</dd>${d.notes ? `<dt>${t('notes')}</dt><dd>${esc(d.notes)}</dd>` : ''}</dl></section>
     </div>`;
 }
@@ -758,6 +760,7 @@ function payloadSummary(json) {
   if (p.level && /^(info|success|warning|critical)$/.test(p.level)) parts.push(t('notifyLevel_' + p.level));
   if (p.filename && !p.name) parts.push(p.filename);
   if (p.reset) parts.push(t('notifySoundModeReset'));
+  if (p.source === 'internet' || p.source === 'fleet') parts.push(t('downloadSource_' + p.source));
   if (p.item_id != null) parts.push('#' + p.item_id);
   if (p.collection_id != null) parts.push(t('collection') + ' #' + p.collection_id);
   if (p.id != null) parts.push('#' + p.id);
@@ -1327,8 +1330,9 @@ VIEWS.settings = {
         <div class="form-actions"><button class="btn primary">${t('changePassword')}</button></div></form></section>
       <section class="card" id="sysCard"></section></div>`;
     if (can('manage')) {
-      root.insertAdjacentHTML('beforeend', '<section class="card" id="ntfTokens"></section>');
+      root.insertAdjacentHTML('beforeend', '<section class="card" id="ntfTokens"></section><section class="card" id="proxyCard"></section>');
       notifyTokensCard($('#ntfTokens', root));
+      proxyCard($('#proxyCard', root));
     }
     if (!can('admin')) { $('#sysCard', root).innerHTML = `<h2>${t('system')}</h2><dl class="kv"><dt>${t('hubVersion')}</dt><dd>${esc(S.me.hub_version)}</dd><dt>${t('agentVersion')}</dt><dd>${esc(S.me.agent_version)}</dd></dl>`; return; }
     const s = await api('/api/settings').catch(() => null);
@@ -1629,6 +1633,7 @@ async function sdCardDialog() {
         <label>${t('sshPublicKey')}<textarea name="ssh_key" rows="2" placeholder="ssh-ed25519 AAAA… user@pc"></textarea></label></details>
       <details><summary>${t('dockerNetwork')}</summary><p class="muted">${t('dockerNetworkHint')}</p>
         <label>${t('dockerPool')}<input name="docker_pool" placeholder="10.200.0.0/16" pattern="[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{2}" spellcheck="false"></label></details>
+      <h3>${t('downloadSource')}</h3>${downloadSourcePick('internet')}
       <div class="note info">${t('sdCardTokenNote')}</div></div>`,
     onOpen: form => {
       const sync = () => {
@@ -1719,6 +1724,7 @@ VIEWS.global = {
 };
 
 function fmtSize(n) {
+  if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
   return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' kB';
 }
 
@@ -1780,6 +1786,32 @@ function globalDeployDialog(p) {
       render();
     },
   });
+}
+
+// ---------- download source: the internet, or this hub as a proxy (nodes without internet access)
+
+const downloadSourcePick = sel => `<div class="mode-pick">${['internet', 'fleet'].map(s => `<label class="check"><input type="radio" name="download_source" value="${s}" ${s === sel ? 'checked' : ''}><span><b>${t('downloadSource_' + s)}</b><small>${t('downloadSourceHint_' + s)}</small></span></label>`).join('')}</div>`;
+
+function downloadSourceDialog(ids, current = 'internet') {
+  modal({
+    title: t('downloadSource'), submit: t('save'),
+    body: `<div class="form">${ids.length > 1 ? `<p class="muted">${t('downloadSourceToSelected', { n: ids.length })}</p>` : ''}${downloadSourcePick(current || 'internet')}<p class="muted">${t('downloadSourceSwitchHint')}</p></div>`,
+    onSubmit: data => ids.length === 1 ? sendCommand(ids[0], 'set_download_source', { source: data.download_source })
+      : sendBulk(ids, 'set_download_source', { source: data.download_source }),
+  });
+}
+
+async function proxyCard(el) {
+  const p = await api('/api/proxy/status').catch(() => null);
+  if (!p) { el.remove(); return; }
+  const nodes = S.devices.filter(d => d.download_source === 'fleet').length;
+  el.innerHTML = `<div class="card-head"><h2>${t('proxyTitle')}</h2>${can('admin') ? `<button class="btn sm ghost" data-do="proxyClear">${icon('trash')}${t('proxyClear')}</button>` : ''}</div>
+    <p class="muted">${t('proxyHint')}</p>
+    <dl class="kv"><dt>${t('proxyNodes')}</dt><dd>${nodes}</dd>
+      <dt>${t('proxyCache')}</dt><dd>${fmtSize(p.cache_bytes)} / ${fmtSize(p.cache_limit)} (${t('proxyAptPart', { size: fmtSize(p.apt_bytes) })})</dd>
+      <dt>${t('proxyImages')}</dt><dd>${p.images.map(x => `<div>${esc(x.name)} <span class="muted">${fmtSize(x.size)}</span></div>`).join('') || '—'}</dd>
+      ${p.jobs.length ? `<dt>${t('proxyPreparing')}</dt><dd>${p.jobs.map(j => `<div>${esc(j.image)} · ${esc(j.arch)} ${j.state === 'error' ? `<span class="tag critical">${esc(j.error)}</span>` : `<span class="tag info">${t('proxyDownloading')}</span>`}</div>`).join('')}</dd>` : ''}
+      <dt>${t('proxyAptHosts')}</dt><dd><small>${p.apt_hosts.map(esc).join(', ')}</small></dd></dl>`;
 }
 
 // ------------------------------------------------------------------ modals
@@ -2057,6 +2089,7 @@ async function provisionDialog(host = '', name = '', mode = 'node') {
       <div class="row2"><label>${t('group')}<input name="group" list="dlGroups"></label><label>${t('location')}<input name="location" list="dlLocations"></label></div>${orgDatalists()}
       <label>${t('hubUrl')}<input name="hub_url" value="${esc(location.origin)}" required></label>
       <label class="check agent-only"><input type="checkbox" name="reenroll">${t('reenroll')}</label>
+      <label class="check"><input type="checkbox" name="via_fleet">${t('viaFleet')}</label>
       <label class="check"><input type="checkbox" name="forget_host_key">${t('forgetHostKey')}</label>
       <p class="muted">${t('sshInstallHint')}</p></div>`,
     onOpen: form => {
@@ -2072,7 +2105,7 @@ async function provisionDialog(host = '', name = '', mode = 'node') {
     },
     onSubmit: async data => {
       if (!data.password && !data.private_key) throw new Error('missing_fields');
-      const r = await api('/api/provision', { method: 'POST', json: { ...data, port: Number(data.port || 22), reenroll: !!data.reenroll, forget_host_key: !!data.forget_host_key } });
+      const r = await api('/api/provision', { method: 'POST', json: { ...data, port: Number(data.port || 22), reenroll: !!data.reenroll, forget_host_key: !!data.forget_host_key, via_fleet: !!data.via_fleet } });
       setTimeout(() => jobDialog(r.job_id), 50);
     },
   });
@@ -2204,6 +2237,14 @@ const ACTIONS_UI = {
     await api('/api/node-releases/' + b.dataset.release, { method: 'DELETE' });
     toast(t('deleted'));
     render();
+  },
+  downloadSource(b) { downloadSourceDialog([b.dataset.id], dev(b.dataset.id)?.download_source); },
+  bulkDownloadSource() { downloadSourceDialog([...S.selected]); },
+  async proxyClear() {
+    if (!await confirmBox(t('confirmProxyClear'))) return;
+    const r = await api('/api/proxy/cache/clear', { method: 'POST' });
+    toast(t('proxyCleared', { size: fmtSize(r.freed) }));
+    render(true);
   },
   bulkSetHub() {
     const ids = [...S.selected];
