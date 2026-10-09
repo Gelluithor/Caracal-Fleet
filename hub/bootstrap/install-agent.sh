@@ -5,13 +5,16 @@
 # or reinstalled. An existing enrollment (device id + token in /etc/caracal-agent.json) is kept.
 #
 #   sudo bash install-agent.sh --hub https://caracal.example --token ENROLL_TOKEN [--name NAME]
-#        [--reenroll] [--local-api http://127.0.0.1:8080]
+#        [--reenroll] [--local-api http://127.0.0.1:8080] [--admin-file FILE]
+#
+# --admin-file: JSON {"username", "password"} of CARACAL's web administrator (created, or its password set);
+#               the file is removed afterwards. Never pass passwords on the command line.
 #
 # Can also be piped from the hub:
 #   curl -fsSL https://HUB/api/bootstrap/install-agent.sh | sudo bash -s -- --hub https://HUB --token TOKEN
 set -euo pipefail
 
-HUB=''; TOKEN=''; NAME=''; REENROLL=''; LOCAL_API=''; DOWNLOAD_SOURCE=''
+HUB=''; TOKEN=''; NAME=''; REENROLL=''; LOCAL_API=''; DOWNLOAD_SOURCE=''; ADMIN_FILE=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -20,6 +23,7 @@ while [ $# -gt 0 ]; do
     --reenroll) REENROLL=--reenroll; shift;;
     --local-api) LOCAL_API=$2; shift 2;;
     --download-source) DOWNLOAD_SOURCE=$2; shift 2;;   # internet or fleet (apt and CARACAL through the hub)
+    --admin-file) ADMIN_FILE=$2; shift 2;;
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
 done
@@ -96,4 +100,9 @@ systemctl is-active --quiet caracal-agent.service || { journalctl -u caracal-age
 
 echo '==> Checking local CARACAL API'
 python3 /opt/caracal-agent/agent.py check || echo 'WARNING: agent runs, but the local CARACAL Fleet API is not fully available (see docs/LOCAL-API.md).'
+if [ -n "$ADMIN_FILE" ]; then
+  echo '==> CARACAL web administrator'
+  python3 /opt/caracal-agent/agent.py set-admin "$ADMIN_FILE" \
+    || echo 'WARNING: the web administrator was not set; set it in CARACAL Fleet (device -> Web administration).'
+fi
 echo '==> Fleet Agent is running'

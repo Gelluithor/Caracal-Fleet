@@ -444,3 +444,134 @@ def test_notification_sounds(env):
     run(env, 'notify_sound', {'level': 'critical', 'reset': True})
     assert not stored.exists() and 'critical' not in device(env)['notifications']['sounds']
     assert 'critical' not in requests.get(env['node'] + '/api/notify/overlay').json()['sounds']
+
+
+def test_web_administrator_from_fleet(env, tmp_path):
+    """The node's web administrator: created (first-run setup) or changed from Fleet; the password never stays in Fleet."""
+    from fastapi.testclient import TestClient
+    node, h, hub = env['mod'], env['h'], env['hub']
+    c = node.con()
+    c.execute('DELETE FROM users')
+    c.commit()
+    c.close()
+    env['agent'].heartbeat()
+    d = device(env)
+    assert d['admin'] == {'configured': False, 'username': ''} and d['capabilities']['admin'] is True
+    assert any(a['code'] == 'admin_missing' for a in d['attention'])
+
+    row = run(env, 'set_admin', {'username': 'spravce', 'password': 'first-password-1'})
+    assert json.loads(row['payload_json']) == {'username': '•••', 'password': '•••'}   # history and storage
+    assert 'first-password-1' not in json.dumps(requests.get(f"{hub}/api/audit", headers=h).json())
+    assert json.loads(row['result'])['created'] is True
+    d = device(env)
+    assert d['admin'] == {'configured': True, 'username': 'spravce'} and not any(a['code'] == 'admin_missing' for a in d['attention'])
+
+    node._login_fails.clear()   # failed logins of test_node_security
+    browser = TestClient(node.app)
+    assert browser.post('/api/login', data={'username': 'spravce', 'password': 'first-password-1'}).status_code == 200
+    assert browser.get('/api/me').status_code == 200
+    # a new name and password from Fleet: the old password and the old sessions stop working
+    row = run(env, 'set_admin', {'username': 'admin', 'password': 'second-password-2'})
+    assert json.loads(row['result'])['created'] is False
+    assert browser.get('/api/me').status_code == 401
+    assert browser.post('/api/login', data={'username': 'spravce', 'password': 'first-password-1'}).status_code == 401
+    assert browser.post('/api/login', data={'username': 'admin', 'password': 'second-password-2'}).status_code == 200
+    assert node.rows('SELECT COUNT(*) AS n FROM users')[0]['n'] == 1
+
+    url = f"{hub}/api/devices/{env['id']}/commands"
+    for payload, code in [({'username': 'a b', 'password': 'long-enough-1'}, 'invalid_admin_user'),
+                          ({'username': 'admin', 'password': 'short'}, 'admin_password_short'),
+                          ({'password': 'long-enough-1'}, 'invalid_admin_user')]:
+        r = requests.post(url, headers=h, json={'action': 'set_admin', 'payload': payload})
+        assert r.json().get('detail') == code, r.text
+    # the node itself refuses a weak password from a client that skips the hub
+    key = {'X-Fleet-Key': env['key']}
+    assert requests.post(env['node'] + '/api/fleet/v1/admin', headers=key, json={'username': 'x', 'password': 'short'}).status_code == 400
+    assert requests.post(env['node'] + '/api/fleet/v1/admin', json={'username': 'x', 'password': 'long-enough-1'}).status_code == 401
+
+    # installers pass it to the agent in a file, which is removed afterwards
+    agent_mod = load_agent()
+    creds = tmp_path / 'admin.json'
+    creds.write_text(json.dumps({'username': 'instalace', 'password': 'installer-password-3'}))
+    old_conf = agent_mod.CONFIG
+    agent_mod.CONFIG = tmp_path / 'agent.json'
+    agent_mod.CONFIG.write_text(json.dumps(env['agent'].conf))
+    try:
+        assert agent_mod.set_admin_from_file(str(creds), wait=5) == 0
+    finally:
+        agent_mod.CONFIG = old_conf
+    assert not creds.exists() and node.rows('SELECT username FROM users')[0]['username'] == 'instalace'
+
+
+def test_countdown_bar_from_fleet(env):
+    run(env, 'overlay_settings', {'enabled': False, 'size': 24})
+    state = env['mod']._cc2_read()
+    assert (state['overlay_enabled'], state['overlay_size']) == (False, 24)
+    assert device(env)['overlay'] == {'enabled': False, 'size': 24}
+    run(env, 'overlay_settings', {'enabled': True})
+    assert device(env)['overlay'] == {'enabled': True, 'size': 24}
+    url = f"{env['hub']}/api/devices/{env['id']}/commands"
+    for payload, code in [({'size': 500}, 'invalid_value'), ({}, 'nothing_to_change')]:
+        assert requests.post(url, headers=env['h'], json={'action': 'overlay_settings', 'payload': payload}).json()['detail'] == code
+
+
+def test_notification_queue_history_and_audit_from_fleet(env):
+    node = env['mod']
+    run(env, 'notify_clear')
+    for title in ('První', 'Druhé', 'Třetí'):
+        run(env, 'notify', {'title': title, 'level': 'info'})
+    queue = device(env)['notifications']['queue']
+    assert [x['title'] for x in queue] == ['První', 'Druhé', 'Třetí'] and 'done' not in queue[0]
+    run(env, 'notify_remove', {'id': queue[1]['id']})
+    assert [x['title'] for x in device(env)['notifications']['queue']] == ['První', 'Třetí']
+    # the overlay shows the first one; skipping it ends it
+    requests.get(env['node'] + '/api/notify/overlay')
+    run(env, 'notify_skip')
+    assert node.rows('SELECT done FROM notifications WHERE title=?', ('První',))[0]['done'] == 3
+
+    log = json.loads(run(env, 'notify_log')['result'])
+    assert {'První', 'Druhé'} <= {x['title'] for x in log['history']} and log['history_count'] >= 2
+    assert any(x['action'] == 'Oznámení odebráno z fronty' and x['actor'] == 'CARACAL Fleet' for x in log['audit'])
+    run(env, 'notify_history_clear')
+    assert node.rows('SELECT COUNT(*) AS n FROM notifications WHERE done>0')[0]['n'] == 0
+    run(env, 'notify_audit_clear')
+    assert [x['action'] for x in node.rows('SELECT action FROM notify_audit')] == ['Audit log smazán']
+    run(env, 'notify_clear')
+
+
+def test_node_tokens_from_fleet(env):
+    """Tokens the node issued itself: listed without the token, disabled and deleted from Fleet."""
+    from fastapi.testclient import TestClient
+    node = env['mod']
+    node._login_fails.clear()   # failed logins of test_node_security
+    browser = TestClient(node.app)
+    assert browser.post('/api/login', data={'username': 'instalace', 'password': 'installer-password-3'}).status_code == 200
+    token = browser.post('/api/notify/tokens', json={'name': 'Zabbix', 'rate_per_min': 10}).json()
+    env['agent'].heartbeat()
+    listed = device(env)['notifications']['token_list']
+    entry = next(x for x in listed if x['id'] == token['id'])
+    assert entry['prefix'] == token['token'][:10] and token['token'] not in json.dumps(listed)
+    run(env, 'update_notify_token', {'id': token['id'], 'enabled': False})
+    assert node.rows('SELECT enabled FROM notify_tokens WHERE id=?', (token['id'],))[0]['enabled'] == 0
+    assert requests.post(env['node'] + '/api/notify/v1', headers={'Authorization': 'Bearer ' + token['token']},
+                         json={'title': 'x'}).status_code == 401
+    run(env, 'delete_notify_token', {'id': token['id']})
+    assert not node.rows('SELECT id FROM notify_tokens WHERE id=?', (token['id'],))
+
+
+def test_try_watcher_and_grafana_tag_from_fleet(env):
+    """Trying a watcher before saving it and a Grafana tag: the dialog waits for the command's result."""
+    from fastapi import FastAPI
+    api = FastAPI()
+    api.get('/tickets')(lambda: [{'id': 7, 'subject': 'Tiskárna'}, {'id': 8, 'subject': 'Wi-Fi'}])
+    url, _ = serve(api)
+    row = run(env, 'preview_watcher', {'name': 'Tickets', 'url': url + '/tickets', 'auth_type': 'bearer', 'secret': 'api-secret',
+                                        'id_field': 'id', 'title_template': 'Ticket {subject}', 'level': 'info', 'interval': 60})
+    result = json.loads(row['result'])
+    assert result['count'] == 2 and result['samples'][0]['title'] == 'Ticket Tiskárna'
+    assert json.loads(row['payload_json'])['secret'] == '•••'
+    assert not env['mod'].rows("SELECT id FROM notify_watchers WHERE name='Tickets'")   # nothing saved
+    found = json.loads(run(env, 'grafana_discover', {'grafana_url': 'https://grafana.example', 'tag': 'tv'})['result'])
+    assert found['count'] == 2 and found['dashboards'][0]['title'] == 'tv 0'
+    one = requests.get(f"{env['hub']}/api/commands/{row['id']}", headers=env['h']).json()
+    assert one['state'] == 'completed' and json.loads(one['payload_json'])['secret'] == '•••'

@@ -4,7 +4,11 @@
 #
 #   sudo bash install-node.sh --hub https://fleet.example --token ENROLL_TOKEN \
 #        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME] [--docker-pool 10.200.0.0/16] \
-#        [--via-fleet [--fleet-auth-file FILE]]
+#        [--via-fleet [--fleet-auth-file FILE]] [--admin-file FILE]
+#
+# --admin-file sets CARACAL's web administrator: a JSON file {"username", "password"} readable by root only (never
+# put passwords on the command line); created on a new node, a new name and password on a converted one. The file is
+# removed afterwards.
 #
 # --via-fleet downloads everything through the hub instead of the internet: apt (Debian, Raspberry Pi and Docker
 # repositories, the sources point to <hub>/apt/<host>), Docker itself and the CARACAL image (prepared by the hub,
@@ -19,7 +23,7 @@
 # to /opt/caracal.legacy-<date>.
 set -euo pipefail
 
-HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''; DOCKER_POOL=''; VIA_FLEET=''; AUTH_FILE=''
+HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''; DOCKER_POOL=''; VIA_FLEET=''; AUTH_FILE=''; ADMIN_FILE=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -31,6 +35,7 @@ while [ $# -gt 0 ]; do
     --skip-agent) SKIP_AGENT=1; shift;;   # used when the running Fleet Agent converts its own node
     --via-fleet) VIA_FLEET=1; shift;;
     --fleet-auth-file) AUTH_FILE=$2; shift 2;;
+    --admin-file) ADMIN_FILE=$2; shift 2;;
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
 done
@@ -315,12 +320,19 @@ echo "CARACAL $VERSION is running"
 step '[7/7] Fleet Agent'
 if [ -n "$SKIP_AGENT" ]; then
   echo 'Fleet Agent already installed.'
+  if [ -n "$ADMIN_FILE" ]; then
+    python3 /opt/caracal-agent/agent.py set-admin "$ADMIN_FILE" \
+      || echo 'WARNING: the web administrator was not set; set it in CARACAL Fleet (device -> Web administration).'
+  fi
 else
   ARGS=(--hub "$HUB" --token "$TOKEN")
   [ -n "$NAME" ] && ARGS+=(--name "$NAME")
   # the enrolled agent switches apt to its own device credentials
   [ -n "$VIA_FLEET" ] && ARGS+=(--download-source fleet)
+  # the agent creates CARACAL's web administrator through the node's first-run setup
+  [ -n "$ADMIN_FILE" ] && ARGS+=(--admin-file "$ADMIN_FILE")
   bash "$SRC_DIR/install-agent.sh" "${ARGS[@]}"
 fi
+if [ -n "$ADMIN_FILE" ]; then rm -f "$ADMIN_FILE"; fi
 IP=$(hostname -I | awk '{print $1}')
 echo "==> Done. CARACAL admin: http://${IP}:8080"

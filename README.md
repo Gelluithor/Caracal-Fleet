@@ -14,7 +14,10 @@ with one `docker compose up`. Every organisation runs its own Fleet; nothing is 
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations
 - **Zero-touch installation:** prepare an SD card in Fleet, or find a fresh Raspberry Pi in the network and
-  install it over SSH
+  install it over SSH; every installation can create the administrator of the node's own web administration
+- **Everything the node's web administration does:** besides content and notifications also its administrator
+  (create, new name and password), the countdown bar on the TV, the notification queue, history and audit log, the
+  node's own app tokens, trying a watcher or a Grafana tag before saving
 - **SSH console:** a terminal on any node right in the browser (the hub connects over SSH, nothing to install)
 - **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
 - **Nodes without internet access:** Fleet can be the only download source of a node (system packages, Docker and
@@ -75,6 +78,14 @@ the CARACAL containers and the Fleet Agent.
    `hub/bootstrap/install-node.sh`.
 3. **Existing CARACAL installation:** *Add device → Fleet Agent only* connects a running classic node without
    touching it. *Convert to Docker* then moves it to containers; the data in `/var/lib/caracal` are kept.
+
+Every way of installing can also set the **administrator of the node's web administration** (CARACAL's own UI on
+port 8080): *CARACAL web administration* in the SD card, SSH installation and conversion dialogs. Without it the
+first person who opens the node's UI creates the administrator, so Fleet shows such nodes under *Needs attention*
+and sets it later from the device (*Overview → Web administration*), for many devices at once as well. The password
+goes to the node only: in a root-only file for the installers (never on a command line), removed from the hub's
+command as soon as the agent fetched it, never in the history or the audit. On the SD card it is in
+`caracal-firstboot.conf`, which the first boot removes from the card like the enrollment token.
 
 Diagnostics on a node: `sudo python3 /opt/caracal-agent/agent.py check`, `journalctl -u caracal-agent -f`,
 `/var/log/caracal-firstboot.log` (SD card installation).
@@ -178,6 +189,8 @@ select the devices on the old hub and use *Redirect to another hub*. The backup 
 - SSH installation and the web console (admin and manager only) pin the host key on first use; credentials are
   never stored. Opening and closing a console is audited; an idle console is closed after 30 minutes.
 - Backups are validated before restore (allowed files only, database integrity, an administrator exists).
+- Passwords of the nodes' web administrators and the credentials of login profiles and watchers only travel to the
+  node; the hub removes them from a command once the agent fetched it.
 
 Known limitations: the hub container runs as root and backups are not encrypted. Whoever controls the hub controls
 the nodes (through agent and CARACAL updates), so protect admin and manager accounts.

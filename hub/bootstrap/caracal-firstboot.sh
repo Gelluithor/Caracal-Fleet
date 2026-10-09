@@ -131,6 +131,12 @@ node_name() {
   echo "${NAME_PREFIX:-caracal}-$(echo "$serial" | tail -c 7 | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')"
 }
 
+json_string() {   # a JSON string (the hub refuses control characters in these values)
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
 run_install() {
   exec > >(tee -a "$LOG") 2>&1
   echo "===== $(date -Is) CARACAL zero-touch installation"
@@ -174,6 +180,11 @@ run_install() {
   local code=0 extra=()
   [ -n "${DOCKER_POOL:-}" ] && extra+=(--docker-pool "$DOCKER_POOL")
   [ "${DOWNLOAD_SOURCE:-}" = fleet ] && extra+=(--via-fleet)
+  if [ -n "${ADMIN_USER:-}" ]; then   # CARACAL's web administrator, for the agent (the file is removed after use)
+    ( umask 077; printf '{"username": %s, "password": %s}\n' "$(json_string "$ADMIN_USER")" \
+        "$(json_string "${ADMIN_PASSWORD:-}")" > "$work/admin.json" )
+    extra+=(--admin-file "$work/admin.json")
+  fi
   bash "$work/install-node.sh" --hub "$HUB" --token "$TOKEN" --name "$name" --image "$image" \
     --version "${version:-latest}" "${extra[@]}" || code=$?
   rm -rf "$work"

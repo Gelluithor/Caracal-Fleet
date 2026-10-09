@@ -59,7 +59,24 @@ def notifications_of(status):
     return {'settings': n.get('settings') if isinstance(n.get('settings'), dict) else {},
             'waiting': n.get('waiting') or 0, 'current': n.get('current'), 'tokens': n.get('tokens') or 0,
             'sounds': n.get('sounds') if isinstance(n.get('sounds'), dict) else {},
-            'watchers': [w for w in n.get('watchers') or [] if isinstance(w, dict)]}
+            'watchers': [w for w in n.get('watchers') or [] if isinstance(w, dict)],
+            # agents from 4.9: the queue, the size of the history and the audit log, the node's own tokens
+            'queue': [x for x in n.get('queue') or [] if isinstance(x, dict)] if 'queue' in n else None,
+            'history_count': n.get('history_count'), 'audit_count': n.get('audit_count'),
+            'token_list': [x for x in n.get('token_list') or [] if isinstance(x, dict)] if 'token_list' in n else None}
+
+
+def admin_of(status):
+    """The node's web administrator: {'configured', 'username'}; None when the node does not report it."""
+    a = status.get('admin')
+    return {'configured': bool(a.get('configured')), 'username': str(a.get('username') or '')} \
+        if isinstance(a, dict) else None
+
+
+def overlay_of(status):
+    """The countdown bar on the TV: {'enabled', 'size'}; None when the node does not report it."""
+    o = status.get('overlay')
+    return {'enabled': bool(o.get('enabled', True)), 'size': int(o.get('size') or 16)} if isinstance(o, dict) else None
 
 
 def player_of(status):
@@ -102,6 +119,9 @@ def attention(d, failed_commands=0):
         add('ram', 'warning', d['ram'])
     if (d.get('cpu') or 0) >= 95:
         add('cpu', 'warning', d['cpu'])
+    if d.get('admin') and not d['admin']['configured']:
+        # anyone who opens the node's web administration first could create the administrator
+        add('admin_missing', 'warning')
     if failed_commands:
         add('commands_failed', 'warning', failed_commands)
     if version_tuple(d.get('version')) < version_tuple(AGENT_VERSION):
@@ -143,6 +163,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         # where the node downloads CARACAL and system packages ('' = agent too old to report it)
         'download_source': status.get('download_source') or '', 'arch': status.get('arch') or '',
         'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in status.get('assets') or []),
+        'admin': admin_of(status), 'overlay': overlay_of(status),
     }
     d['current_asset_id'] = None
     if d['current_id'] is not None:

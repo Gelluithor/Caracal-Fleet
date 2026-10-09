@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.10.1'
+HUB_VERSION = '4.11.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -78,13 +78,39 @@ ACTIONS = {
     'check_watcher': ('content', 600),
     'notify_sound': ('content', None),
     'set_download_source': ('manage', None),
+    # what else the node's web administration offers (CARACAL 2026.10.10 and newer)
+    'set_admin': ('manage', None),
+    'overlay_settings': ('content', None),
+    'notify_skip': ('control', 600),
+    'notify_remove': ('control', 600),
+    'notify_log': ('view', 600),
+    'notify_history_clear': ('content', None),
+    'notify_audit_clear': ('manage', None),
+    'update_notify_token': ('manage', None),
+    'delete_notify_token': ('manage', None),
+    'preview_watcher': ('content', 600),
+    'grafana_discover': ('content', 600),
 }
 
 # Payload keys that must not stay in the hub: login credentials of web pages and of notification watchers travel
 # only to the node.
 SECRET_KEYS = ('username', 'password', 'secret', 'client_secret', 'refresh_token')
-SECRET_ACTIONS = ('add_profile', 'update_profile', 'add_watcher', 'update_watcher')
+SECRET_ACTIONS = ('add_profile', 'update_profile', 'add_watcher', 'update_watcher', 'preview_watcher', 'set_admin',
+                  'convert_to_docker')   # convert_to_docker: optionally with the node's web administrator
 REDACTED = '•••'
+
+
+ADMIN_USER_RE = re.compile(r'[^\s]{1,64}')
+
+
+def validate_admin(d):
+    """The web administrator of the node (CARACAL's own admin UI): like the node's first-run setup."""
+    username, password = str(d.get('username') or '').strip(), str(d.get('password') or '')
+    if not ADMIN_USER_RE.fullmatch(username):
+        raise HTTPException(400, 'invalid_admin_user')
+    if not 10 <= len(password) <= 200:
+        raise HTTPException(400, 'admin_password_short')
+    return {'username': username, 'password': password}
 
 
 def redact(action, payload):

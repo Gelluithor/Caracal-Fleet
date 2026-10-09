@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 
 from . import images
-from .core import BOOT, audit, cfg, current_user, save_cfg
+from .core import ADMIN_USER_RE, BOOT, audit, cfg, current_user, save_cfg
 
 router = APIRouter()
 
@@ -89,6 +89,8 @@ def _options(d):
         # fixed address instead of DHCP (Wi-Fi when it is set, otherwise Ethernet) and an own time server
         'static_ip': _clean(d.get('static_ip'), 18), 'gateway': _clean(d.get('gateway'), 15),
         'dns': _clean(d.get('dns'), 200), 'ntp': _clean(d.get('ntp'), 253),
+        # CARACAL's web administrator, created by the installation (otherwise whoever opens it first creates it)
+        'admin_user': _clean(d.get('admin_user'), 64), 'admin_password': str(d.get('admin_password') or ''),
     }
     checks = (
         (o['os'], 'invalid_os'),
@@ -106,11 +108,15 @@ def _options(d):
         (not o['static_ip'] or _gateway(o['static_ip'], o['gateway']), 'invalid_gateway'),
         (not o['dns'] or _dns(o['dns']), 'invalid_dns'),
         (not o['ntp'] or NTP_RE.match(o['ntp']), 'invalid_ntp'),
+        (not (o['admin_user'] or o['admin_password']) or ADMIN_USER_RE.fullmatch(o['admin_user']),
+         'invalid_admin_user'),
+        (not (o['admin_user'] or o['admin_password']) or 10 <= len(o['admin_password']) <= 200,
+         'admin_password_short'),
     )
     for ok, error in checks:
         if not ok:
             raise HTTPException(400, error)
-    for key in ('wifi_password', 'password'):
+    for key in ('wifi_password', 'password', 'admin_password'):
         if any(ord(ch) < 32 for ch in o[key]):
             raise HTTPException(400, 'invalid_' + key)
     return o
@@ -164,7 +170,9 @@ def firstboot_conf(o):
             f"HUB={shlex.quote(o['hub_url'])}\nTOKEN={shlex.quote(cfg()['enroll_token'])}\n"
             f"NAME_PREFIX={shlex.quote(o['prefix'])}\n"
             + (f'DOCKER_POOL={shlex.quote(pool)}\n' if pool else '')
-            + ('DOWNLOAD_SOURCE=fleet\n' if o.get('download_source') == 'fleet' else ''))
+            + ('DOWNLOAD_SOURCE=fleet\n' if o.get('download_source') == 'fleet' else '')
+            + (f"ADMIN_USER={shlex.quote(o['admin_user'])}\nADMIN_PASSWORD={shlex.quote(o['admin_password'])}\n"
+               if o.get('admin_user') else ''))
 
 
 def _yaml(value):

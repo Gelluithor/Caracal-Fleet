@@ -98,6 +98,17 @@ def upload(ssh, local, remote):
         raise RuntimeError(f'Upload of {Path(local).name} failed: {err or f"size {size} != {len(data)}"}')
 
 
+def upload_secret(ssh, data, remote):
+    """A file only the SSH user (and root) can read, e.g. the node's web administrator for the installer."""
+    q = shlex.quote(remote)
+    stdin, stdout, stderr = ssh.exec_command(f'umask 077 && cat > {q}', timeout=60)
+    stdin.write(data)
+    stdin.flush()
+    stdin.channel.shutdown_write()
+    if stdout.channel.recv_exit_status():
+        raise RuntimeError(f'Upload of {Path(remote).name} failed: {stderr.read().decode(errors="replace").strip()}')
+
+
 def start(job_id, params, user):
     threading.Thread(target=_provision, args=(job_id, params, user), daemon=True).start()
 
@@ -138,6 +149,10 @@ def _provision(job_id, p, user):
             args.append('--reenroll')
         if not node and p.get('via_fleet'):
             args += ['--download-source', 'fleet']
+        if p.get('admin'):   # CARACAL's web administrator: in a file, never on the command line
+            upload_secret(ssh, json.dumps(p['admin']), f'{tmp}/admin.json')
+            args += ['--admin-file', f'{tmp}/admin.json']
+            job_log(job_id, f"The web administrator {p['admin']['username']} will be set")
         script = 'install-node.sh' if node else 'install-agent.sh'
         cmd = f'bash {shlex.quote(tmp + "/" + script)} ' + ' '.join(shlex.quote(a) for a in args)
         stdin_data = None

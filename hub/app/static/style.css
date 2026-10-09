@@ -75,7 +75,7 @@ input[type=checkbox], input[type=radio] { width: 16px; height: 16px; padding: 0;
 .mark.small.has-logo { min-width: 34px; max-width: 120px; }
 .mark.has-logo img { display: block; height: 100%; width: auto; max-width: 100%; object-fit: contain; }
 .logo-preview { display: grid; place-items: center; min-height: 90px; margin: 12px 0; border: 1px dashed var(--line); border-radius: 11px; background: var(--panel-2); }
-.form-actions.start { justify-content: flex-start; }
+.form-actions.start { justify-content: flex-start; flex-wrap: wrap; }
 .modal-body .note { border-radius: 9px; border: 0; }
 .note.warn { background: var(--warn-soft); color: var(--warn); font-weight: 600; }
 .steps { margin: 0; padding-left: 20px; color: var(--muted); display: grid; gap: 4px; }

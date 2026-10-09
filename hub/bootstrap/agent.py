@@ -33,7 +33,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.8.0'
+VERSION = '4.9.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -85,7 +85,21 @@ ENDPOINTS = {
     'check_watcher': ('POST', '/api/fleet/v1/notify/watchers/{id}/check'),
     'notify_sound': ('POST', '/api/fleet/v1/notify/sounds/{level}'),
     'notify_sound_delete': ('DELETE', '/api/fleet/v1/notify/sounds/{level}'),
+    # what else the node's web administration offers (CARACAL 2026.10.10 and newer)
+    'admin': ('POST', '/api/fleet/v1/admin'),
+    'overlay': ('PUT', '/api/fleet/v1/player/overlay'),
+    'notify_skip': ('POST', '/api/fleet/v1/notify/skip'),
+    'notify_remove': ('DELETE', '/api/fleet/v1/notify/queue/{id}'),
+    'notify_log': ('GET', '/api/fleet/v1/notify/log'),
+    'notify_history_clear': ('POST', '/api/fleet/v1/notify/history/clear'),
+    'notify_audit_clear': ('POST', '/api/fleet/v1/notify/audit/clear'),
+    'notify_token_update': ('PUT', '/api/fleet/v1/notify/tokens/{id}'),
+    'notify_token_delete': ('DELETE', '/api/fleet/v1/notify/tokens/{id}'),
+    'preview_watcher': ('POST', '/api/fleet/v1/notify/watchers/preview'),
+    'grafana_discover': ('POST', '/api/fleet/v1/grafana/discover'),
 }
+# the node's own first-run setup, for CARACAL versions without the Fleet admin endpoint
+SETUP_STATUS, SETUP = '/api/setup-status', '/api/setup'
 GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale')
 # Login profiles of web pages: the credentials are stored encrypted on the node and only travel to it.
 # auth_type: 'form' (log-in form on the page) or 'http' (HTTP Basic/Digest, the browser's pop-up)
@@ -105,6 +119,8 @@ WATCHER_PUBLIC = ('id', 'name', 'url', 'auth_type', 'auth_header', 'list_path', 
                   'message_template', 'level', 'level_field', 'interval', 'verify_tls', 'enabled', 'initialized',
                   'last_check', 'last_error', 'last_count', 'last_new', 'oauth_token_url', 'oauth_grant',
                   'oauth_client_id', 'oauth_scope', 'oauth_extra', 'oauth_client_auth', 'has_credentials')
+QUEUE_PUBLIC = ('id', 'source', 'title', 'message', 'level', 'priority', 'created')
+TOKEN_PUBLIC = ('id', 'name', 'prefix', 'rate_per_min', 'enabled', 'created', 'last_used')   # never the token
 MEDIA_KINDS = ('image', 'video')
 COLLECTION_KIND = 'grafana-tag'   # Grafana collections are playlist assets of this kind on CARACAL nodes
 PLAYER_STALE = 15                 # seconds without a player heartbeat before the player counts as down
@@ -231,7 +247,19 @@ class Agent:
                 'sounds': {level: {k: v.get(k) for k in ('name', 'size', 'sha256', 'uploaded')}
                            for level, v in (n.get('sounds') or {}).items() if isinstance(v, dict)},
                 'watchers': [{k: w.get(k) for k in WATCHER_PUBLIC if k in w} for w in n.get('watchers') or []
-                             if isinstance(w, dict)]}
+                             if isinstance(w, dict)],
+                **({'queue': [{k: x.get(k) for k in QUEUE_PUBLIC} for x in n['queue'] if isinstance(x, dict)][:30]}
+                   if isinstance(n.get('queue'), list) else {}),
+                **({'token_list': [{k: x.get(k) for k in TOKEN_PUBLIC} for x in n['token_list'] if isinstance(x, dict)]}
+                   if isinstance(n.get('token_list'), list) else {}),
+                **{k: n[k] for k in ('history_count', 'audit_count') if isinstance(n.get(k), int)}}
+
+    @staticmethod
+    def admin_of(snap):
+        # whether the node's web administrator exists and its name; never more
+        a = snap.get('admin')
+        return {'configured': bool(a.get('configured')), 'username': str(a.get('username') or '')[:64]} \
+            if isinstance(a, dict) else None
 
     @classmethod
     def collections_of(cls, snap):
@@ -375,6 +403,7 @@ class Agent:
             'api_ok': api_ok, 'api_error': api_error, 'player': player,
             'assets': self.assets_of(snap), 'collections': snap.get('collections') or [],
             'profiles': self.profiles_of(snap), 'notifications': self.notifications_of(snap),
+            'admin': self.admin_of(snap), 'overlay': snap.get('overlay') if isinstance(snap.get('overlay'), dict) else None,
             'frozen_until': self.state.get('unfreeze_at'), 'last_error': self.last_error,
             'capabilities': self.capabilities() if api_ok else {},
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
@@ -570,6 +599,88 @@ class Agent:
 
     def do_check_watcher(self, p):
         return self.body(self.local('check_watcher', {'id': p['id']}, timeout=60))
+
+    def do_preview_watcher(self, p):
+        return self.body(self.local('preview_watcher', json={**self.watcher_fields(p), **(
+            {'id': p['id']} if p.get('id') is not None else {})}, timeout=60))
+
+    def do_notify_skip(self, p):
+        return self.body(self.local('notify_skip'))
+
+    def do_notify_remove(self, p):
+        return self.body(self.local('notify_remove', {'id': p['id']}))
+
+    def do_notify_log(self, p):
+        """The latest history and audit entries, shortened to fit the hub's command result (16 kB)."""
+        res = self.body(self.local('notify_log', params={'limit': 60}))
+        if not isinstance(res, dict):
+            raise LocalApiError('Invalid notification log response')
+        cut = lambda v, n: v[:n] + '…' if isinstance(v, str) and len(v) > n else v
+        out = {'history_count': res.get('history_count'), 'audit_count': res.get('audit_count'),
+               'history': [{k: cut(x.get(k), 160) for k in ('id', 'source', 'title', 'message', 'level', 'created',
+                                                            'shown_at', 'done')} for x in res.get('history') or []],
+               'audit': [{k: cut(x.get(k), 160) for k in ('ts', 'actor', 'ip', 'action', 'detail')}
+                         for x in res.get('audit') or []]}
+        while len(json.dumps(out, ensure_ascii=False)) > 15000 and (out['history'] or out['audit']):
+            longer = 'history' if len(out['history']) >= len(out['audit']) else 'audit'
+            out[longer].pop()
+        return out
+
+    def do_notify_history_clear(self, p):
+        return self.body(self.local('notify_history_clear'))
+
+    def do_notify_audit_clear(self, p):
+        return self.body(self.local('notify_audit_clear'))
+
+    def do_update_notify_token(self, p):
+        return self.body(self.local('notify_token_update', {'id': p['id']},
+                                    json={k: p[k] for k in ('name', 'rate_per_min', 'enabled') if k in p}))
+
+    def do_delete_notify_token(self, p):
+        return self.body(self.local('notify_token_delete', {'id': p['id']}))
+
+    def do_overlay_settings(self, p):
+        return self.body(self.local('overlay', json={k: p[k] for k in ('enabled', 'size') if k in p}))
+
+    def do_grafana_discover(self, p):
+        return self.body(self.local('grafana_discover', json={'grafana_url': p['grafana_url'], 'tag': p['tag']},
+                                    timeout=60))
+
+    def set_admin_waiting(self, creds, wait=300):
+        """do_set_admin, waiting for a CARACAL that is just starting."""
+        deadline = time.time() + wait
+        while True:
+            try:
+                return self.do_set_admin(creds)
+            except LocalApiError as e:
+                if time.time() > deadline or 'unreachable' not in str(e):
+                    raise
+                time.sleep(5)
+
+    def do_set_admin(self, p):
+        """The web administrator of the node: created (the node's first-run setup), or a new name and password of
+        the existing one (its old sessions end)."""
+        creds = {'username': p['username'], 'password': p['password']}
+        base = self.conf['local_api'].rstrip('/')
+        try:
+            needed = self.local_session.get(base + SETUP_STATUS, timeout=10).json().get('needed')
+        except (requests.RequestException, ValueError, AttributeError) as e:
+            raise LocalApiError(f'Local CARACAL API unreachable: {e}')
+        if needed:
+            r = self.local_session.post(base + SETUP, data=creds, timeout=30)
+            if r.status_code >= 400 and r.status_code != 409:   # 409: created meanwhile, change it below
+                raise LocalApiError(f'CARACAL setup: HTTP {r.status_code} {r.text[:200]}')
+            if r.status_code < 400:
+                log('web administrator created', p['username'])
+                return {'created': True, 'username': p['username']}
+        try:
+            self.local('admin', json=creds)
+        except LocalApiError as e:
+            if 'does not support' in str(e):
+                raise LocalApiError('This CARACAL version cannot change its administrator; update CARACAL first')
+            raise
+        log('web administrator changed', p['username'])
+        return {'created': False, 'username': p['username']}
 
     def do_delete_asset(self, p):
         return self.body(self.local('delete_asset', {'id': p['id']}))
@@ -906,7 +1017,13 @@ class Agent:
                                    f'again when it is back online.\n{out[-3000:]}')
             if code != 0:
                 raise RuntimeError(f'install-node.sh failed (exit {code}):\n{out[-6000:]}')
-            return {'version': caracal_version(), 'runtime': runtime(), 'log': out[-3000:]}
+            result = {'version': caracal_version(), 'runtime': runtime(), 'log': out[-3000:]}
+            if p.get('username') and p.get('password'):   # optional: the web administrator of the converted node
+                try:
+                    result['admin'] = self.set_admin_waiting({'username': p['username'], 'password': p['password']})
+                except LocalApiError as e:
+                    result['admin_error'] = str(e)[:300]
+            return result
         finally:
             self.maintenance = ''
             shutil.rmtree(work, ignore_errors=True)
@@ -1346,6 +1463,28 @@ def check():
     return 0 if ok else 1
 
 
+def set_admin_from_file(path, wait=300):
+    """Installers pass the web administrator in a file readable by root only (never on the command line)."""
+    try:
+        creds = json.loads(Path(path).read_text(encoding='utf-8'))
+    finally:
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+    conf = read_json(CONFIG, None)
+    if not conf:
+        raise SystemExit(f'{CONFIG} missing - run "agent.py enroll" first')
+    try:   # a freshly started CARACAL container needs a moment
+        result = Agent(conf).set_admin_waiting({'username': str(creds.get('username') or ''),
+                                                'password': str(creds.get('password') or '')}, wait)
+    except LocalApiError as e:
+        print(f'The web administrator could not be set: {e}', file=sys.stderr)
+        return 1
+    print(f"Web administrator {result['username']} {'created' if result['created'] else 'changed'}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='CARACAL Fleet Agent ' + VERSION)
     sub = ap.add_subparsers(dest='cmd')
@@ -1358,6 +1497,9 @@ def main(argv=None):
     ds = sub.add_parser('download-source', help='where CARACAL and system packages are downloaded from')
     ds.add_argument('source', choices=('internet', 'fleet'))
     sub.add_parser('run')
+    adm = sub.add_parser('set-admin', help="create the node's web administrator or set its password")
+    adm.add_argument('file', help='JSON file {"username", "password"}; removed afterwards')
+    adm.add_argument('--wait', type=int, default=300, help='seconds to wait for the local CARACAL API')
     sub.add_parser('check')
     sub.add_parser('version')
     a = ap.parse_args(argv)
@@ -1371,6 +1513,8 @@ def main(argv=None):
         # a running agent reads its configuration at start
         subprocess.run(['systemctl', 'try-restart', 'caracal-agent.service'], stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
+    elif a.cmd == 'set-admin':
+        return set_admin_from_file(a.file, a.wait)
     elif a.cmd == 'check':
         return check()
     elif a.cmd == 'version':

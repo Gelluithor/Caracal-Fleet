@@ -16,7 +16,7 @@ from . import console, images, notify, playlists, provisioning, proxy, releases,
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
-                   sweep_commands, token_hash)
+                   sweep_commands, token_hash, validate_admin)
 from .devices import COLLECTION_KIND, MEDIA_KINDS, build, collections_of, grafana_config
 
 app = FastAPI(title='CARACAL Fleet Controller', version=HUB_VERSION, docs_url=None, redoc_url=None,
@@ -347,7 +347,8 @@ def validate_command(c, row, action, payload):
             raise HTTPException(409, 'not_docker')
         if action == 'convert_to_docker' and rt == 'docker':
             raise HTTPException(409, 'already_docker')
-        payload = {'version': version, 'image': images.node_image()}
+        admin = validate_admin(payload) if action == 'convert_to_docker' and payload.get('username') else {}
+        payload = {'version': version, 'image': images.node_image(), **admin}
     if action in NOTIFY_CAPABILITY and (status.get('capabilities') or {}).get(NOTIFY_CAPABILITY[action]) is False:
         raise HTTPException(409, 'notifications_unsupported')
     if action == 'notify':
@@ -365,6 +366,25 @@ def validate_command(c, row, action, payload):
         watchers = (status.get('notifications') or {}).get('watchers')
         if watchers is not None and str(payload['id']) not in [str(w.get('id')) for w in watchers]:
             raise HTTPException(409, 'watcher_not_found')
+    if action == 'preview_watcher':
+        # tries a watcher configuration without saving it (secrets only travel to the node, like for add_watcher)
+        payload = {**({'id': payload['id']} if payload.get('id') not in (None, '') else {}),
+                   **validate_watcher(payload, required=payload.get('id') in (None, ''))}
+    if action == 'set_admin':
+        payload = validate_admin(payload)
+    if action == 'overlay_settings':
+        payload = validate_overlay(payload)
+    if action in ('notify_remove', 'update_notify_token', 'delete_notify_token'):
+        try:
+            payload['id'] = int(payload.get('id'))
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'item_required')
+    if action == 'update_notify_token':
+        payload = validate_notify_token(payload)
+    if action == 'grafana_discover':
+        payload = validate_grafana({k: payload.get(k) for k in ('grafana_url', 'tag')} | {'name': 'x'})
+        payload.pop('name', None)
+        payload.pop('kiosk', None)
     if action == 'set_download_source':
         # where the node downloads CARACAL images and system packages: the internet or this hub
         if payload.get('source') not in ('internet', 'fleet'):
@@ -461,12 +481,53 @@ WATCHER_SECRETS = ('username', 'secret', 'client_secret', 'refresh_token')
 NOTIFY_CAPABILITY = {'notify': 'notify', 'notify_clear': 'notify_clear', 'notify_settings': 'notify_settings',
                      'add_watcher': 'add_watcher', 'update_watcher': 'update_watcher',
                      'delete_watcher': 'delete_watcher', 'check_watcher': 'check_watcher',
-                     'notify_sound': 'notify_sound'}
+                     'notify_sound': 'notify_sound', 'notify_skip': 'notify_skip', 'notify_remove': 'notify_remove',
+                     'notify_log': 'notify_log', 'notify_history_clear': 'notify_history_clear',
+                     'notify_audit_clear': 'notify_audit_clear', 'update_notify_token': 'notify_token_update',
+                     'delete_notify_token': 'notify_token_delete', 'preview_watcher': 'preview_watcher'}
 SOUND_MAX = 5 * 1024 ** 2
 
 
 def flag(v):
     return v not in (False, 0, '0', 'false', 'off', 'no', '', None)
+
+
+def validate_overlay(d):
+    """The countdown bar of the current page on the TV (enabled, height in px)."""
+    out = {}
+    if 'enabled' in d:
+        out['enabled'] = flag(d['enabled'])
+    if 'size' in d:
+        try:
+            out['size'] = int(d['size'])
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'invalid_value')
+        if not 4 <= out['size'] <= 200:
+            raise HTTPException(400, 'invalid_value')
+    if not out:
+        raise HTTPException(400, 'nothing_to_change')
+    return out
+
+
+def validate_notify_token(d):
+    """Name, limit and enabled of a notification token of the node (new tokens are created on the node)."""
+    out = {'id': d['id']}
+    if 'name' in d:
+        out['name'] = text(d.get('name'), 60)
+        if not out['name']:
+            raise HTTPException(400, 'name_required')
+    if 'rate_per_min' in d:
+        try:
+            out['rate_per_min'] = int(d['rate_per_min'])
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'invalid_value')
+        if not 1 <= out['rate_per_min'] <= 600:
+            raise HTTPException(400, 'invalid_value')
+    if 'enabled' in d:
+        out['enabled'] = flag(d['enabled'])
+    if len(out) == 1:
+        raise HTTPException(400, 'nothing_to_change')
+    return out
 
 
 def bounded(v, lo, hi):
@@ -635,6 +696,20 @@ def list_commands(r: Request, device_id: str = '', state: str = '', limit: int =
     for x in rows:
         x['payload_json'] = redact_json(x['action'], x['payload_json'])
     return rows
+
+
+@app.get('/api/commands/{cid}')
+def get_command(cid: int, r: Request):
+    current_user(r)
+    with db() as c:
+        sweep_commands(c)
+        row = c.execute('SELECT c.*, d.name device_name FROM commands c LEFT JOIN devices d ON d.id=c.device_id '
+                        'WHERE c.id=?', (cid,)).fetchone()
+    if not row:
+        raise HTTPException(404, 'not_found')
+    x = dict(row)
+    x['payload_json'] = redact_json(x['action'], x['payload_json'])
+    return x
 
 
 @app.post('/api/commands/{cid}/cancel')
@@ -938,6 +1013,9 @@ async def provision(r: Request):
     params['via_fleet'] = bool(d.get('via_fleet'))
     params['password'] = str(d.get('password') or '')  # keep exact password (no trimming)
     params['mode'] = 'node' if d.get('mode') == 'node' else 'agent'
+    # optional: CARACAL's web administrator (created, or its password set on an existing node); kept in memory only
+    params['admin'] = validate_admin({'username': d.get('admin_username'), 'password': d.get('admin_password')}) \
+        if d.get('admin_username') or d.get('admin_password') else None
     if not params['host'] or not params['username'] or not params['hub_url']:
         raise HTTPException(400, 'missing_fields')
     if not params['password'] and not params['private_key']:

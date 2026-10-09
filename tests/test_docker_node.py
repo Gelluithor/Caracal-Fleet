@@ -190,6 +190,35 @@ def test_agent_conversion_runs_install_node(env, tmp_path):
     assert res['runtime'] == 'docker'
 
 
+def test_conversion_sets_the_web_administrator(env):
+    """Optional administrator of the converted node: only the agent sees the password, the hub keeps it redacted."""
+    classic = requests.post(env['hub'] + '/api/device/enroll', json={
+        'enroll_token': 'enroll-test-token', 'fingerprint': 'classic-admin', 'name': 'Classic admin'}).json()
+    requests.post(f"{env['hub']}/api/device/{classic['device_id']}/heartbeat", headers={
+        'X-Device-Token': classic['device_token']}, json={'version': '4.9.0', 'runtime': 'host',
+                                                        'caracal_version': '2026.10.06', 'api_ok': True})
+    bad = api(env, 'POST', '/api/node-image/convert', ok=False, json={
+        'version': '2026.10.10', 'device_ids': [classic['device_id']], 'admin_username': 'spravce', 'admin_password': 'short'})
+    assert bad.json()['detail'] == 'admin_password_short'
+    r = api(env, 'POST', '/api/node-image/convert', json={'version': '2026.10.10', 'device_ids': [classic['device_id']],
+                                                         'admin_username': 'spravce', 'admin_password': 'convert-password-1'}).json()
+    listed = next(x for x in api(env, 'GET', f"/api/commands?device_id={classic['device_id']}").json() if x['id'] == r['command_ids'][0])
+    assert json.loads(listed['payload_json'])['password'] == '•••'
+    delivered = requests.get(f"{env['hub']}/api/device/{classic['device_id']}/commands",
+                             headers={'X-Device-Token': classic['device_token']}).json()
+    assert delivered[0]['payload']['password'] == 'convert-password-1'
+    from app.core import db
+    with db() as c:   # removed from the hub once the agent fetched it
+        assert 'convert-password-1' not in c.execute('SELECT payload_json FROM commands WHERE id=?', (r['command_ids'][0],)).fetchone()[0]
+
+    agent, seen = env['agent'], {}
+    agent.run_with_heartbeats = lambda cmd, cwd=None: (0, 'converted')
+    agent.set_admin_waiting = lambda creds: seen.setdefault('admin', creds) and {'created': False, 'username': creds['username']}
+    res = agent.do_convert_to_docker({'image': env['image'], 'version': '2026.10.10', 'username': 'spravce', 'password': 'convert-password-1'})
+    assert seen['admin'] == {'username': 'spravce', 'password': 'convert-password-1'} and res['admin']['username'] == 'spravce'
+    del agent.set_admin_waiting
+
+
 def test_reboot_requested_in_node_ui(env):
     agent = env['agent']
     agent.state.pop('reboot_request_seen', None)

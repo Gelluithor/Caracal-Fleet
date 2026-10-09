@@ -36,6 +36,15 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Check watcher | `POST /notify/watchers/{id}/check` | checks now → `{ok, count, new, sent, first}` or `{ok: false, error}` |
 | Notification sound | `POST /notify/sounds/{level}` | multipart `file`: an MP3 (at most 5 MB) for `info`, `success`, `warning` or `critical` |
 | Default sound | `DELETE /notify/sounds/{level}` | the generated chime again |
+| Web administrator | `POST /admin` | `{username, password}` (password 10 to 200 characters): creates the administrator of the node's web administration, or sets a new name and password of the existing one (its sessions end) → `{created}` |
+| Countdown on the TV | `PUT /player/overlay` | `{enabled, size}` (bar height 4 to 200 px) |
+| Skip notification | `POST /notify/skip` | ends the notification on screen |
+| Remove notification | `DELETE /notify/queue/{id}` | removes a waiting notification |
+| Notification log | `GET /notify/log?limit=` | `{history, history_count, audit, audit_count}`, at most 200 entries each |
+| Clear history / audit | `POST /notify/history/clear`, `POST /notify/audit/clear` | the clearing of the audit log stays in it |
+| Node token | `PUT /notify/tokens/{id}`, `DELETE /notify/tokens/{id}` | `{name, rate_per_min, enabled}`; new tokens are created in the node's administration only (shown once) |
+| Try a watcher | `POST /notify/watchers/preview` | the watcher fields (and `id` to use the stored credentials) → `{count, samples}`, nothing is saved |
+| Try a Grafana tag | `POST /grafana/discover` | `{grafana_url, tag}` → `{count, dashboards}` |
 
 All paths start with `/api/fleet/v1`. CARACAL rules: the display time is at least 5 s (videos loop for the whole
 time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.mp4 .webm .mkv`.
@@ -83,6 +92,12 @@ time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.m
   their credentials or the IDs they have seen; put API keys into the authentication fields rather than into the URL,
   because the URL is reported to the hub. Changes made through the Fleet API appear in the node's notification audit
   log as "CARACAL Fleet".
+- `admin` (`{configured, username}`) says whether the node's web administration has its administrator; until it
+  has one, anyone who opens it first can create it, so Fleet lists such nodes under *Needs attention*. The agent
+  creates it through the node's first-run setup (`POST /api/setup`) and changes it through `POST /admin`.
+- `overlay` (`{enabled, size}`) is the countdown bar on the TV. `notifications.queue` lists up to 30 waiting
+  notifications, `notifications.token_list` the node's own app tokens (never the tokens themselves),
+  `history_count` and `audit_count` the size of the history and the audit log (their entries: `GET /notify/log`).
 - `requests` counts restarts requested in the node's own admin UI. In Docker the app cannot reboot the host, so
   the agent performs a reboot when the counter increases.
 

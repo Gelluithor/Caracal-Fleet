@@ -12,7 +12,8 @@ import requests
 from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
-from .core import audit, cfg, current_user, db, new_batch, queue_command, save_cfg, version_tuple
+from .core import (audit, cfg, current_user, db, new_batch, queue_command, save_cfg, validate_admin,
+                   version_tuple)
 from .devices import build
 
 router = APIRouter()
@@ -163,6 +164,10 @@ async def convert_nodes(r: Request):
     """Convert classic CARACAL nodes to Docker (data in /var/lib/caracal are kept)."""
     u = current_user(r, 'manage')
     version, ids, image = await _deploy_body(r)
-    res = _queue(u, ids, 'convert_to_docker', {'version': version, 'image': image}, 'host')
+    d = await r.json()
+    # optional: the web administrator of the converted nodes (created, or a new name and password)
+    admin = validate_admin({'username': d.get('admin_username'), 'password': d.get('admin_password')}) \
+        if d.get('admin_username') or d.get('admin_password') else {}
+    res = _queue(u, ids, 'convert_to_docker', {'version': version, 'image': image, **admin}, 'host')
     audit(u, 'image.convert', version, {'devices': ids, 'skipped': res['skipped']})
     return res

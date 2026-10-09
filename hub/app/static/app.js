@@ -485,10 +485,11 @@ function renderBulkBar(el) {
     ${can('control') ? b('next', t('act_next'), 'next') + b('unfreeze', t('act_unfreeze'), 'play') + b('restart_player', t('act_restart_player'), 'restart') + b('reboot', t('act_reboot'), 'power', 'danger') : ''}
     ${can('content') ? `<button class="btn sm" data-do="bulkAddContent">${icon('plus')}${t('addContent')}</button><button class="btn sm" data-do="bulkCopy">${icon('copy')}${t('copyPlaylistHere')}</button>` : ''}
     ${can('control') ? `<button class="btn sm" data-do="bulkNotify">${icon('attention')}${t('notifySend')}</button>` : ''}
-    ${can('content') ? `<button class="btn sm" data-do="bulkNotifySettings">${icon('settings')}${t('notifySettings')}</button><button class="btn sm" data-do="bulkNotifySound">${icon('upload')}${t('notifySoundUpload')}</button><button class="btn sm" data-do="bulkWatcher">${icon('eye')}${t('addWatcher')}</button>` : ''}
+    ${can('content') ? `<button class="btn sm" data-do="bulkNotifySettings">${icon('settings')}${t('notifySettings')}</button><button class="btn sm" data-do="bulkNotifySound">${icon('upload')}${t('notifySoundUpload')}</button><button class="btn sm" data-do="bulkWatcher">${icon('eye')}${t('addWatcher')}</button><button class="btn sm" data-do="bulkOverlay">${icon('settings')}${t('overlayBar')}</button>` : ''}
     ${can('manage') ? b('update_agent', t('act_update_agent'), 'agent') + `<button class="btn sm" data-do="bulkAssign">${icon('group')}${t('assignGroupLocation')}</button>
       <button class="btn sm" data-do="bulkSetHub">${icon('upload')}${t('act_set_hub')}</button>
       <button class="btn sm" data-do="bulkDownloadSource">${icon('download')}${t('downloadSource')}</button>
+      <button class="btn sm" data-do="bulkNodeAdmin">${icon('lock')}${t('webAdmin')}</button>
       <button class="btn sm" data-do="caracalUpdate">${icon('updates')}${t('act_update_caracal')}</button>` : ''}
     <button class="btn sm ghost" data-do="clearSel">${icon('x')}${t('clearSelection')}</button>`);
 }
@@ -523,6 +524,7 @@ function quickFix(d, a, inDetail = false) {
   if (a.code === 'agent_outdated' && can('manage') && d.online) return btn('update_agent', t('act_update_agent'));
   if (a.code === 'caracal_outdated' && can('manage') && d.online) return `<button class="btn sm" data-do="caracalUpdate" data-id="${esc(d.id)}">${t('act_update_caracal')}</button>`;
   if (a.code === 'local_api' && can('control')) return btn('reboot', t('act_reboot'));
+  if (a.code === 'admin_missing' && can('manage') && d.online && adminSupport(d)) return `<button class="btn sm" data-do="nodeAdmin" data-id="${esc(d.id)}">${t('webAdminCreate')}</button>`;
   return inDetail ? '' : `<a class="btn sm" href="#/device/${encodeURIComponent(d.id)}">${t('open')}</a>`;
 }
 
@@ -735,7 +737,82 @@ function deviceOverview(d) {
         <dt>${t('localApi')}</dt><dd>${d.api_ok === false ? `<span class="tag critical">${t('unavailable')}</span>` : d.api_ok ? `<span class="tag ok">OK</span>` : '—'}</dd>
         <dt>${t('downloadSource')}</dt><dd>${d.download_source ? t('downloadSource_' + d.download_source) : '—'}${can('manage') && d.download_source ? ` <button class="btn sm ghost" data-do="downloadSource" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
         <dt>${t('pendingCommands')}</dt><dd>${d.pending_commands}</dd>${d.notes ? `<dt>${t('notes')}</dt><dd>${esc(d.notes)}</dd>` : ''}</dl></section>
-    </div>`;
+    </div>${nodeAdminCard(d)}`;
+}
+
+// The node's own web administration (CARACAL on port 8080): its administrator and the countdown on the TV.
+const adminSupport = d => 'admin' in (d.capabilities || {});
+const nodeAdminUrl = d => d.ip ? `http://${d.ip.includes(':') ? `[${d.ip}]` : d.ip}:8080` : '';
+
+function nodeAdminCard(d) {
+  if (!adminSupport(d) && !d.admin && !d.overlay) return '';
+  const a = d.admin, o = d.overlay, url = nodeAdminUrl(d);
+  return `<section class="card"><div class="card-head"><h2>${t('webAdmin')}</h2>${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">${icon('web')}${t('webAdminOpen')}</a>` : ''}</div>
+    <dl class="kv"><dt>${t('webAdminAccount')}</dt><dd>${!a ? '—' : a.configured ? `<b>${esc(a.username)}</b>` : `<span class="tag critical">${t('webAdminMissing')}</span>`}
+        ${can('manage') && adminSupport(d) ? ` <button class="btn sm ghost" data-do="nodeAdmin" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('lock')}${t(a && a.configured ? 'webAdminChange' : 'webAdminCreate')}</button>` : ''}</dd>
+      <dt>${t('overlayBar')}</dt><dd>${o ? `${t(o.enabled ? 'overlayOn' : 'overlayOff')}${o.enabled ? ` · ${o.size} px` : ''}` : '—'}
+        ${can('content') && (d.capabilities || {}).overlay ? ` <button class="btn sm ghost" data-do="overlaySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd></dl>
+    <p class="muted">${t('webAdminHint')}</p></section>`;
+}
+
+// Name and password of the node's web administrator: never stored in Fleet, removed from the command once delivered.
+const adminFields = (prefix = '', required = true) => `<div class="row2"><label>${t('webAdminUser')}<input name="${prefix}username" autocomplete="off" spellcheck="false" maxlength="64" pattern="\\S+" ${required ? 'required' : ''} placeholder="admin"></label>
+  <label>${t('webAdminPassword')}<input name="${prefix}password" type="password" autocomplete="new-password" minlength="10" maxlength="200" ${required ? 'required' : ''}></label></div>
+  <label>${t('webAdminPassword2')}<input name="${prefix}password2" type="password" autocomplete="new-password" minlength="10" maxlength="200" ${required ? 'required' : ''}></label>`;
+
+function adminFromForm(data, prefix = '') {
+  const username = (data[prefix + 'username'] || '').trim(), password = data[prefix + 'password'] || '';
+  if (!username && !password) return null;
+  if (!username || /\s/.test(username)) throw new Error('invalid_admin_user');
+  if (password.length < 10) throw new Error('admin_password_short');
+  if (password !== data[prefix + 'password2']) throw new Error('admin_password_mismatch');
+  return { username, password };
+}
+
+function nodeAdminDialog(ids) {
+  const one = ids.length === 1 ? dev(ids[0]) : null;
+  modal({
+    title: t('webAdmin'), submit: t('save'),
+    body: `<div class="form"><p class="muted">${t(one && one.admin && one.admin.configured ? 'webAdminChangeHint' : 'webAdminCreateHint')}</p>
+      ${ids.length > 1 ? `<p class="muted">${t('webAdminToSelected', { n: ids.length })}</p>` : ''}${adminFields()}
+      <div class="note info">${icon('lock')}${t('webAdminSecurity')}</div></div>`,
+    onOpen: form => { if (one && one.admin && one.admin.username) form.username.value = one.admin.username; },
+    onSubmit: data => {
+      const payload = adminFromForm(data);
+      return ids.length === 1 ? sendCommand(ids[0], 'set_admin', payload) : sendBulk(ids, 'set_admin', payload);
+    },
+  });
+}
+
+function overlayDialog(ids, current) {
+  const o = { enabled: true, size: 16, ...(current || {}) };
+  modal({
+    title: t('overlayBar'),
+    body: `<div class="form"><p class="muted">${t('overlayHint')}</p>${ids.length > 1 ? `<p class="muted">${t('notifySettingsToSelected', { n: ids.length })}</p>` : ''}
+      <label class="check"><input type="checkbox" name="enabled" ${o.enabled ? 'checked' : ''}>${t('overlayEnabled')}</label>
+      <label>${t('overlaySize')}<input name="size" type="number" min="4" max="200" value="${esc(o.size)}" required></label></div>`,
+    onSubmit: data => {
+      const payload = { enabled: !!data.enabled, size: Number(data.size) };
+      return ids.length === 1 ? sendCommand(ids[0], 'overlay_settings', payload) : sendBulk(ids, 'overlay_settings', payload);
+    },
+  });
+}
+
+// Commands whose result a dialog shows: trying a watcher or a Grafana tag, the notification log.
+async function commandResult(id, action, payload = {}, timeout = 90000) {
+  const r = await api(`/api/devices/${encodeURIComponent(id)}/commands`, { method: 'POST', json: { action, payload } });
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    await new Promise(res => setTimeout(res, 1000));
+    const c = await api('/api/commands/' + r.id);
+    if (c.state === 'completed') { try { return JSON.parse(c.result || '{}'); } catch { return {}; } }
+    if (!['queued', 'delivered', 'running'].includes(c.state)) {
+      // the node's own message (e.g. {"detail": "..."} of its API) rather than the whole HTTP error
+      const m = /"detail":\s*"((?:[^"\\]|\\.)*)"/.exec(c.result || '');
+      throw new Error(m ? JSON.parse('"' + m[1] + '"') : (c.result || t('state_' + c.state)));
+    }
+  }
+  throw new Error('result_timeout');
 }
 
 const RESULTS = {};
@@ -940,15 +1017,18 @@ const choice = (list, sel, prefix) => list.map(x => `<option value="${x}" ${x ==
 function renderNotifications(d) {
   const support = notifySupport(d), n = d.notifications;
   if (support !== 'ok' || !n) return `<section class="card"><div class="note">${t(support === 'node' ? 'notifyNeedCaracal' : 'notifyNeedAgent')}</div></section>`;
-  const s = { ...NOTIFY_DEFAULTS, ...n.settings }, edit = can('content'), ctl = can('control');
+  const s = { ...NOTIFY_DEFAULTS, ...n.settings }, edit = can('content'), ctl = can('control'), caps = d.capabilities || {};
   const cur = n.current;
   return `<div class="grid two">
     <section class="card"><div class="card-head"><h2>${t('notifyScreen')}</h2><span class="tag ${s.enabled ? 'ok' : ''}">${t(s.enabled ? 'notifyOn' : 'notifyOff')}</span></div>
       <dl class="kv"><dt>${t('notifyCurrent')}</dt><dd>${cur ? `<span class="tag ${LEVEL_TAG[cur.level] || 'info'}">${t('notifyLevel_' + (cur.level || 'info'))}</span> ${esc(cur.title || cur.message)}` : '—'}</dd>
-        <dt>${t('notifyWaiting')}</dt><dd>${n.waiting}</dd><dt>${t('notifyNodeTokens')}</dt><dd>${n.tokens}</dd></dl>
+        <dt>${t('notifyWaiting')}</dt><dd>${n.waiting}</dd><dt>${t('notifyNodeTokens')}</dt><dd>${n.tokens}</dd>
+        ${n.history_count != null ? `<dt>${t('notifyHistory')}</dt><dd>${t('nRecords', { n: n.history_count })} · ${t('notifyAudit')}: ${t('nRecords', { n: n.audit_count ?? 0 })}</dd>` : ''}</dl>
       ${!d.online ? `<p class="muted">${t('notifyOfflineHint')}</p>` : ''}
-      ${ctl ? `<div class="form-actions start"><button class="btn primary" data-do="notifySend" data-id="${esc(d.id)}">${icon('plus')}${t('notifySend')}</button>
-        <button class="btn" data-do="notifyClear" data-id="${esc(d.id)}" ${n.waiting || cur ? '' : 'disabled'}>${icon('trash')}${t('notifyClear')}</button></div>` : ''}</section>
+      <div class="form-actions start">${ctl ? `<button class="btn primary" data-do="notifySend" data-id="${esc(d.id)}">${icon('plus')}${t('notifySend')}</button>
+        ${caps.notify_skip ? `<button class="btn" data-do="notifySkip" data-id="${esc(d.id)}" ${cur && d.online ? '' : 'disabled'}>${icon('next')}${t('notifySkip')}</button>` : ''}
+        <button class="btn" data-do="notifyClear" data-id="${esc(d.id)}" ${n.waiting || cur ? '' : 'disabled'}>${icon('trash')}${t('notifyClear')}</button>` : ''}
+        ${caps.notify_log ? `<button class="btn" data-do="notifyLog" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('audit')}${t('notifyLog')}</button>` : ''}</div></section>
     <section class="card"><div class="card-head"><h2>${t('notifySettings')}</h2>${edit ? `<button class="btn sm" data-do="notifySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</div>
       <dl class="kv"><dt>${t('notifyPosition')}</dt><dd>${t('notifyPos_' + s.position.replace(/-/g, '_'))}</dd>
         <dt>${t('notifyDuration')}</dt><dd>${s.duration} s</dd><dt>${t('notifySize')}</dt><dd>${s.scale} %</dd>
@@ -957,6 +1037,7 @@ function renderNotifications(d) {
         <dt>${t('notifyHistory')}</dt><dd>${t('notifyHistoryValue', { n: s.history_max, days: s.history_days })}</dd>
         <dt>${t('notifySounds')}</dt><dd>${NOTIFY_LEVELS.map(l => n.sounds && n.sounds[l] ? `<span class="tag info" title="${esc(n.sounds[l].name)}">${t('notifyLevel_' + l)}: ${esc(n.sounds[l].name)}</span>` : '').join(' ') || t('notifySoundsDefault')}
           ${edit && (d.capabilities || {}).notify_sound ? `<button class="btn sm ghost" data-do="notifySound" data-id="${esc(d.id)}">${icon('upload')}${t('notifySoundUpload')}</button>` : ''}</dd></dl></section></div>
+  ${notifyQueueCard(d, n, ctl && caps.notify_remove)}${nodeTokensCard(d, n, can('manage') && caps.notify_token_update)}
   <section class="card flush"><div class="toolbar"><h2 class="grow">${t('watchers')} <span class="muted">(${n.watchers.length})</span></h2>
     ${edit ? `<button class="btn primary" data-do="addWatcher" data-id="${esc(d.id)}">${icon('plus')}${t('addWatcher')}</button>` : ''}</div>
     <div class="note">${t('watchersHint')}</div>
@@ -972,6 +1053,59 @@ function renderNotifications(d) {
         <button class="icon-btn danger" title="${t('delete')}" data-do="deleteWatcher" data-id="${esc(d.id)}" data-watcher="${esc(w.id)}" data-name="${esc(w.name)}">${icon('trash')}</button></div>` : ''}
     </div>`).join('') || `<div class="empty">${t('noWatchers')}</div>`}</div>
     ${edit ? `<div class="note">${icon('lock')}${t('watchersSecurity')}</div>` : ''}</section>`;
+}
+
+function notifyQueueCard(d, n, ctl) {
+  if (!n.queue || !n.queue.length) return '';
+  return `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('notifyQueue')} <span class="muted">(${n.waiting})</span></h2></div>
+    <div class="table-wrap"><table class="table"><thead><tr><th>${t('notifyLevel')}</th><th>${t('notifyTitle')}</th><th>${t('notifySource')}</th><th>${t('time')}</th><th></th></tr></thead>
+    <tbody>${n.queue.map(x => `<tr><td><span class="tag ${LEVEL_TAG[x.level] || 'info'}">${t('notifyLevel_' + (x.level || 'info'))}</span></td>
+      <td><b>${esc(x.title || '')}</b>${x.message ? `<br><small class="muted">${esc(x.message)}</small>` : ''}</td><td><small>${esc(x.source || '')}</small></td>
+      <td class="nowrap muted">${x.created ? ago(x.created) : ''}</td>
+      <td class="actions-cell">${ctl ? `<button class="icon-btn danger" title="${t('notifyRemove')}" data-do="notifyRemove" data-id="${esc(d.id)}" data-nid="${esc(x.id)}" ${d.online ? '' : 'disabled'}>${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+    ${n.waiting > n.queue.length ? `<div class="note">${t('notifyQueueMore', { n: n.waiting - n.queue.length })}</div>` : ''}</section>`;
+}
+
+// Tokens the node itself issued to apps (its own notification API); new ones are created in the node's administration.
+function nodeTokensCard(d, n, edit) {
+  if (!n.token_list || !n.token_list.length) return '';
+  return `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('notifyNodeTokensList')} <span class="muted">(${n.token_list.length})</span></h2></div>
+    <div class="note">${t('notifyNodeTokensHint')}</div>
+    <div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('notifyTokenPrefix')}</th><th>${t('notifyRate')}</th><th>${t('notifyLastUsed')}</th><th>${t('state')}</th><th></th></tr></thead>
+    <tbody>${n.token_list.map(x => `<tr><td><b>${esc(x.name)}</b></td><td><code>${esc(x.prefix)}…</code></td><td>${esc(x.rate_per_min)}/min</td>
+      <td class="muted">${x.last_used ? ago(x.last_used) : t('watcherNever')}</td><td><span class="tag ${x.enabled ? 'ok' : ''}">${t(x.enabled ? 'tokenOn' : 'tokenOff')}</span></td>
+      <td class="actions-cell">${edit ? `<button class="btn sm" data-do="nodeTokenToggle" data-id="${esc(d.id)}" data-tid="${esc(x.id)}" data-on="${x.enabled ? 0 : 1}">${t(x.enabled ? 'tokenDisable' : 'tokenEnable')}</button>
+        <button class="icon-btn danger" title="${t('delete')}" data-do="nodeTokenDelete" data-id="${esc(d.id)}" data-tid="${esc(x.id)}" data-name="${esc(x.name)}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div></section>`;
+}
+
+const NOTIFY_DONE = { 1: 'notifyDone_shown', 2: 'notifyDone_expired', 3: 'notifyDone_removed' };
+
+async function notifyLogDialog(id) {
+  const dlg = modal({ title: t('notifyLog'), wide: true, body: `<div id="ntfLog"><div class="note info">${t('loadingFromNode')}</div></div>` });
+  const el = $('#ntfLog', dlg);
+  let r;
+  try { r = await commandResult(id, 'notify_log'); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; return; }
+  if (!el.isConnected) return;
+  const content = can('content'), manage = can('manage');
+  el.innerHTML = `<h3>${t('notifyHistory')} <span class="muted">(${r.history_count ?? 0})</span></h3>
+    <div class="table-wrap"><table class="table"><thead><tr><th>${t('time')}</th><th>${t('notifyLevel')}</th><th>${t('notifyTitle')}</th><th>${t('notifySource')}</th><th>${t('state')}</th></tr></thead>
+    <tbody>${(r.history || []).map(x => `<tr><td class="nowrap">${dt(x.created)}</td><td><span class="tag ${LEVEL_TAG[x.level] || 'info'}">${t('notifyLevel_' + (x.level || 'info'))}</span></td>
+      <td><b>${esc(x.title || '')}</b>${x.message ? `<br><small class="muted">${esc(x.message)}</small>` : ''}</td><td><small>${esc(x.source || '')}</small></td><td><small>${t(NOTIFY_DONE[x.done] || 'notifyDone_shown')}</small></td></tr>`).join('')
+      || `<tr><td colspan="5" class="empty">${t('noRecords')}</td></tr>`}</tbody></table></div>
+    ${content && r.history_count ? `<div class="form-actions start"><button type="button" class="btn sm danger" data-log-clear="history">${icon('trash')}${t('notifyHistoryClear')}</button></div>` : ''}
+    <h3>${t('notifyAudit')} <span class="muted">(${r.audit_count ?? 0})</span></h3>
+    <div class="table-wrap"><table class="table"><thead><tr><th>${t('time')}</th><th>${t('user')}</th><th>IP</th><th>${t('action')}</th><th>${t('detail')}</th></tr></thead>
+    <tbody>${(r.audit || []).map(x => `<tr><td class="nowrap">${dt(x.ts)}</td><td>${esc(x.actor || '—')}</td><td><small>${esc(x.ip || '')}</small></td><td>${esc(x.action)}</td><td><small class="muted">${esc(x.detail || '')}</small></td></tr>`).join('')
+      || `<tr><td colspan="5" class="empty">${t('noRecords')}</td></tr>`}</tbody></table></div>
+    ${manage && r.audit_count ? `<div class="form-actions start"><button type="button" class="btn sm danger" data-log-clear="audit">${icon('trash')}${t('notifyAuditClear')}</button></div>` : ''}`;
+  $$('[data-log-clear]', el).forEach(b => {
+    b.onclick = async () => {
+      const which = b.dataset.logClear;
+      dlg.close();
+      if (!await confirmBox(t(which === 'audit' ? 'confirmNotifyAuditClear' : 'confirmNotifyHistoryClear'))) return;
+      await sendCommand(id, which === 'audit' ? 'notify_audit_clear' : 'notify_history_clear').catch(e => toast(errText(e), 'warn'));
+    };
+  });
 }
 
 function notifyDialog(ids) {
@@ -1066,6 +1200,26 @@ const WATCHER_AUTH = ['none', 'bearer', 'basic', 'header', 'oauth2'];
 const OAUTH_GRANTS = ['client_credentials', 'password', 'refresh_token'];
 const WATCHER_TEXT = ['name', 'url', 'auth_header', 'list_path', 'id_field', 'title_template', 'message_template', 'level_field', 'oauth_token_url', 'oauth_client_id', 'oauth_scope', 'oauth_extra'];
 
+function watcherPayload(data) {
+  const payload = {};
+  for (const k of WATCHER_TEXT) payload[k] = (data[k] || '').trim();
+  Object.assign(payload, { auth_type: data.auth_type, oauth_grant: data.oauth_grant, oauth_client_auth: data.oauth_client_auth, level: data.level,
+    interval: Number(data.interval), verify_tls: !!data.verify_tls, enabled: !!data.enabled });
+  // empty credentials keep the stored ones
+  for (const k of ['username', 'secret', 'client_secret', 'refresh_token']) if ((data[k] || '').trim()) payload[k] = data[k].trim();
+  return payload;
+}
+
+// "Try" buttons in dialogs: runs a command on the node and shows its result below the button.
+async function tryCommand(form, btn, run, show) {
+  const out = $('.try-result', form);
+  btn.disabled = true;
+  btn.classList.add('busy');
+  out.innerHTML = `<div class="note">${t('loadingFromNode')}</div>`;
+  try { out.innerHTML = show(await run()); } catch (e) { out.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; }
+  finally { btn.disabled = false; btn.classList.remove('busy'); }
+}
+
 function watcherDialog(deviceId, w = null, targets = null) {
   const v = { name: '', url: '', auth_type: 'none', auth_header: '', list_path: '', id_field: 'id', title_template: '', message_template: '', level: 'info', level_field: '', interval: 60, verify_tls: 1, enabled: 1, oauth_token_url: '', oauth_grant: 'client_credentials', oauth_client_id: '', oauth_scope: '', oauth_extra: '', oauth_client_auth: 'body', ...(w || {}) };
   const keep = w && w.has_credentials ? `placeholder="${esc(t('leaveEmpty'))}"` : '';
@@ -1095,6 +1249,7 @@ function watcherDialog(deviceId, w = null, targets = null) {
       <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? 'checked' : ''}>${t('watcherEnabled')}</label>
       <p class="muted">${t('watcherTemplateHint')}</p>
       ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : w ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], d => notifySupport(d) === 'ok')}</details>`}
+      ${(dev(deviceId)?.capabilities || {}).preview_watcher ? `<div class="form-actions start"><button type="button" class="btn sm" data-try>${icon('refresh')}${t('watcherTry')}</button></div><div class="try-result"></div>` : ''}
       <div class="note info">${icon('lock')}${t('watchersSecurity')}</div></div>`,
     onOpen: form => {
       bindTargetPicker(form);
@@ -1105,6 +1260,11 @@ function watcherDialog(deviceId, w = null, targets = null) {
       };
       form.auth_type.onchange = sync;
       form.oauth_grant.onchange = sync;
+      const tryBtn = $('[data-try]', form);
+      if (tryBtn) {
+        tryBtn.onclick = () => tryCommand(form, tryBtn, () => commandResult(deviceId, 'preview_watcher', { ...(w ? { id: w.id } : {}), ...watcherPayload(Object.fromEntries(new FormData(form))) }),
+          r => `<div class="note info"><b>${t('watcherTryOk', { n: r.count ?? 0 })}</b>${(r.samples || []).map(x => `<br>${esc(x.title || '')}${x.message ? ` <span class="muted">· ${esc(x.message)}</span>` : ''}`).join('')}</div>`);
+      }
       if (form.preset) {
         form.preset.onchange = () => {
           const p = WATCHER_PRESETS[form.preset.value];
@@ -1116,12 +1276,7 @@ function watcherDialog(deviceId, w = null, targets = null) {
       sync();
     },
     onSubmit: data => {
-      const payload = {};
-      for (const k of WATCHER_TEXT) payload[k] = (data[k] || '').trim();
-      Object.assign(payload, { auth_type: data.auth_type, oauth_grant: data.oauth_grant, oauth_client_auth: data.oauth_client_auth, level: data.level,
-        interval: Number(data.interval), verify_tls: !!data.verify_tls, enabled: !!data.enabled });
-      // empty credentials keep the stored ones
-      for (const k of ['username', 'secret', 'client_secret', 'refresh_token']) if ((data[k] || '').trim()) payload[k] = data[k].trim();
+      const payload = watcherPayload(data);
       if (w) return sendCommand(deviceId, 'update_watcher', { id: w.id, ...payload });
       const ids = targets || [deviceId, ...pickedTargets(data)];
       return ids.length === 1 ? sendCommand(ids[0], 'add_watcher', payload) : sendBulk(ids, 'add_watcher', payload);
@@ -1545,12 +1700,13 @@ async function convertDialog(opts = {}) {
   modal({
     title: t('convertToDocker'), submit: t('convertNow'), danger: true, wide: true,
     body: `<div class="form"><p class="muted">${t('convertHint')}</p>${versionField(img)}
-      <label>${t('targetDevices')}</label>${targetPicker(null, pre)}<div class="note warn">${t('convertWarning')}</div></div>`,
+      <label>${t('targetDevices')}</label>${targetPicker(null, pre)}<details class="admin-pick"><summary>${t('webAdminInstall')}</summary><p class="muted">${t('webAdminInstallHint')}</p>${adminFields('admin_', false)}</details><div class="note warn">${t('convertWarning')}</div></div>`,
     onOpen: bindTargetPicker,
     onSubmit: async data => {
       const ids = pickedTargets(data);
       if (!ids.length) throw new Error('no_devices');
-      reportQueued(await api('/api/node-image/convert', { method: 'POST', json: { version: data.version.trim(), device_ids: ids } }), t('convertToDocker'));
+      const admin = adminFromForm(data, 'admin_');
+      reportQueued(await api('/api/node-image/convert', { method: 'POST', json: { version: data.version.trim(), device_ids: ids, ...(admin ? { admin_username: admin.username, admin_password: admin.password } : {}) } }), t('convertToDocker'));
     },
   });
 }
@@ -1639,6 +1795,7 @@ async function sdCardDialog() {
         <label>${t('ntpServer')}<input name="ntp" placeholder="ntp.firma.cz" spellcheck="false"></label></details>
       <details><summary>${t('dockerNetwork')}</summary><p class="muted">${t('dockerNetworkHint')}</p>
         <label>${t('dockerPool')}<input name="docker_pool" placeholder="10.200.0.0/16" pattern="[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{2}" spellcheck="false"></label></details>
+      <details class="admin-pick"><summary>${t('webAdminInstall')}</summary><p class="muted">${t('webAdminInstallHint')}</p>${adminFields('admin_', false)}</details>
       <h3>${t('downloadSource')}</h3>${downloadSourcePick('internet')}
       <div class="note info">${t('sdCardTokenNote')}</div></div>`,
     onOpen: form => {
@@ -1652,7 +1809,9 @@ async function sdCardDialog() {
     },
     onSubmit: async data => {
       if (data.static_ip && !data.gateway) throw new Error('invalid_gateway');
-      const body = { ...data, wifi_country: (data.wifi_country || '').trim().toUpperCase() };
+      const admin = adminFromForm(data, 'admin_');
+      const body = { ...data, wifi_country: (data.wifi_country || '').trim().toUpperCase(), admin_user: admin ? admin.username : '', admin_password: admin ? admin.password : '' };
+      for (const k of ['admin_username', 'admin_password2']) delete body[k];
       if (data.os === 'dietpi') {
         const f = $('#sdDietpi').files[0];
         if (!f) throw new Error('invalid_dietpi_txt');
@@ -2031,8 +2190,20 @@ function collectionDialog(deviceId, col = null, targets = null) {
       <div class="row2"><label>${t('durationPerDashboard')}<input name="duration" type="number" min="5" value="${esc(c.duration ?? 60)}" required></label>
       <label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(c.scale ?? 1)}"></label></div>
       <small class="muted">${t('grafanaHint')}</small>
+      ${(dev(deviceId)?.capabilities || {}).grafana_discover ? `<div class="form-actions start"><button type="button" class="btn sm" data-try>${icon('refresh')}${t('grafanaTry')}</button></div><div class="try-result"></div>` : ''}
       ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : col ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId)}</details>`}</div>`,
-    onOpen: bindTargetPicker,
+    onOpen: form => {
+      bindTargetPicker(form);
+      const tryBtn = $('[data-try]', form);
+      if (tryBtn) {
+        tryBtn.onclick = () => {
+          const p = grafanaPayload(Object.fromEntries(new FormData(form)));
+          if (!/^https?:\/\//i.test(p.grafana_url || '') || !(p.tag || '').trim()) { $('.try-result', form).innerHTML = `<div class="note warn">${t('err_tag_required')}</div>`; return; }
+          tryCommand(form, tryBtn, () => commandResult(deviceId, 'grafana_discover', { grafana_url: p.grafana_url, tag: p.tag }),
+            r => `<div class="note ${r.count ? 'info' : 'warn'}"><b>${t('grafanaTryOk', { n: r.count ?? 0 })}</b>${(r.dashboards || []).slice(0, 10).map(x => `<br>${esc(x.title)}`).join('')}${r.count > 10 ? '<br>…' : ''}</div>`);
+        };
+      }
+    },
     onSubmit: data => {
       const payload = { name: data.name.trim(), ...grafanaPayload(data), duration: Number(data.duration || 60), scale: Number(data.scale || 1) };
       if (col) return sendCommand(deviceId, 'update_collection', { id: col.id, ...payload });
@@ -2098,6 +2269,7 @@ async function provisionDialog(host = '', name = '', mode = 'node') {
       <label class="check agent-only"><input type="checkbox" name="reenroll">${t('reenroll')}</label>
       <label class="check"><input type="checkbox" name="via_fleet">${t('viaFleet')}</label>
       <label class="check"><input type="checkbox" name="forget_host_key">${t('forgetHostKey')}</label>
+      <details class="admin-pick"><summary>${t('webAdminInstall')}</summary><p class="muted">${t('webAdminInstallHint')}</p>${adminFields('admin_', false)}</details>
       <p class="muted">${t('sshInstallHint')}</p></div>`,
     onOpen: form => {
       const sync = () => {
@@ -2112,7 +2284,11 @@ async function provisionDialog(host = '', name = '', mode = 'node') {
     },
     onSubmit: async data => {
       if (!data.password && !data.private_key) throw new Error('missing_fields');
-      const r = await api('/api/provision', { method: 'POST', json: { ...data, port: Number(data.port || 22), reenroll: !!data.reenroll, forget_host_key: !!data.forget_host_key, via_fleet: !!data.via_fleet } });
+      const admin = adminFromForm(data, 'admin_');
+      const body = { ...data, port: Number(data.port || 22), reenroll: !!data.reenroll, forget_host_key: !!data.forget_host_key, via_fleet: !!data.via_fleet,
+        admin_username: admin ? admin.username : '', admin_password: admin ? admin.password : '' };
+      delete body.admin_password2;
+      const r = await api('/api/provision', { method: 'POST', json: body });
       setTimeout(() => jobDialog(r.job_id), 50);
     },
   });
@@ -2336,6 +2512,22 @@ const ACTIONS_UI = {
     await sendCommand(b.dataset.id, 'delete_watcher', { id: b.dataset.watcher });
   },
   bulkNotify() { notifyDialog([...S.selected]); },
+  nodeAdmin(b) { nodeAdminDialog([b.dataset.id]); },
+  bulkNodeAdmin() {
+    const ids = [...S.selected];
+    if (!ids.every(id => dev(id) && adminSupport(dev(id)))) toast(t('webAdminSomeUnsupported'), 'warn');
+    nodeAdminDialog(ids);
+  },
+  overlaySettings(b) { overlayDialog([b.dataset.id], dev(b.dataset.id)?.overlay); },
+  bulkOverlay() { overlayDialog([...S.selected], null); },
+  notifySkip(b) { return sendCommand(b.dataset.id, 'notify_skip'); },
+  notifyRemove(b) { return sendCommand(b.dataset.id, 'notify_remove', { id: Number(b.dataset.nid) }); },
+  notifyLog(b) { notifyLogDialog(b.dataset.id); },
+  nodeTokenToggle(b) { return sendCommand(b.dataset.id, 'update_notify_token', { id: Number(b.dataset.tid), enabled: b.dataset.on === '1' }); },
+  async nodeTokenDelete(b) {
+    if (!await confirmBox(t('confirmDeleteNotifyToken', { name: esc(b.dataset.name) }))) return;
+    await sendCommand(b.dataset.id, 'delete_notify_token', { id: Number(b.dataset.tid) });
+  },
   bulkNotifySettings() {
     const ids = [...S.selected];
     if (!ids.every(id => dev(id) && notifySupport(dev(id)) === 'ok')) toast(t('notifySomeUnsupported'), 'warn');
