@@ -10,6 +10,12 @@
 #   run       (the service) waits for the network and the end of the OS first-boot setup, downloads the
 #             installer from the hub and turns the device into a CARACAL node; retried until it succeeds
 #
+# Without internet access (download source "fleet" on the card) the clock is set from the hub when no time server
+# synchronised it (a Raspberry Pi has no clock battery; HTTPS and apt need the right time). DietPi additionally:
+#   dietpi-prepare  (Automation_Custom_PreScript.sh, early in DietPi's first boot) registers the one-time service
+#   dietpi-offline  (that service, after DietPi's first-boot settings, before its first-run setup starts) points apt
+#                   to the hub and skips DietPi's online update from GitHub, which cannot work without internet
+#
 # Log: /var/log/caracal-firstboot.log, progress also with "journalctl -u caracal-firstboot".
 set -uo pipefail
 
@@ -17,6 +23,46 @@ LIB=/usr/local/lib/caracal-firstboot
 CONF=/etc/caracal-firstboot.conf
 DONE=/var/lib/caracal-firstboot.done
 LOG=/var/log/caracal-firstboot.log
+
+# --- download through the hub (keep in sync with install-node.sh, the agent and the hub) ---
+APT_DIR=${CARACAL_APT_DIR:-/etc/apt}
+APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com dietpi.com'
+apt_source_files() {
+  local f
+  for f in "$APT_DIR/sources.list" "$APT_DIR"/sources.list.d/*.list "$APT_DIR"/sources.list.d/*.sources; do
+    [ -f "$f" ] && echo "$f"
+  done
+}
+# apt sources of the known repositories -> <hub>/apt/<host>/...; credentials in auth.conf.d (root only)
+apt_via_fleet() {
+  local hub=$1 user=$2 password=$3 f h re machine
+  for f in $(apt_source_files); do
+    for h in $APT_HOSTS; do
+      re=${h//./\\.}
+      sed -i -E "s#https?://[^[:space:]/]+(/[^[:space:]]*)?/apt/$re(/|[[:space:]]|\$)#https://$h\2#g; s#https?://$re(/|[[:space:]]|\$)#$hub/apt/$h\1#g" "$f"
+    done
+  done
+  case "$hub" in https://*) machine=${hub#https://};; *) machine=$hub;; esac   # apt: no protocol = https only
+  install -d -m 755 "$APT_DIR/auth.conf.d"
+  ( umask 077; printf 'machine %s/apt login %s password %s\n' "$machine" "$user" "$password" > "$APT_DIR/auth.conf.d/caracal-fleet.conf" )
+}
+# --- end of download through the hub ---
+
+# Without a time source the clock of a Raspberry Pi is behind (last shutdown, or the date of the image) and HTTPS
+# certificates look "not yet valid". Only when no time server synchronised the clock, the time is read from the
+# hub's Date header without checking the certificate (nothing else is taken from that answer).
+sync_clock_from_hub() {
+  [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] && return 0
+  local date hub_ts now diff
+  date=$(curl -ksSI --max-time 15 "$HUB/api/health" 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: //p' | head -1)
+  [ -n "$date" ] || return 1
+  hub_ts=$(date -d "$date" +%s 2>/dev/null) || return 1
+  now=$(date +%s)
+  diff=$(( hub_ts > now ? hub_ts - now : now - hub_ts ))
+  if [ "$diff" -gt 120 ]; then
+    date -s "@$hub_ts" >/dev/null && echo "Clock set from the hub: $(date -Is) (was ${diff} s off)"
+  fi
+}
 
 boot_file() {
   for d in /boot/firmware /boot; do [ -f "$d/$1" ] && { echo "$d/$1"; return 0; }; done
@@ -92,6 +138,7 @@ run_install() {
   echo "Waiting for the hub $HUB"
   local i
   for i in $(seq 1 60); do
+    sync_clock_from_hub || true
     curl -fsS --max-time 10 "$HUB/api/health" >/dev/null && break
     [ "$i" -eq 60 ] && { echo 'The hub is not reachable, retrying later.'; return 1; }
     sleep 10
@@ -143,8 +190,61 @@ run_install() {
   return 1
 }
 
+dietpi_prepare() {
+  # runs inside DietPi's first-boot service, before the network is up: only registers the one-time service
+  install -d -m 755 "$LIB"
+  local src
+  src=$(boot_file caracal-firstboot.sh) || src=$0
+  install -m 755 "$src" "$LIB/caracal-firstboot.sh"
+  cat > /etc/systemd/system/caracal-dietpi-offline.service <<EOF
+[Unit]
+Description=CARACAL: DietPi first boot without internet access
+After=dietpi-firstboot.service network-online.target
+Wants=network-online.target
+Before=getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=$LIB/caracal-firstboot.sh dietpi-offline
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable caracal-dietpi-offline.service >/dev/null 2>&1
+  systemctl start --no-block caracal-dietpi-offline.service
+}
+
+dietpi_offline() {
+  exec > >(tee -a "$LOG") 2>&1
+  echo "===== $(date -Is) CARACAL: DietPi first boot without internet access"
+  local conf i
+  conf=$(boot_file caracal-firstboot.conf) || conf=$CONF
+  # shellcheck disable=SC1090
+  . "$conf"
+  for i in $(seq 1 60); do
+    curl -ksS --max-time 10 -o /dev/null "$HUB/api/health" && break
+    sleep 5
+  done
+  sync_clock_from_hub || echo 'The clock could not be read from the hub.'
+  # DietPi wrote its sources (Debian, Raspberry Pi, dietpi.com) during its first-boot settings
+  apt_via_fleet "$HUB" enroll "$TOKEN"
+  echo 'apt downloads through the hub'
+  if [ "$(cat /boot/dietpi/.install_stage 2>/dev/null)" = 0 ]; then
+    # stage 1 = DietPi's online update (GitHub) done; the first-run setup then upgrades the packages through the hub
+    echo 1 > /boot/dietpi/.install_stage
+    echo 'DietPi online update of the first boot skipped'
+    # if the first-run setup already started on tty1 (and waits after the failed online update), start it again
+    if pgrep -f /boot/dietpi/dietpi-login >/dev/null; then systemctl restart getty@tty1.service; fi
+  fi
+  systemctl disable caracal-dietpi-offline.service >/dev/null 2>&1
+}
+
 case "${1:-install}" in
   install) install_service ;;
   run) run_install ;;
-  *) echo "Usage: $0 install|run" >&2; exit 2 ;;
+  dietpi-prepare) dietpi_prepare ;;
+  dietpi-offline) dietpi_offline ;;
+  *) echo "Usage: $0 install|run|dietpi-prepare|dietpi-offline" >&2; exit 2 ;;
 esac

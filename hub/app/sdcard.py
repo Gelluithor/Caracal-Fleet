@@ -86,6 +86,9 @@ def _options(d):
         'docker_pool': _clean(d.get('docker_pool'), 18),
         # 'fleet': apt, Docker and CARACAL are downloaded through the hub, the device needs no internet access
         'download_source': 'fleet' if d.get('download_source') == 'fleet' else 'internet',
+        # fixed address instead of DHCP (Wi-Fi when it is set, otherwise Ethernet) and an own time server
+        'static_ip': _clean(d.get('static_ip'), 18), 'gateway': _clean(d.get('gateway'), 15),
+        'dns': _clean(d.get('dns'), 200), 'ntp': _clean(d.get('ntp'), 253),
     }
     checks = (
         (o['os'], 'invalid_os'),
@@ -99,6 +102,10 @@ def _options(d):
         (not o['password'] or (len(o['password']) >= 8 and len(o['password'].encode()) <= 100), 'invalid_password'),
         (not o['ssh_key'] or SSH_KEY_RE.match(o['ssh_key']), 'invalid_ssh_key'),
         (not o['docker_pool'] or _docker_pool(o['docker_pool']), 'invalid_docker_pool'),
+        (not o['static_ip'] or _interface(o['static_ip']), 'invalid_static_ip'),
+        (not o['static_ip'] or _gateway(o['static_ip'], o['gateway']), 'invalid_gateway'),
+        (not o['dns'] or _dns(o['dns']), 'invalid_dns'),
+        (not o['ntp'] or NTP_RE.match(o['ntp']), 'invalid_ntp'),
     )
     for ok, error in checks:
         if not ok:
@@ -107,6 +114,38 @@ def _options(d):
         if any(ord(ch) < 32 for ch in o[key]):
             raise HTTPException(400, 'invalid_' + key)
     return o
+
+
+NTP_RE = re.compile(r'^[A-Za-z0-9.\-:]{1,253}$')
+
+
+def _interface(value):
+    """Static IPv4 address with prefix, e.g. 192.168.1.50/24; None when invalid."""
+    try:
+        iface = ipaddress.ip_interface(value)
+    except ValueError:
+        return None
+    if iface.version != 4 or '/' not in value or iface.ip in (iface.network.network_address, iface.network.broadcast_address):
+        return None
+    return iface
+
+
+def _gateway(static_ip, gateway):
+    iface = _interface(static_ip)
+    try:
+        gw = ipaddress.ip_address(gateway)
+    except ValueError:
+        return False
+    return iface is not None and gw in iface.network and gw != iface.ip
+
+
+def _dns(value):
+    """DNS servers separated by spaces or commas; [] when one of them is invalid."""
+    servers = [x for x in re.split(r'[\s,]+', value) if x]
+    try:
+        return [str(ipaddress.ip_address(x)) for x in servers]
+    except ValueError:
+        return []
 
 
 def _docker_pool(value):
@@ -148,20 +187,40 @@ def raspios_files(o):
     if o['ssh_key']:
         lines.append(f"    ssh_authorized_keys: [{_yaml(o['ssh_key'])}]")
     lines.append(f"ssh_pwauth: {'true' if o['password'] else 'false'}")
+    if o.get('ntp'):
+        lines += ['ntp:', '  enabled: true', f"  servers: [{_yaml(o['ntp'])}]"]
     lines.append('runcmd:')
     if login:
         lines.append('  - [systemctl, enable, --now, ssh]')
     lines.append('  - [bash, /boot/firmware/caracal-firstboot.sh, install]')
     files = {'user-data': '\n'.join(lines) + '\n'}
+    if o['wifi_ssid'] or o.get('static_ip'):
+        files['network-config'] = network_config(o)
+    return files
+
+
+def _address_lines(o, static):
+    """netplan lines of one interface: DHCP or the static address of the card."""
+    if not static:
+        return ['      dhcp4: true', '      optional: true']
+    out = ['      dhcp4: false', '      optional: true', f"      addresses: [{_yaml(o['static_ip'])}]",
+           '      routes:', '        - to: default', f"          via: {_yaml(o['gateway'])}"]
+    dns = _dns(o['dns']) if o.get('dns') else [o['gateway']]
+    out += ['      nameservers:', f"        addresses: [{', '.join(_yaml(x) for x in dns)}]"]
+    return out
+
+
+def network_config(o):
+    """cloud-init network-config v2: the static address goes to Wi-Fi when it is set, otherwise to Ethernet."""
+    static = bool(o.get('static_ip'))
+    lines = ['network:', '  version: 2', '  renderer: NetworkManager', '  ethernets:', '    eth0:']
+    lines += _address_lines(o, static and not o['wifi_ssid'])
     if o['wifi_ssid']:
-        files['network-config'] = '\n'.join([
-            'network:', '  version: 2', '  renderer: NetworkManager',
-            '  ethernets:', '    eth0:', '      dhcp4: true', '      optional: true',
-            '  wifis:', '    wlan0:', '      dhcp4: true', '      optional: true',
+        lines += ['  wifis:', '    wlan0:'] + _address_lines(o, static) + [
             f"      regulatory-domain: {_yaml(o['wifi_country'])}",
             '      access-points:', f"        {_yaml(o['wifi_ssid'])}:",
-            f"          password: {_yaml(o['wifi_password'])}", '']) + '\n'
-    return files
+            f"          password: {_yaml(o['wifi_password'])}"]
+    return '\n'.join(lines) + '\n'
 
 
 def patch_dietpi_txt(text, values):
@@ -202,6 +261,26 @@ def dietpi_files(o, dietpi_txt):
         # DietPi uses one adapter: with Wi-Fi enabled it disables Ethernet anyway
         values.update({'AUTO_SETUP_NET_WIFI_ENABLED': '1', 'AUTO_SETUP_NET_ETHERNET_ENABLED': '0',
                        'AUTO_SETUP_NET_WIFI_COUNTRY_CODE': o['wifi_country']})
+    if o.get('static_ip'):
+        iface = _interface(o['static_ip'])
+        values.update({'AUTO_SETUP_NET_USESTATIC': '1', 'AUTO_SETUP_NET_STATIC_GATEWAY': o['gateway'],
+                       'AUTO_SETUP_NET_STATIC_DNS': ' '.join(_dns(o['dns']) if o.get('dns') else [o['gateway']])})
+        if 'AUTO_SETUP_NET_STATIC_MASK' in dietpi_txt:   # older DietPi: address and netmask separately
+            values.update({'AUTO_SETUP_NET_STATIC_IP': str(iface.ip), 'AUTO_SETUP_NET_STATIC_MASK': str(iface.netmask)})
+        else:
+            values['AUTO_SETUP_NET_STATIC_IP'] = str(iface)
+    if o.get('ntp'):
+        values.update({'CONFIG_NTP_MODE': '2', 'CONFIG_NTP_MIRROR': o['ntp']})
+    if o.get('download_source') == 'fleet':
+        # No internet: the connectivity check pings the device itself and resolves the hub, the time comes from the
+        # time server of the card or from the hub (caracal-firstboot.sh), DietPi does not look for its own updates
+        # on GitHub. Automation_Custom_PreScript.sh skips the online DietPi update of the first boot and points apt
+        # to the hub (see caracal-firstboot.sh dietpi-prepare).
+        values.update({'CONFIG_CHECK_CONNECTION_IP': '127.0.0.1',
+                       'CONFIG_CHECK_DNS_DOMAIN': re.sub(r'^https?://([^/:]+).*$', r'\1', o['hub_url']),
+                       'CONFIG_CHECK_DIETPI_UPDATES': '0'})
+        if not o.get('ntp'):
+            values['CONFIG_NTP_MODE'] = '0'
     files = {
         'dietpi.txt': patch_dietpi_txt(dietpi_txt, values),
         'Automation_Custom_Script.sh': (
@@ -210,6 +289,12 @@ def dietpi_files(o, dietpi_txt):
             '  [ -f "$d/caracal-firstboot.sh" ] && exec bash "$d/caracal-firstboot.sh" install\n'
             'done\necho "caracal-firstboot.sh not found on the boot partition" >&2\nexit 1\n'),
     }
+    if o.get('download_source') == 'fleet':
+        files['Automation_Custom_PreScript.sh'] = (
+            '#!/bin/bash\n# CARACAL zero-touch without internet access: started by DietPi early in its first boot\n'
+            'for d in /boot/firmware /boot; do\n'
+            '  [ -f "$d/caracal-firstboot.sh" ] && exec bash "$d/caracal-firstboot.sh" dietpi-prepare\n'
+            'done\necho "caracal-firstboot.sh not found on the boot partition" >&2\nexit 1\n')
     if o['wifi_ssid']:
         files['dietpi-wifi.txt'] = (
             '# Wi-Fi for DietPi (generated by CARACAL Fleet)\n'
@@ -248,7 +333,7 @@ Log on the device: /var/log/caracal-firstboot.log
 
 FLEET_NOTE = """
 Downloads through CARACAL Fleet: system packages, Docker and CARACAL come from the hub, the device only needs to
-reach the hub (no internet access). DietPi's own first-boot setup may still need the internet.
+reach the hub (no internet access). Without a time server on the card the clock is set from the hub.
 """
 
 
@@ -273,8 +358,10 @@ async def sd_card(r: Request):
         files = raspios_files(o)
     files['caracal-firstboot.sh'] = (BOOT / 'caracal-firstboot.sh').read_text(encoding='utf-8')
     files['caracal-firstboot.conf'] = firstboot_conf(o)
-    files['CARACAL-README.txt'] = README[o['os']].format(prefix=o['prefix']) + \
-        (FLEET_NOTE if o['download_source'] == 'fleet' else '')
+    readme = README[o['os']].format(prefix=o['prefix'])
+    if o['download_source'] == 'fleet':
+        readme = readme.replace('internet access needed', 'only access to the hub needed') + FLEET_NOTE
+    files['CARACAL-README.txt'] = readme
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -284,6 +371,7 @@ async def sd_card(r: Request):
             info.external_attr = (0o755 if name.endswith('.sh') else 0o644) << 16
             z.writestr(info, content.replace('\r\n', '\n'))
     audit(u, 'sdcard.create', o['os'], {'hub_url': o['hub_url'], 'prefix': o['prefix'], 'wifi': bool(o['wifi_ssid']),
-                                        'docker_pool': o['docker_pool'], 'download_source': o['download_source']})
+                                        'docker_pool': o['docker_pool'], 'download_source': o['download_source'],
+                                        'static_ip': o['static_ip'], 'ntp': o['ntp']})
     return Response(buf.getvalue(), media_type='application/zip', headers={
         'Content-Disposition': f'attachment; filename="caracal-sdcard-{o["os"]}.zip"'})

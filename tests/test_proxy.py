@@ -253,3 +253,99 @@ def test_sd_card_and_installation_options(env):
     url = f"{env['hub']}/api/devices/{env['enrolled']['device_id']}/commands"
     assert requests.post(url, headers=env['h'], json={'action': 'set_download_source', 'payload': {'source': 'cloud'}}).json()['detail'] == 'invalid_value'
     assert requests.post(url, headers=env['h'], json={'action': 'set_download_source', 'payload': {'source': 'fleet'}}).status_code == 200
+
+
+DIETPI_TXT = ('AUTO_SETUP_AUTOMATED=0\nAUTO_SETUP_NET_USESTATIC=0\nAUTO_SETUP_NET_STATIC_IP=192.168.0.100/24\n'
+              'AUTO_SETUP_NET_STATIC_GATEWAY=192.168.0.1\nAUTO_SETUP_NET_STATIC_DNS=9.9.9.9 149.112.112.112\n'
+              'CONFIG_CHECK_CONNECTION_IP=9.9.9.9\nCONFIG_CHECK_DNS_DOMAIN=dietpi.com\nCONFIG_NTP_MODE=2\nCONFIG_NTP_MIRROR=default\n'
+              'CONFIG_CHECK_DIETPI_UPDATES=1\n')
+
+
+def sd_files(env, **options):
+    import zipfile
+    r = requests.post(env['hub'] + '/api/sdcard', headers=env['h'], json={
+        'hub_url': 'https://fleet.example', 'name_prefix': 'tv', **options})
+    assert r.status_code == 200, r.text
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    return {n: z.read(n).decode() for n in z.namelist()}
+
+
+def test_sd_card_static_address_and_time_server(env):
+    bad = [({'static_ip': '192.168.1.50'}, 'invalid_static_ip'), ({'static_ip': '192.168.1.0/24', 'gateway': '192.168.1.1'}, 'invalid_static_ip'),
+           ({'static_ip': '192.168.1.50/24', 'gateway': '10.0.0.1'}, 'invalid_gateway'),
+           ({'static_ip': '192.168.1.50/24', 'gateway': '192.168.1.1', 'dns': '1.1.1.1, nope'}, 'invalid_dns'),
+           ({'ntp': 'ntp server'}, 'invalid_ntp')]
+    for options, code in bad:
+        r = requests.post(env['hub'] + '/api/sdcard', headers=env['h'], json={'os': 'raspios', 'hub_url': 'https://fleet.example', **options})
+        assert r.json().get('detail') == code, (options, r.text)
+    # Raspberry Pi OS: Ethernet gets the address without Wi-Fi, Wi-Fi with it; the time server goes to cloud-init
+    files = sd_files(env, os='raspios', static_ip='192.168.1.50/24', gateway='192.168.1.1', dns='192.168.1.1, 1.1.1.1', ntp='ntp.firma.cz')
+    net = files['network-config']
+    assert 'eth0:' in net and 'addresses: ["192.168.1.50/24"]' in net and 'via: "192.168.1.1"' in net
+    assert 'addresses: ["192.168.1.1", "1.1.1.1"]' in net and 'dhcp4: false' in net
+    assert 'servers: ["ntp.firma.cz"]' in files['user-data']
+    wifi = sd_files(env, os='raspios', static_ip='10.0.5.20/16', gateway='10.0.0.1', wifi_ssid='Kancl', wifi_password='heslo1234', wifi_country='CZ')['network-config']
+    eth, wlan = wifi.split('  wifis:')
+    assert 'dhcp4: true' in eth and 'addresses: ["10.0.5.20/16"]' in wlan and 'addresses: ["10.0.0.1"]' in wlan
+    # DietPi: its own static settings (CIDR, or address + netmask in older dietpi.txt)
+    txt = sd_files(env, os='dietpi', dietpi_txt=DIETPI_TXT, static_ip='192.168.1.50/24', gateway='192.168.1.1')['dietpi.txt']
+    assert 'AUTO_SETUP_NET_USESTATIC=1' in txt and 'AUTO_SETUP_NET_STATIC_IP=192.168.1.50/24' in txt
+    assert 'AUTO_SETUP_NET_STATIC_DNS=192.168.1.1' in txt
+    old = sd_files(env, os='dietpi', dietpi_txt=DIETPI_TXT.replace('STATIC_IP=192.168.0.100/24', 'STATIC_IP=192.168.0.100\nAUTO_SETUP_NET_STATIC_MASK=255.255.255.0'),
+                   static_ip='192.168.1.50/24', gateway='192.168.1.1')['dietpi.txt']
+    assert 'AUTO_SETUP_NET_STATIC_IP=192.168.1.50\n' in old and 'AUTO_SETUP_NET_STATIC_MASK=255.255.255.0' in old
+
+
+def test_sd_card_dietpi_without_internet(env):
+    files = sd_files(env, os='dietpi', dietpi_txt=DIETPI_TXT, download_source='fleet')
+    txt = files['dietpi.txt']
+    # the connectivity check needs no internet, DietPi does not look for updates on GitHub, no NTP without a server
+    for line in ('CONFIG_CHECK_CONNECTION_IP=127.0.0.1', 'CONFIG_CHECK_DNS_DOMAIN=fleet.example', 'CONFIG_NTP_MODE=0',
+                 'CONFIG_CHECK_DIETPI_UPDATES=0', 'AUTO_SETUP_AUTOMATED=1'):
+        assert line in txt.splitlines(), line
+    assert 'caracal-firstboot.sh" dietpi-prepare' in files['Automation_Custom_PreScript.sh']
+    assert 'DOWNLOAD_SOURCE=fleet' in files['caracal-firstboot.conf']
+    with_ntp = sd_files(env, os='dietpi', dietpi_txt=DIETPI_TXT, download_source='fleet', ntp='10.0.0.2')['dietpi.txt'].splitlines()
+    assert 'CONFIG_NTP_MODE=2' in with_ntp and 'CONFIG_NTP_MIRROR=10.0.0.2' in with_ntp
+    online = sd_files(env, os='dietpi', dietpi_txt=DIETPI_TXT)
+    assert 'Automation_Custom_PreScript.sh' not in online and 'CONFIG_CHECK_CONNECTION_IP=9.9.9.9' in online['dietpi.txt']
+    script = (ROOT / 'hub/bootstrap/caracal-firstboot.sh').read_text(encoding='utf-8')
+    assert 'echo 1 > /boot/dietpi/.install_stage' in script and 'After=dietpi-firstboot.service' in script
+
+
+@pytest.mark.skipif(not shutil.which('bash'), reason='bash not available')
+def test_firstboot_apt_sources_match_the_agent(tmp_path):
+    """caracal-firstboot.sh (DietPi without internet) rewrites the sources like the agent, dietpi.com included."""
+    src = (ROOT / 'hub/bootstrap/caracal-firstboot.sh').read_text(encoding='utf-8')
+    block = src[src.index('# --- download through the hub'):src.index('# --- end of download through the hub ---')]
+    root = apt_tree(tmp_path / 'apt')
+    (root / 'sources.list.d' / 'dietpi.list').write_text('deb https://dietpi.com/apt trixie main\n')
+    script = tmp_path / 'snippet.sh'
+    script.write_text(block + '\napt_via_fleet https://fleet.example enroll tok\n', newline='\n')
+    r = subprocess.run([shutil.which('bash'), script.as_posix()], capture_output=True, text=True,
+                       env={**os.environ, 'CARACAL_APT_DIR': root.as_posix()})
+    assert r.returncode == 0, r.stderr
+    mod = load_agent()
+    assert (root / 'sources.list.d/dietpi.list').read_text() == 'deb https://fleet.example/apt/dietpi.com/apt trixie main\n'
+    assert (root / 'sources.list').read_text() == mod.apt_rewrite(SOURCES_LIST, 'https://fleet.example')
+    install = (ROOT / 'hub/bootstrap/install-node.sh').read_text(encoding='utf-8')
+    functions = lambda text: text[text.index('APT_DIR='):text.index('}', text.index('apt_via_fleet() {')) + 1]
+    assert functions(block) == functions(install)   # the same functions in both scripts
+    from app import proxy
+    assert ' '.join(proxy.DEFAULT_APT_HOSTS) in block and tuple(mod.APT_HOSTS) == proxy.DEFAULT_APT_HOSTS
+
+
+def test_agent_follows_the_hub_clock(env, monkeypatch):
+    mod = load_agent()
+    calls = []
+    monkeypatch.setattr(mod.subprocess, 'run', lambda cmd, **kw: (calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, stdout='no\n')))
+    assert mod.set_clock(time.time() + 30) is False and calls == []                   # within the tolerance
+    assert mod.set_clock(time.time() + 3600) is True and calls[-1][:2] == ['date', '-s']
+    calls.clear()
+    monkeypatch.setattr(mod, 'ntp_synchronized', lambda: True)
+    assert mod.set_clock(time.time() + 3600) is False and calls == []                 # a time server is used
+    # after a TLS error the time is read from the hub's Date header
+    seen = []
+    monkeypatch.setattr(mod, 'set_clock', lambda ts: seen.append(ts) or True)
+    agent = mod.Agent({'hub': env['hub'], 'local_api': 'http://127.0.0.1:9', **env['enrolled']})
+    assert agent.clock_from_hub() is True and abs(seen[0] - time.time()) < 60

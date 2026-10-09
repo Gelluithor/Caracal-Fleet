@@ -45,7 +45,7 @@ step() { echo "==> $*"; }
 
 # --- download through the hub (keep APT_HOSTS in sync with the agent and the hub) ---
 APT_DIR=${CARACAL_APT_DIR:-/etc/apt}
-APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com'
+APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com dietpi.com'
 apt_source_files() {
   local f
   for f in "$APT_DIR/sources.list" "$APT_DIR"/sources.list.d/*.list "$APT_DIR"/sources.list.d/*.sources; do

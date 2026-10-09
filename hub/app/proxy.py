@@ -41,7 +41,7 @@ APT_CACHE = CACHE / 'apt'
 IMAGE_CACHE = CACHE / 'images'
 DEFAULT_APT_HOSTS = ('deb.debian.org', 'security.debian.org', 'ftp.debian.org', 'archive.raspberrypi.com',
                      'archive.raspberrypi.org', 'raspbian.raspberrypi.com', 'raspbian.raspberrypi.org',
-                     'download.docker.com')
+                     'download.docker.com', 'dietpi.com')
 ARCHES = ('arm64', 'amd64')
 IMAGES_KEPT = 2                  # cached archives per image and architecture
 FAIL_WINDOW, FAIL_MAX = 300, 30

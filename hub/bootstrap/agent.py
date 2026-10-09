@@ -13,6 +13,7 @@ Usage:
 """
 import argparse
 import base64
+import email.utils
 import hashlib
 import json
 import os
@@ -50,7 +51,8 @@ INSTALL_TIMEOUT = 3000   # apt + pip on a Raspberry Pi can take a while
 # of these repositories point to <hub>/apt/<host>/...; keep the list in sync with DEFAULT_APT_HOSTS of the hub.
 APT_DIR = Path(os.getenv('CARACAL_APT_DIR', '/etc/apt'))
 APT_HOSTS = ('deb.debian.org', 'security.debian.org', 'ftp.debian.org', 'archive.raspberrypi.com',
-             'archive.raspberrypi.org', 'raspbian.raspberrypi.com', 'raspbian.raspberrypi.org', 'download.docker.com')
+             'archive.raspberrypi.org', 'raspbian.raspberrypi.com', 'raspbian.raspberrypi.org', 'download.docker.com',
+             'dietpi.com')
 
 DEFAULTS = {
     'local_api': 'http://127.0.0.1:8080',
@@ -379,7 +381,11 @@ class Agent:
             'caracal_image': read_env().get('CARACAL_IMAGE', '') if is_docker() else '',
             'download_source': self.download_source(), 'arch': machine_arch(),
         }
-        self.hub('POST', '/heartbeat', json=data)
+        r = self.hub('POST', '/heartbeat', json=data)
+        try:   # a device without a time source (no internet, no clock battery) follows the hub's clock
+            set_clock(float(r.json()['server_time']))
+        except (ValueError, KeyError, TypeError):
+            pass
 
     # ------------------------------------------------------------ commands
 
@@ -827,6 +833,18 @@ class Agent:
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def clock_from_hub(self):
+        """Read the time from the hub's Date header without checking its certificate (the certificate cannot be
+        checked with a wrong clock; nothing but the time is taken from this answer)."""
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            r = requests.head(self.hub_url + '/api/health', timeout=15, verify=False)
+            return set_clock(email.utils.parsedate_to_datetime(r.headers['Date']).timestamp())
+        except (requests.RequestException, KeyError, TypeError, ValueError) as e:
+            log('clock from the hub:', e)
+            return False
+
     def quiet_heartbeat(self):
         try:
             self.heartbeat()
@@ -1027,6 +1045,10 @@ class Agent:
                     subprocess.Popen(['systemctl', 'reboot'])
                 if self.run_commands():
                     next_hb = 0  # report the new state immediately after changes
+            except requests.exceptions.SSLError as e:
+                # a clock far behind makes the hub's certificate look "not yet valid"
+                log('hub TLS error:', e)
+                self.clock_from_hub()
             except requests.HTTPError as e:
                 code = e.response.status_code if e.response is not None else 0
                 log('hub error:', e)
@@ -1060,6 +1082,30 @@ def read_env():
     except OSError:
         pass
     return out
+
+
+CLOCK_TOLERANCE = 120   # seconds
+
+
+def ntp_synchronized():
+    """True when a time server synchronises the clock (or when this cannot be told: then the clock is left alone)."""
+    try:
+        r = subprocess.run(['timedatectl', 'show', '-p', 'NTPSynchronized', '--value'], capture_output=True, text=True,
+                           timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return r.returncode != 0 or r.stdout.strip() == 'yes'
+
+
+def set_clock(ts):
+    """Set the system clock to the hub's time when it is more than CLOCK_TOLERANCE off and no time server is used."""
+    if abs(ts - time.time()) <= CLOCK_TOLERANCE or ntp_synchronized():
+        return False
+    off = int(ts - time.time())
+    r = subprocess.run(['date', '-s', f'@{int(ts)}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode == 0:
+        log(f'clock set from the hub ({off:+d} s)')
+    return r.returncode == 0
 
 
 def machine_arch():

@@ -66,8 +66,9 @@ the CARACAL containers and the Fleet Agent.
 
 1. **SD card (zero-touch):** *Add device → Prepare SD card* (admin). Write Raspberry Pi OS Lite (64-bit) with
    Raspberry Pi Imager, or DietPi, copy the downloaded files to the boot partition and power the device on.
-   It installs itself and appears in Fleet as `<prefix>-xxxxxx` after 10–30 minutes. Wi-Fi, time zone, Docker's address range (instead of 172.17.0.0/16) and
-   an optional maintenance login are set in the same dialog. The enrollment token on the card is removed on the
+   It installs itself and appears in Fleet as `<prefix>-xxxxxx` after 10–30 minutes. Wi-Fi, a static IP address
+   (with gateway and DNS), a time server, the time zone, Docker's address range (instead of 172.17.0.0/16), the
+   download source (internet or Fleet) and an optional maintenance login are set in the same dialog. The enrollment token on the card is removed on the
    first boot; if a card is lost before that, rotate the token in *Settings*.
 2. **Network discovery + SSH:** *Add device → Find devices in the network* lists devices with SSH and
    recognises Raspberry Pi OS and DietPi. *Install* connects over SSH (credentials are not stored) and runs
@@ -97,8 +98,16 @@ preparing the SD card, in the SSH installation (*Download through CARACAL Fleet*
 Requirements and limits: the hub itself needs internet access and disk space for the cache (images and packages,
 20 GB by default, `CARACAL_HUB_PROXY_CACHE_GB`; *Settings → Fleet as the download source* shows it and clears it).
 The nodes must trust the hub's HTTPS certificate (Let's Encrypt works; with an internal CA install it on the nodes).
-DietPi's own first-boot setup may still need the internet; Raspberry Pi OS installs completely through the hub.
 Switching a node back to *From the internet* restores its apt sources.
+
+- **Time:** a Raspberry Pi has no clock battery, and HTTPS and apt need the right time. Without internet access set a
+  time server of your network on the SD card; otherwise the clock is set from the hub's `Date` header (read without
+  certificate checks, only when no time server synchronised the clock). The agent keeps following the hub's clock.
+- **Raspberry Pi OS** installs completely through the hub.
+- **DietPi** works without internet access as well: the SD card sets its connectivity check to the device and the
+  hub, skips DietPi's online update from GitHub during the first boot (`Automation_Custom_PreScript.sh` registers a
+  one-time service that runs before DietPi's first-run setup) and points its apt sources, `dietpi.com` included, to
+  the hub. DietPi's daily check for its own updates is switched off.
 
 ## Notification API for other apps
 

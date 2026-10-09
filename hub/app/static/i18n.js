@@ -356,6 +356,11 @@ const I18N = {
     confirmProxyClear: 'Smazat uložené obrazy a balíčky? Při další instalaci nebo aktualizaci se stáhnou znovu.', proxyCleared: 'Uvolněno {size}',
     act_set_download_source: 'Zdroj stahování', audit_proxy_cache_clear: 'Vyprázdnění cache stahování',
     err_apt_host_not_allowed: 'Tento repozitář hub nezrcadlí.', err_invalid_path: 'Neplatná cesta.', err_upstream_unavailable: 'Zdroj na internetu není dostupný.',
+    staticIp: 'Pevná IP adresa', staticIpHint: 'Místo DHCP dostane zařízení tuto adresu: na Wi-Fi, je-li nastavená, jinak na Ethernetu. Prázdné = DHCP.',
+    staticIpAddress: 'Adresa s prefixem', staticIpGateway: 'Brána', staticIpDns: 'DNS servery', staticIpDnsHint: 'Oddělené mezerou nebo čárkou; prázdné = brána. Bez internetu musí přeložit adresu hubu.',
+    ntpServer: 'Časový server (NTP)', ntpServerHint: 'Raspberry Pi nemá hodiny s baterií. Bez internetu použije tento server ve vaší síti; když žádný není, nastaví čas podle hubu.',
+    err_invalid_static_ip: 'Neplatná IP adresa (zadejte ji s prefixem, např. 192.168.1.50/24).', err_invalid_gateway: 'Zadejte bránu ze stejné sítě jako adresa.',
+    err_invalid_dns: 'Neplatná adresa DNS serveru.', err_invalid_ntp: 'Neplatný časový server.',
   },
 
   en: {
@@ -713,5 +718,10 @@ const I18N = {
     confirmProxyClear: 'Delete the cached images and packages? They are downloaded again for the next installation or update.', proxyCleared: '{size} freed',
     act_set_download_source: 'Download source', audit_proxy_cache_clear: 'Download cache cleared',
     err_apt_host_not_allowed: 'The hub does not mirror this repository.', err_invalid_path: 'Invalid path.', err_upstream_unavailable: 'The source on the internet is not available.',
+    staticIp: 'Static IP address', staticIpHint: 'Instead of DHCP the device gets this address: on Wi-Fi when it is set, otherwise on Ethernet. Empty = DHCP.',
+    staticIpAddress: 'Address with prefix', staticIpGateway: 'Gateway', staticIpDns: 'DNS servers', staticIpDnsHint: 'Separated by spaces or commas; empty = the gateway. Without internet access they must resolve the hub.',
+    ntpServer: 'Time server (NTP)', ntpServerHint: 'A Raspberry Pi has no clock battery. Without internet access it uses this server in your network; without one, the clock is set from the hub.',
+    err_invalid_static_ip: 'Invalid IP address (enter it with a prefix, e.g. 192.168.1.50/24).', err_invalid_gateway: 'Enter a gateway in the same network as the address.',
+    err_invalid_dns: 'Invalid DNS server address.', err_invalid_ntp: 'Invalid time server.',
   },
 };
