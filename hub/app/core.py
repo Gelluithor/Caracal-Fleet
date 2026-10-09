@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.8.0'
+HUB_VERSION = '4.9.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -76,6 +76,7 @@ ACTIONS = {
     'update_watcher': ('content', None),
     'delete_watcher': ('content', None),
     'check_watcher': ('content', 600),
+    'notify_sound': ('content', None),
 }
 
 # Payload keys that must not stay in the hub: login credentials of web pages and of notification watchers travel

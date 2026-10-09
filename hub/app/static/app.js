@@ -485,7 +485,7 @@ function renderBulkBar(el) {
     ${can('control') ? b('next', t('act_next'), 'next') + b('unfreeze', t('act_unfreeze'), 'play') + b('restart_player', t('act_restart_player'), 'restart') + b('reboot', t('act_reboot'), 'power', 'danger') : ''}
     ${can('content') ? `<button class="btn sm" data-do="bulkAddContent">${icon('plus')}${t('addContent')}</button><button class="btn sm" data-do="bulkCopy">${icon('copy')}${t('copyPlaylistHere')}</button>` : ''}
     ${can('control') ? `<button class="btn sm" data-do="bulkNotify">${icon('attention')}${t('notifySend')}</button>` : ''}
-    ${can('content') ? `<button class="btn sm" data-do="bulkNotifySettings">${icon('settings')}${t('notifySettings')}</button><button class="btn sm" data-do="bulkWatcher">${icon('eye')}${t('addWatcher')}</button>` : ''}
+    ${can('content') ? `<button class="btn sm" data-do="bulkNotifySettings">${icon('settings')}${t('notifySettings')}</button><button class="btn sm" data-do="bulkNotifySound">${icon('upload')}${t('notifySoundUpload')}</button><button class="btn sm" data-do="bulkWatcher">${icon('eye')}${t('addWatcher')}</button>` : ''}
     ${can('manage') ? b('update_agent', t('act_update_agent'), 'agent') + `<button class="btn sm" data-do="bulkAssign">${icon('group')}${t('assignGroupLocation')}</button>
       <button class="btn sm" data-do="bulkSetHub">${icon('upload')}${t('act_set_hub')}</button>
       <button class="btn sm" data-do="caracalUpdate">${icon('updates')}${t('act_update_caracal')}</button>` : ''}
@@ -755,6 +755,9 @@ function payloadSummary(json) {
   const parts = [];
   if (p.name) parts.push(p.name);
   else if (p.title || p.message) parts.push(p.title || p.message);
+  if (p.level && /^(info|success|warning|critical)$/.test(p.level)) parts.push(t('notifyLevel_' + p.level));
+  if (p.filename && !p.name) parts.push(p.filename);
+  if (p.reset) parts.push(t('notifySoundModeReset'));
   if (p.item_id != null) parts.push('#' + p.item_id);
   if (p.collection_id != null) parts.push(t('collection') + ' #' + p.collection_id);
   if (p.id != null) parts.push('#' + p.id);
@@ -948,7 +951,9 @@ function renderNotifications(d) {
         <dt>${t('notifyDuration')}</dt><dd>${s.duration} s</dd><dt>${t('notifySize')}</dt><dd>${s.scale} %</dd>
         <dt>${t('notifyMaxQueue')}</dt><dd>${s.max_queue}</dd>
         <dt>${t('notifySound')}</dt><dd>${t('notifySound_' + s.sound)}${s.sound !== 'off' ? ` · ${s.volume} %` : ''}</dd>
-        <dt>${t('notifyHistory')}</dt><dd>${t('notifyHistoryValue', { n: s.history_max, days: s.history_days })}</dd></dl></section></div>
+        <dt>${t('notifyHistory')}</dt><dd>${t('notifyHistoryValue', { n: s.history_max, days: s.history_days })}</dd>
+        <dt>${t('notifySounds')}</dt><dd>${NOTIFY_LEVELS.map(l => n.sounds && n.sounds[l] ? `<span class="tag info" title="${esc(n.sounds[l].name)}">${t('notifyLevel_' + l)}: ${esc(n.sounds[l].name)}</span>` : '').join(' ') || t('notifySoundsDefault')}
+          ${edit && (d.capabilities || {}).notify_sound ? `<button class="btn sm ghost" data-do="notifySound" data-id="${esc(d.id)}">${icon('upload')}${t('notifySoundUpload')}</button>` : ''}</dd></dl></section></div>
   <section class="card flush"><div class="toolbar"><h2 class="grow">${t('watchers')} <span class="muted">(${n.watchers.length})</span></h2>
     ${edit ? `<button class="btn primary" data-do="addWatcher" data-id="${esc(d.id)}">${icon('plus')}${t('addWatcher')}</button>` : ''}</div>
     <div class="note">${t('watchersHint')}</div>
@@ -981,6 +986,42 @@ function notifyDialog(ids) {
       if (data.duration) payload.duration = Number(data.duration);
       if (data.sound) payload.sound = data.sound === '1';
       return ids.length === 1 ? sendCommand(ids[0], 'notify', payload) : sendBulk(ids, 'notify', payload);
+    },
+  });
+}
+
+// Custom MP3 of a notification level (at most 5 MB, the screen plays at most 15 s), or the generated chime again.
+function notifySoundDialog(ids, sounds = {}) {
+  modal({
+    title: t('notifySoundUpload'), submit: t('save'),
+    body: `<div class="form"><p class="muted">${t('notifySoundHint')}</p>${ids.length > 1 ? `<p class="muted">${t('notifySoundToSelected', { n: ids.length })}</p>` : ''}
+      <label>${t('notifyLevel')}<select name="level">${choice(NOTIFY_LEVELS, 'critical', 'notifyLevel_')}</select><small class="muted sound-current"></small></label>
+      <div class="radios"><label class="check"><input type="radio" name="mode" value="upload" checked>${t('notifySoundModeUpload')}</label>
+        <label class="check"><input type="radio" name="mode" value="reset">${t('notifySoundModeReset')}</label></div>
+      <label class="sound-file">${t('file')}<input type="file" name="file" accept=".mp3,audio/mpeg"></label><div class="upload-prog" hidden><i></i></div></div>`,
+    onOpen: form => {
+      const sync = () => {
+        const cur = sounds[form.level.value];
+        $('.sound-current', form).textContent = ids.length === 1 ? (cur ? t('notifySoundNow', { name: cur.name }) : t('notifySoundsDefault')) : '';
+        $('.sound-file', form).hidden = form.querySelector('[name=mode]:checked').value !== 'upload';
+      };
+      form.level.onchange = sync;
+      $$('[name=mode]', form).forEach(r => { r.onchange = sync; });
+      sync();
+    },
+    onSubmit: async (data, form) => {
+      let payload = { level: data.level, reset: true };
+      if (data.mode === 'upload') {
+        const file = form.file.files[0];
+        if (!file) throw new Error('file_not_found');
+        if (file.size > 5 * 1024 * 1024) throw new Error('file_too_large');
+        const pr = $('.upload-prog', form);
+        pr.hidden = false;
+        // the browser may not know the MP3 type, the hub recognises the extension
+        const up = await uploadFile(file.type ? file : new File([file], file.name, { type: 'audio/mpeg' }), p => { $('i', pr).style.width = (p * 100) + '%'; });
+        payload = { level: data.level, file_id: up.id };
+      }
+      return ids.length === 1 ? sendCommand(ids[0], 'notify_sound', payload) : sendBulk(ids, 'notify_sound', payload);
     },
   });
 }
@@ -2233,6 +2274,8 @@ const ACTIONS_UI = {
     await sendCommand(b.dataset.id, 'notify_clear');
   },
   notifySettings(b) { notifySettingsDialog([b.dataset.id], S.detail?.notifications?.settings); },
+  notifySound(b) { notifySoundDialog([b.dataset.id], S.detail?.notifications?.sounds || {}); },
+  bulkNotifySound() { notifySoundDialog([...S.selected]); },
   addWatcher(b) { watcherDialog(b.dataset.id); },
   editWatcher(b) {
     const w = (S.detail?.notifications?.watchers || []).find(x => String(x.id) === b.dataset.watcher);

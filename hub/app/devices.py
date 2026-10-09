@@ -58,6 +58,7 @@ def notifications_of(status):
         return None
     return {'settings': n.get('settings') if isinstance(n.get('settings'), dict) else {},
             'waiting': n.get('waiting') or 0, 'current': n.get('current'), 'tokens': n.get('tokens') or 0,
+            'sounds': n.get('sounds') if isinstance(n.get('sounds'), dict) else {},
             'watchers': [w for w in n.get('watchers') or [] if isinstance(w, dict)]}
 
 

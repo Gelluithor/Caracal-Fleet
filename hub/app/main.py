@@ -313,6 +313,8 @@ def validate_command(c, row, action, payload):
             raise HTTPException(400, 'file_not_found')
         payload.update(sha256=f['sha256'], filename=f['name'], size=f['size'])
         payload['kind'] = payload.get('kind') or f['kind']
+        if payload['kind'] not in MEDIA_KINDS:
+            raise HTTPException(400, 'unsupported_file')
         payload['name'] = text(payload.get('name'), 200) or f['name']
     if action in ('update_asset', 'delete_asset', 'update_collection', 'delete_collection') \
             and payload.get('id') in (None, ''):
@@ -354,6 +356,8 @@ def validate_command(c, row, action, payload):
     if action in ('add_watcher', 'update_watcher'):
         payload = {**({'id': payload['id']} if payload.get('id') not in (None, '') else {}),
                    **validate_watcher(payload, required=action == 'add_watcher')}
+    if action == 'notify_sound':
+        payload = validate_notify_sound(c, payload)
     if action in ('update_watcher', 'delete_watcher', 'check_watcher'):
         if payload.get('id') in (None, ''):
             raise HTTPException(400, 'item_required')
@@ -450,7 +454,9 @@ WATCHER_SECRETS = ('username', 'secret', 'client_secret', 'refresh_token')
 # command -> local endpoint of the node (capability reported by the agent)
 NOTIFY_CAPABILITY = {'notify': 'notify', 'notify_clear': 'notify_clear', 'notify_settings': 'notify_settings',
                      'add_watcher': 'add_watcher', 'update_watcher': 'update_watcher',
-                     'delete_watcher': 'delete_watcher', 'check_watcher': 'check_watcher'}
+                     'delete_watcher': 'delete_watcher', 'check_watcher': 'check_watcher',
+                     'notify_sound': 'notify_sound'}
+SOUND_MAX = 5 * 1024 ** 2
 
 
 def flag(v):
@@ -505,6 +511,23 @@ def validate_notify_settings(d):
     if not out:
         raise HTTPException(400, 'nothing_to_change')
     return out
+
+
+def validate_notify_sound(c, d):
+    """Custom sound of a notification level: an uploaded MP3 (file_id) or {"reset": true} for the default chime."""
+    level = text(d.get('level'), 20)
+    if level not in NOTIFY_LEVELS:
+        raise HTTPException(400, 'invalid_value')
+    if flag(d.get('reset')):
+        return {'level': level, 'reset': True}
+    f = c.execute('SELECT * FROM files WHERE id=?', (str(d.get('file_id') or ''),)).fetchone()
+    if not f:
+        raise HTTPException(400, 'file_not_found')
+    if f['kind'] != 'audio':
+        raise HTTPException(400, 'unsupported_file')
+    if f['size'] > SOUND_MAX:
+        raise HTTPException(413, 'file_too_large')
+    return {'level': level, 'file_id': f['id'], 'sha256': f['sha256'], 'filename': f['name'], 'size': f['size']}
 
 
 def validate_watcher(d, required=True):
@@ -628,7 +651,9 @@ async def upload_file(r: Request):
     u = current_user(r, 'content')
     name = unquote(r.headers.get('X-File-Name', 'file'))[:200] or 'file'
     ctype = r.headers.get('Content-Type', '')
-    kind = 'video' if ctype.startswith('video/') else 'image' if ctype.startswith('image/') else ''
+    # audio: MP3 sounds of notifications (never playlist items)
+    kind = 'video' if ctype.startswith('video/') else 'image' if ctype.startswith('image/') else \
+        'audio' if ctype in ('audio/mpeg', 'audio/mp3') or name.lower().endswith('.mp3') else ''
     if not kind:
         raise HTTPException(400, 'unsupported_file')
     fid = await _store_upload(r, name, kind, 'ui:' + u['username'])

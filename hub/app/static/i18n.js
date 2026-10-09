@@ -152,7 +152,7 @@ const I18N = {
     err_device_not_found: 'Zařízení nebylo nalezeno.', err_device_offline: 'Zařízení je offline.',
     err_item_not_found: 'Položka na nodu neexistuje (playlist se mezitím změnil).', err_item_required: 'Chybí položka.',
     err_invalid_url: 'Neplatná URL (musí začínat http:// nebo https://).', err_invalid_duration: 'Neplatná doba (minimálně 5 s).',
-    err_file_not_found: 'Soubor nebyl nalezen.', err_unsupported_file: 'Nepodporovaný typ souboru (jen obrázky a videa).',
+    err_file_not_found: 'Soubor nebyl nalezen.', err_unsupported_file: 'Nepodporovaný typ souboru (obrázky a videa, pro zvuky oznámení MP3).',
     err_file_too_large: 'Soubor je příliš velký.', err_empty_file: 'Soubor je prázdný.',
     err_no_devices: 'Vyberte alespoň jedno zařízení.', err_nothing_to_copy: 'Není co kopírovat.',
     err_source_offline: 'Zdrojový node je offline – média nelze přenést.', err_name_required: 'Vyplňte název.',
@@ -340,6 +340,10 @@ const I18N = {
     err_nothing_to_change: 'Není co změnit.', err_watcher_not_found: 'Hlídač na nodu neexistuje (mezitím se změnil).',
     err_invalid_notify_token: 'Neplatný token API oznámení.', err_rate_limited: 'Překročený limit oznámení za minutu.',
     err_notification_too_large: 'Oznámení je příliš velké.', err_invalid_scope: 'Vyberte aspoň jednu skupinu, lokalitu nebo zařízení.',
+    notifySounds: 'Vlastní zvuky', notifySoundsDefault: 'výchozí znělky', notifySoundUpload: 'Zvuk oznámení',
+    notifySoundHint: 'MP3 pro jednu úroveň oznámení (nejvýš 5 MB). Obrazovka přehraje nejvýš 15 s s hlasitostí z nastavení; bez vlastního souboru hraje vygenerovaná znělka.',
+    notifySoundToSelected: 'Zvuk se nastaví na {n} vybraných obrazovkách.', notifySoundNow: 'Teď: {name}',
+    notifySoundModeUpload: 'Nahrát vlastní MP3', notifySoundModeReset: 'Vrátit výchozí znělku', act_notify_sound: 'Zvuk oznámení',
   },
 
   en: {
@@ -493,7 +497,7 @@ const I18N = {
     err_device_not_found: 'Device not found.', err_device_offline: 'The device is offline.',
     err_item_not_found: 'The item does not exist on the node (the playlist has changed).', err_item_required: 'Item missing.',
     err_invalid_url: 'Invalid URL (must start with http:// or https://).', err_invalid_duration: 'Invalid duration (at least 5 s).',
-    err_file_not_found: 'File not found.', err_unsupported_file: 'Unsupported file type (images and videos only).',
+    err_file_not_found: 'File not found.', err_unsupported_file: 'Unsupported file type (images and videos, MP3 for notification sounds).',
     err_file_too_large: 'The file is too large.', err_empty_file: 'The file is empty.',
     err_no_devices: 'Select at least one device.', err_nothing_to_copy: 'Nothing to copy.',
     err_source_offline: 'The source node is offline – media cannot be transferred.', err_name_required: 'Name is required.',
@@ -681,5 +685,9 @@ const I18N = {
     err_nothing_to_change: 'Nothing to change.', err_watcher_not_found: 'The watcher does not exist on the node (it changed meanwhile).',
     err_invalid_notify_token: 'Invalid notification API token.', err_rate_limited: 'Too many notifications per minute.',
     err_notification_too_large: 'The notification is too large.', err_invalid_scope: 'Choose at least one group, location or device.',
+    notifySounds: 'Custom sounds', notifySoundsDefault: 'default chimes', notifySoundUpload: 'Notification sound',
+    notifySoundHint: 'An MP3 for one notification level (at most 5 MB). The screen plays at most 15 s with the volume of the settings; without a file the generated chime plays.',
+    notifySoundToSelected: 'The sound is set on the {n} selected screens.', notifySoundNow: 'Now: {name}',
+    notifySoundModeUpload: 'Upload your own MP3', notifySoundModeReset: 'Restore the default chime', act_notify_sound: 'Notification sound',
   },
 };

@@ -31,7 +31,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.7.0'
+VERSION = '4.7.1'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -75,6 +75,8 @@ ENDPOINTS = {
     'update_watcher': ('PUT', '/api/fleet/v1/notify/watchers/{id}'),
     'delete_watcher': ('DELETE', '/api/fleet/v1/notify/watchers/{id}'),
     'check_watcher': ('POST', '/api/fleet/v1/notify/watchers/{id}/check'),
+    'notify_sound': ('POST', '/api/fleet/v1/notify/sounds/{level}'),
+    'notify_sound_delete': ('DELETE', '/api/fleet/v1/notify/sounds/{level}'),
 }
 GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale')
 # Login profiles of web pages: the credentials are stored encrypted on the node and only travel to it.
@@ -217,6 +219,9 @@ class Agent:
         settings = n.get('settings') if isinstance(n.get('settings'), dict) else {}
         return {'settings': {k: settings[k] for k in NOTIFY_SETTINGS if k in settings},
                 'waiting': n.get('waiting'), 'current': n.get('current'), 'tokens': n.get('tokens'),
+                # custom MP3 per level: only its name, size and checksum
+                'sounds': {level: {k: v.get(k) for k in ('name', 'size', 'sha256', 'uploaded')}
+                           for level, v in (n.get('sounds') or {}).items() if isinstance(v, dict)},
                 'watchers': [{k: w.get(k) for k in WATCHER_PUBLIC if k in w} for w in n.get('watchers') or []
                              if isinstance(w, dict)]}
 
@@ -536,6 +541,19 @@ class Agent:
 
     def do_delete_watcher(self, p):
         return self.body(self.local('delete_watcher', {'id': p['id']}))
+
+    def do_notify_sound(self, p):
+        """Custom MP3 of a notification level (downloaded from the hub and checked), or the default chime again."""
+        ids = {'level': p['level']}
+        if p.get('reset'):
+            return self.body(self.local('notify_sound_delete', ids))
+        path = self.download_file(p['file_id'], p.get('sha256'))
+        try:
+            with open(path, 'rb') as f:
+                return self.body(self.local('notify_sound', ids, files={'file': (p.get('filename') or 'sound.mp3', f,
+                                                                               'audio/mpeg')}, timeout=120))
+        finally:
+            os.unlink(path)
 
     def do_check_watcher(self, p):
         return self.body(self.local('check_watcher', {'id': p['id']}, timeout=60))

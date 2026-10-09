@@ -34,6 +34,8 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Edit watcher | `PUT /notify/watchers/{id}` | the same fields; empty credentials keep the stored ones → `{reset}` (true when the URL or list changed) |
 | Delete watcher | `DELETE /notify/watchers/{id}` | |
 | Check watcher | `POST /notify/watchers/{id}/check` | checks now → `{ok, count, new, sent, first}` or `{ok: false, error}` |
+| Notification sound | `POST /notify/sounds/{level}` | multipart `file`: an MP3 (at most 5 MB) for `info`, `success`, `warning` or `critical` |
+| Default sound | `DELETE /notify/sounds/{level}` | the generated chime again |
 
 All paths start with `/api/fleet/v1`. CARACAL rules: the display time is at least 5 s (videos loop for the whole
 time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.mp4 .webm .mkv`.
@@ -60,6 +62,7 @@ time), the zoom is 0.5 to 3.0. Images: `.png .jpg .jpeg .webp .gif`, videos: `.m
   "requests": {"reboot": 0, "restart_player": 0},
   "notifications": {"settings": {"enabled": true, "position": "top-right", "duration": 8, "sound": "off", "...": "..."},
                     "waiting": 0, "current": null, "tokens": 1,
+                    "sounds": {"critical": {"name": "gong.mp3", "size": 48213, "sha256": "…", "uploaded": 1791281688.2}},
                     "watchers": [{"id": 1, "name": "Helpdesk", "url": "https://…", "auth_type": "bearer", "interval": 60,
                                   "enabled": 1, "last_check": 1791281688.2, "last_count": 12, "last_error": null,
                                   "has_credentials": 1}]}

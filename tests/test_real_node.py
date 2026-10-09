@@ -410,3 +410,37 @@ def test_notification_api_for_apps(env):
     assert {'notify_token.create', 'notify_token.edit', 'notify_token.delete', 'notify.token_rejected'} <= set(actions)
     env['agent'].run_commands()
     run(env, 'notify_clear')
+
+
+def test_notification_sounds(env):
+    """A custom MP3 per level: uploaded to the hub, sent to the node, served to the overlay, reset to the chime."""
+    h, hub = env['h'], env['hub']
+    assert device(env)['capabilities']['notify_sound'] is True
+    mp3 = b'ID3\x03\x00\x00\x00\x00\x00\x00' + b'\xff\xfb\x90\x00' * 500
+    up = requests.post(hub + '/api/files', data=mp3, headers={**h, 'Content-Type': 'audio/mpeg', 'X-File-Name': 'gong.mp3'}).json()
+    assert up['kind'] == 'audio'
+    run(env, 'notify_sound', {'level': 'critical', 'file_id': up['id']})
+    stored = env['data'] / 'notify-sounds' / 'critical.mp3'
+    assert stored.read_bytes() == mp3
+    assert device(env)['notifications']['sounds']['critical']['name'] == 'gong.mp3'
+    # the overlay learns that the level has its own sound and downloads it from the device itself
+    overlay = requests.get(env['node'] + '/api/notify/overlay').json()
+    assert overlay['sounds']['critical'] and requests.get(env['node'] + '/api/notify/sounds/critical/overlay').content == mp3
+
+    url = f"{hub}/api/devices/{env['id']}/commands"
+    for action, payload, code in [('notify_sound', {'level': 'loud', 'file_id': up['id']}, 'invalid_value'),
+                                  ('notify_sound', {'level': 'info', 'file_id': 'nope'}, 'file_not_found'),
+                                  ('add_media', {'file_id': up['id'], 'duration': 10}, 'unsupported_file')]:
+        r = requests.post(url, headers=h, json={'action': action, 'payload': payload})
+        assert r.json().get('detail') == code, (action, r.text)
+
+    # a file that is no MP3 is refused by the node, the previous sound stays
+    fake = requests.post(hub + '/api/files', data=b'not a sound', headers={**h, 'Content-Type': 'audio/mpeg', 'X-File-Name': 'x.mp3'}).json()
+    cid = requests.post(url, headers=h, json={'action': 'notify_sound', 'payload': {'level': 'critical', 'file_id': fake['id']}}).json()['id']
+    env['agent'].run_commands()
+    row = next(x for x in requests.get(f"{hub}/api/commands?device_id={env['id']}", headers=h).json() if x['id'] == cid)
+    assert row['state'] == 'failed' and stored.read_bytes() == mp3
+
+    run(env, 'notify_sound', {'level': 'critical', 'reset': True})
+    assert not stored.exists() and 'critical' not in device(env)['notifications']['sounds']
+    assert 'critical' not in requests.get(env['node'] + '/api/notify/overlay').json()['sounds']

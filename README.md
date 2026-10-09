@@ -9,7 +9,7 @@ with one `docker compose up`. Every organisation runs its own Fleet; nothing is 
   a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
   show or freeze an item, skip, resume, restart the player or the device
 - **On-screen notifications:** send a notification to one screen or many, change the notification settings (position,
-  size, sound, limits) and manage watchers that announce new tickets or issues from other apps; a notification API
+  size, sound, limits, your own MP3 per level) and manage watchers that announce new tickets or issues from other apps; a notification API
   lets other apps reach many screens with one request
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations
