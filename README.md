@@ -1,7 +1,7 @@
 # CARACAL Fleet
 
 Central management for [CARACAL](https://github.com/Gelluithor/Caracal) digital signage screens, self-hosted
-with one `docker compose up`. Every organisation runs its own Fleet; nothing is sent to third parties.
+with one `docker compose up`.
 
 - **Monitoring:** online state, CPU, RAM, disk, temperature and what each screen is playing right now, plus
   a *Needs attention* list with the reason for each issue
