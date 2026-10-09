@@ -1,6 +1,6 @@
 # Tests every push and pull request; publishes the hub image to GHCR (linux/amd64 and linux/arm64).
 #   push to main/master   -> ghcr.io/<owner>/caracal-fleet:edge
-#   tag v4.6.0 etc.       -> ghcr.io/<owner>/caracal-fleet:4.6.0 and :latest
+#   tag v4.6.0 etc.       -> ghcr.io/<owner>/caracal-fleet:4.6.0 and :latest, GitHub Release
 name: ci
 
 on:
@@ -61,3 +61,24 @@ jobs:
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # A tag v* also creates the GitHub Release (Releases tab) with notes generated from the commits since the
+  # previous tag. Runs after the image was published; skipped when the release exists already (re-run).
+  release:
+    needs: image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: GitHub Release
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          V="${TAG#v}"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/caracal-fleet"
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "Release $TAG exists"; exit 0; fi
+          gh release create "$TAG" --verify-tag --title "CARACAL Fleet $V" --generate-notes \
+            --notes "Docker image: \`$IMAGE:$V\` (also \`:latest\`)"
