@@ -4,12 +4,17 @@ Central management for [CARACAL](https://github.com/Gelluithor/Caracal) digital 
 with one `docker compose up`.
 
 - **Monitoring:** online state, CPU, RAM, disk, temperature and what each screen is playing right now, plus
-  a *Needs attention* list with the reason for each issue
+  a *Needs attention* list with the reason for each issue; metric graphs and availability for 24 hours or 7 days and a
+  timeline of outages, problems and commands per device
+- **Alerts for administrators:** when a screen goes down or has a problem, a message by e-mail (SMTP), Microsoft
+  Teams, Slack, Discord, ntfy or a webhook, after a delay you choose, grouped into one message per check, with a
+  "resolved" message too; devices can be muted for maintenance
 - **Content:** playlists with web pages, images, videos and Grafana collections; logins for web pages that need
   a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
   show or freeze an item, skip, resume, restart the player or the device
 - **On-screen notifications:** send a notification to one screen or many, change the notification settings (position,
-  size, sound, limits, your own MP3 per level) and manage watchers that announce new tickets or issues from other apps; a notification API
+  size, sound, limits, your own MP3 per level) and their look in a visual editor with a live preview of the TV (colours,
+  icons, shape, banner, font, animation) and manage watchers that announce new tickets or issues from other apps; a notification API
   lets other apps reach many screens with one request
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations

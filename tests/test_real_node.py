@@ -292,6 +292,28 @@ def test_notifications_from_fleet(env):
     run(env, 'notify_settings', {'position': 'top-right', 'sound': 'off', 'volume': 70, 'history_max': 500})
 
 
+def test_notification_look_from_fleet(env):
+    """The look of the notifications (colours, shape, a banner...) is edited in Fleet and reaches the node's overlay."""
+    d = device(env)
+    assert d['notify_style'] and d['notifications']['settings']['style']['fill'] == 'stripe'
+    run(env, 'notify_settings', {'style': {'fill': 'solid', 'width': 100, 'align': 'center',
+                                           'levels': {'critical': {'color': '#FF0000', 'icon': '★'}}}})
+    st = env['mod']._ntf_settings()['style']
+    assert (st['fill'], st['width'], st['align'], st['levels']['critical']) == ('solid', 100, 'center', {'color': '#ff0000', 'icon': '★'})
+    assert st['bg'] == '#111926' and st['levels']['info']['icon'] == 'ℹ'   # what was not sent keeps its value
+    assert device(env)['notifications']['settings']['style']['width'] == 100
+    # what the node cannot draw fails on the node with its reason (colour emoji crash Tk on X11)
+    r = requests.post(f"{env['hub']}/api/devices/{env['id']}/commands", headers=env['h'],
+                      json={'action': 'notify_settings', 'payload': {'style': {'levels': {'info': {'icon': '🔥'}}}}})
+    env['agent'].run_commands()
+    row = next(x for x in requests.get(f"{env['hub']}/api/commands?device_id={env['id']}", headers=env['h']).json()
+               if x['id'] == r.json()['id'])
+    assert row['state'] == 'failed' and 'emoji' in row['result']
+    assert requests.post(f"{env['hub']}/api/devices/{env['id']}/commands", headers=env['h'],
+                         json={'action': 'notify_settings', 'payload': {'style': 'red'}}).json()['detail'] == 'invalid_value'
+    run(env, 'notify_settings', {'style': env['mod']._NTF_STYLE})
+
+
 def test_watchers_from_fleet(env):
     """Watchers are created from Fleet; their credentials reach only the node, encrypted, like login profiles."""
     from fastapi import FastAPI

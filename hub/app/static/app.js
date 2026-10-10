@@ -18,7 +18,7 @@ const S = {
   attentionCount: 0,
   org: { groups: [], locations: [] },
   selected: new Set(),
-  filters: { q: '', status: '', group: '', location: '' },
+  filters: { q: '', status: '', group: '', location: '', ...JSON.parse(store.get('caracalFilters', '{}') || '{}') },
   detail: null,
   route: { view: 'overview', id: '', tab: '' },
   pendingOrder: null,
@@ -120,6 +120,12 @@ const ICONS = {
   moon: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
   auto: 'M12 21a9 9 0 1 0 0-18v18z',
   back: 'M15 18l-6-6 6-6',
+  chev: 'M7 10l5 5 5-5',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
+  more: 'M5 12h.01M12 12h.01M19 12h.01',
+  bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
+  check: 'M20 6 9 17l-5-5',
+  keyboard: 'M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10',
   agent: 'M12 3v12M7 10l5 5 5-5M5 21h14',
   ssh: 'M4 17l6-5-6-5M12 19h8',
   console: 'M3 4h18v16H3zM7 9l3 3-3 3M12 15h5',
@@ -144,10 +150,11 @@ function bar(v, warn, crit, unit = '%') {
 
 function statusBadge(d) {
   if (!d.online) return `<span class="badge offline">${t('offline')}</span>`;
-  if (d.needs_attention) return `<span class="badge warning">${t('attentionShort')}</span>`;
+  if (d.needs_attention) return `<span class="badge ${d.attention.some(a => a.level === 'critical') ? 'critical' : 'warning'}">${t('attentionShort')}</span>`;
   return `<span class="badge online">${t('online')}</span>`;
 }
-const dot = d => `<span class="sdot ${!d.online ? 'offline' : d.needs_attention ? 'warning' : 'online'}"></span>`;
+const dot = d => `<span class="sdot ${!d.online ? 'offline' : d.attention.some(a => a.level === 'critical') ? 'critical' : d.needs_attention ? 'warning' : 'online'}"></span>`;
+const clock = ts => new Date(ts * 1000).toLocaleString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB', new Date(ts * 1000).toDateString() === new Date().toDateString() ? { hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 function attText(a) {
   const det = a.detail;
@@ -164,6 +171,8 @@ function progress(d) {
   return `<div class="now"><div class="now-name">${d.frozen ? `<span class="tag frozen">${icon('snow')}${t('frozen')}</span>` : ''}<span title="${esc(name)}">${esc(name)}</span></div>
     ${d.frozen ? '' : `<div class="prog"><i style="width:${pct}%"></i></div>`}</div>`;
 }
+
+const emptyState = (ic, title, text, action) => `<div class="empty-state">${icon(ic)}<b>${title}</b>${text ? `<p>${text}</p>` : ''}${action ? `<div>${action}</div>` : ''}</div>`;
 
 function patch(el, html) { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } }
 
@@ -182,6 +191,7 @@ function applyStatic() {
   $('#refreshBtn').innerHTML = icon('refresh');
   $('#refreshBtn').title = t('refresh');
   $('#addDeviceBtn').innerHTML = icon('plus') + `<span>${t('addDevice')}</span>`;
+  $('#paletteBtn').innerHTML = `${icon('search')}<span>${t('search')}</span><kbd>${isMac ? '⌘' : 'Ctrl'} K</kbd>`;
 }
 
 async function setLang(l) {
@@ -346,6 +356,7 @@ async function route() {
 
 const VIEWS = {};
 let viewTimer = null;
+let lastMount = '', enterTimer = null;
 
 function render(full = false) {
   const v = VIEWS[S.route.view] || VIEWS.overview;
@@ -354,14 +365,32 @@ function render(full = false) {
     root.dataset.view = S.route.view + S.route.id + S.route.tab;
     root.innerHTML = '';
     root._html = null;
+    // a new page slides in as a whole, another tab of the same page only with its content
+    const key = S.route.view === 'settings' ? 'settings' : S.route.view + '/' + S.route.id;
+    root.classList.remove('enter', 'enter-tab');
+    root.classList.add(key === lastMount ? 'enter-tab' : 'enter');
+    lastMount = key;
+    clearTimeout(enterTimer);
+    enterTimer = setTimeout(() => root.classList.remove('enter', 'enter-tab'), 700);
     v.mount(root);
   }
   v.update && v.update(root);
+  markSwitched(root);
 }
 
-function setTitle(title, crumb = 'CARACAL FLEET') {
+// A screen whose content changed since the last refresh plays a short "channel switch".
+const NOW_SEEN = {};
+function markSwitched(root) {
+  $$('.screen[data-dev]', root).forEach(el => {
+    const k = el.dataset.dev + (el.classList.contains('screen-lg') ? ':lg' : ''), v = el.dataset.now;
+    if (k in NOW_SEEN && NOW_SEEN[k] !== v) el.classList.add('switched');
+    NOW_SEEN[k] = v;
+  });
+}
+
+function setTitle(title, crumb = '', href = '') {
   $('#title').textContent = title;
-  $('#crumb').textContent = crumb;
+  $('#crumb').innerHTML = crumb && href ? `<a href="${href}">${esc(crumb)}</a>` : esc(crumb);
   document.title = `${title} · CARACAL Fleet`;
 }
 
@@ -370,15 +399,20 @@ function setTitle(title, crumb = 'CARACAL FLEET') {
 VIEWS.overview = {
   mount(root) {
     setTitle(t('nav_overview'));
-    root.innerHTML = `<div class="stats" id="ovStats"></div>
-      <div class="grid two">
+    root.innerHTML = `<div id="ovWelcome"></div><div class="stats" id="ovStats"></div>
+      <div class="grid two" id="ovRow">
         <section class="card"><div class="card-head"><h2>${t('needsAttention')}</h2><a href="#/attention" class="link">${t('showAll')}</a></div><div id="ovAtt"></div></section>
-        <section class="card"><div class="card-head"><h2>${t('locations')}</h2><a href="#/organization" class="link">${t('manage')}</a></div><div id="ovLoc"></div></section>
+        <section class="card"><div class="card-head"><h2>${t('recentEvents')}</h2><span class="muted">${t('last24h')}</span></div><div id="ovEvents"><div class="empty">…</div></div></section>
       </div>
-      <section class="card"><div class="card-head"><h2>${t('nowPlayingAll')}</h2><span class="muted" id="ovCount"></span></div><div class="tiles" id="ovTiles"></div></section>`;
+      <section class="card wall" id="ovWall"><div class="card-head"><h2>${t('nowPlayingAll')}</h2><span class="muted" id="ovCount"></span></div><div class="tiles" id="ovTiles"></div></section>
+      <section class="card" id="ovLocCard"><div class="card-head"><h2>${t('locations')}</h2><a href="#/organization" class="link">${t('manage')}</a></div><div id="ovLoc"></div></section>`;
+    loadEvents(root, true);
   },
   update(root) {
     const ds = S.devices;
+    const first = !ds.length;
+    patch($('#ovWelcome', root), first ? welcomeCard() : '');
+    for (const id of ['#ovStats', '#ovRow', '#ovWall']) $(id, root).hidden = first;
     const online = ds.filter(d => d.online).length;
     const outdated = ds.filter(d => d.attention.some(a => a.code === 'agent_outdated')).length;
     const stat = (label, val, cls, href, sub = '') => `<a class="stat ${cls}" ${href ? `href="${href}"` : ''}><span>${label}</span><b>${val}</b><small>${sub}</small></a>`;
@@ -394,21 +428,51 @@ VIEWS.overview = {
     patch($('#ovAtt', root), att.length ? att.slice(0, 8).map(d => `<a class="att-row" href="#/device/${encodeURIComponent(d.id)}">
         ${dot(d)}<div><b>${esc(d.name)}</b><small class="muted">${esc(d.location || '')}</small></div>
         <div class="reasons">${d.attention.filter(a => a.level !== 'info').map(a => `<span class="reason ${a.level}">${esc(attText(a))}</span>`).join('')}</div></a>`).join('')
-      : `<div class="empty ok">${t('allGood')}</div>`);
+      : `<div class="all-good">${icon('check')}<b>${t('allGood')}</b></div>`);
     const locs = {};
     for (const d of ds) { const k = d.location || ''; (locs[k] ||= { total: 0, online: 0, att: 0 }); locs[k].total++; if (d.online) locs[k].online++; if (d.needs_attention) locs[k].att++; }
-    patch($('#ovLoc', root), Object.keys(locs).length ? Object.entries(locs).sort().map(([k, v]) => `<a class="loc-row" href="#/devices?location=${encodeURIComponent(k)}">
+    // a single "unassigned" row says nothing; the card appears once locations are used
+    $('#ovLocCard', root).hidden = first || !Object.keys(locs).some(Boolean);
+    patch($('#ovLoc', root), Object.entries(locs).sort().map(([k, v]) => `<a class="loc-row" href="#/devices?location=${encodeURIComponent(k)}">
         ${icon('location')}<b>${esc(k || t('unassigned'))}</b><span class="muted">${v.online}/${v.total} ${t('online').toLowerCase()}</span>
         ${v.att ? `<span class="reason warning">${v.att} ${t('attentionShort').toLowerCase()}</span>` : ''}
-        <div class="mini-prog"><i style="width:${v.total ? v.online / v.total * 100 : 0}%"></i></div></a>`).join('')
-      : `<div class="empty">${t('noDevices')}</div>`);
+        <div class="mini-prog"><i style="width:${v.total ? v.online / v.total * 100 : 0}%"></i></div></a>`).join(''));
     $('#ovCount', root).textContent = `${ds.length}`;
     patch($('#ovTiles', root), ds.map(d => `<a class="tile ${d.online ? '' : 'off'}" href="#/device/${encodeURIComponent(d.id)}">
-        <div class="tile-head">${dot(d)}<b>${esc(d.name)}</b>${d.current_kind ? kindIcon(d.current_kind) : ''}</div>
-        ${progress(d)}<small class="muted">${esc([d.location, d.group].filter(Boolean).join(' · ') || d.id)}</small></a>`).join('')
-      || `<div class="empty">${t('noDevicesHint')}</div>`);
+        <div class="screen" data-dev="${esc(d.id)}" data-now="${esc(d.online ? d.current_name || '' : '')}">${d.online ? (d.current_kind ? kindIcon(d.current_kind) : '') + progress(d) : `<span class="no-signal">${t('offline')}</span>`}</div>
+        <div class="tile-head">${dot(d)}<b>${esc(d.name)}</b>${d.muted_until ? `<span title="${esc(t('mutedUntil', { time: clock(d.muted_until) }))}">${icon('bell')}</span>` : ''}</div>
+        <small class="muted">${esc([d.location, d.group].filter(Boolean).join(' / ') || d.id)}</small></a>`).join(''));
+    loadEvents(root);
   },
 };
+
+// The latest events of the fleet (problems that started or ended), refreshed every half a minute.
+let eventsAt = 0;
+async function loadEvents(root, force = false) {
+  if (!force && Date.now() - eventsAt < 30000) return;
+  eventsAt = Date.now();
+  const rows = await api('/api/events?hours=24&limit=8').catch(() => null);
+  const el = $('#ovEvents', root);
+  if (!rows || !el) return;
+  patch(el, rows.length ? `<div class="event-list">${rows.map(e => eventRow(e, true)).join('')}</div>`
+    : `<div class="all-good quiet">${icon('check')}<b>${t('noEvents')}</b></div>`);
+}
+
+function eventText(e) {
+  const what = e.code === 'offline' ? t('offline') : attText({ code: e.code, detail: e.detail });
+  return e.kind === 'end' ? (e.code === 'offline' ? t('eventOnline') : t('eventEnded', { what })) : what;
+}
+const eventRow = (e, withDevice) => `<a class="event ${e.kind === 'end' ? 'ok' : e.level}" href="#/device/${encodeURIComponent(e.device_id)}">
+  <span class="sdot ${e.kind === 'end' ? 'online' : e.level === 'critical' ? 'critical' : 'warning'}"></span>
+  <span>${withDevice ? `<b>${esc(e.device_name || e.device_id)}</b> ` : ''}${esc(eventText(e))}</span><small class="muted">${clock(e.ts)}</small></a>`;
+
+// First start: nothing is connected yet, so the overview shows the ways to add a screen.
+function welcomeCard() {
+  const opt = (todo, ic, title, text) => `<button class="welcome-opt" data-do="${todo}">${icon(ic)}<b>${title}</b><span>${text}</span></button>`;
+  return `<section class="card welcome"><div class="welcome-head">${icon('devices')}<div><h2>${t('welcomeTitle')}</h2><p class="muted">${t('welcomeText')}</p></div></div>
+    ${can('manage') ? `<div class="welcome-opts">${opt('sdCard', 'download', t('sdCardTitle'), t('welcomeSd'))}${opt('discover', 'search', t('discoverTitle'), t('welcomeDiscover'))}${opt('provision', 'ssh', t('sshInstall'), t('welcomeSsh'))}</div>`
+      : `<p class="muted">${t('welcomeViewer')}</p>`}</section>`;
+}
 
 // ---------- devices
 
@@ -442,32 +506,36 @@ VIEWS.devices = {
         <select id="fStatus">${['', 'online', 'offline', 'attention', 'frozen', 'outdated'].map(s => `<option value="${s}" ${s === f.status ? 'selected' : ''}>${t('status_' + (s || 'all'))}</option>`).join('')}</select>
         <select id="fGroup">${options(orgNames('groups'), f.group, t('allGroups'))}</select>
         <select id="fLoc">${options(orgNames('locations'), f.location, t('allLocations'))}</select>
-        <span class="muted grow" id="fCount"></span>
+        <span class="muted grow" id="fCount"></span><button class="btn sm ghost" id="fReset" hidden>${icon('x')}${t('resetFilters')}</button>
       </div>
       <div class="bulkbar" id="bulkBar" hidden></div>
       <div class="table-wrap"><table class="table devices-table">
         <thead><tr><th class="cb"><input type="checkbox" id="selAll"></th><th>${t('device')}</th><th>${t('locationGroup')}</th><th>${t('currentContent')}</th>
-        <th>CPU</th><th>RAM</th><th>${t('disk')}</th><th>${t('temperature')}</th><th>${t('agent')}</th><th>${t('lastSeen')}</th></tr></thead>
+        <th>CPU</th><th>RAM</th><th>${t('disk')}</th><th>${t('temperature')}</th><th>${t('agent')}</th><th>${t('lastSeen')}</th><th class="more-cell"></th></tr></thead>
         <tbody id="devRows"></tbody></table></div></section>`;
     const upd = () => this.update(root);
-    $('#fQ', root).oninput = e => { S.filters.q = e.target.value; upd(); };
-    $('#fStatus', root).onchange = e => { S.filters.status = e.target.value; upd(); };
-    $('#fGroup', root).onchange = e => { S.filters.group = e.target.value; upd(); };
-    $('#fLoc', root).onchange = e => { S.filters.location = e.target.value; upd(); };
+    const set = (k, v) => { S.filters[k] = v; store.set('caracalFilters', JSON.stringify(S.filters)); upd(); };
+    $('#fQ', root).oninput = e => set('q', e.target.value);
+    $('#fStatus', root).onchange = e => set('status', e.target.value);
+    $('#fGroup', root).onchange = e => set('group', e.target.value);
+    $('#fLoc', root).onchange = e => set('location', e.target.value);
+    $('#fReset', root).onclick = () => { S.filters = { q: '', status: '', group: '', location: '' }; store.set('caracalFilters', null); this.mount(root); this.update(root); };
     $('#selAll', root).onchange = e => { filteredDevices().forEach(d => e.target.checked ? S.selected.add(d.id) : S.selected.delete(d.id)); upd(); };
   },
   update(root) {
     const list = filteredDevices();
     $('#fCount', root).textContent = t('nOfM', { n: list.length, m: S.devices.length });
+    $('#fReset', root).hidden = !Object.values(S.filters).some(Boolean);
     patch($('#devRows', root), list.map(d => `<tr data-href="#/device/${encodeURIComponent(d.id)}" class="${S.selected.has(d.id) ? 'sel' : ''}">
       <td class="cb"><input type="checkbox" data-pick="${esc(d.id)}" ${S.selected.has(d.id) ? 'checked' : ''}></td>
-      <td><div class="dev-name">${dot(d)}<div><b>${esc(d.name)}</b><small>${esc(d.id)} · ${esc(d.ip || '—')}</small></div></div></td>
+      <td><div class="dev-name">${dot(d)}<div><b>${esc(d.name)}${d.muted_until ? ` <span class="muted-ic" title="${esc(t('mutedUntil', { time: clock(d.muted_until) }))}">${icon('bell')}</span>` : ''}</b><small>${esc(d.id)} · ${esc(d.ip || '—')}</small></div></div></td>
       <td><small class="stack">${d.location ? `<span>${icon('location')}${esc(d.location)}</span>` : ''}${d.group ? `<span>${icon('group')}${esc(d.group)}</span>` : ''}${!d.location && !d.group ? '—' : ''}</small></td>
       <td class="content-cell">${progress(d)}${d.needs_attention ? `<small class="reason-inline">${esc(d.attention.filter(a => a.level !== 'info').map(attText).join(', '))}</small>` : ''}</td>
       <td>${d.online ? bar(d.cpu, 80, 95) : '—'}</td><td>${d.online ? bar(d.ram, 80, 90) : '—'}</td><td>${bar(d.disk, 85, 95)}</td>
       <td>${d.online ? bar(d.temp, 70, 80, 'C') : '—'}</td>
       <td><span class="${d.attention.some(a => a.code === 'agent_outdated') ? 'tag info' : 'muted'}">${esc(d.version || '—')}</span></td>
-      <td class="muted nowrap">${d.online ? t('now') : ago(d.last_seen)}${d.pending_commands ? `<br><span class="tag">${t('pendingN', { n: d.pending_commands })}</span>` : ''}</td></tr>`).join('')
+      <td class="muted nowrap">${d.online ? t('now') : ago(d.last_seen)}${d.pending_commands ? `<br><span class="tag">${t('pendingN', { n: d.pending_commands })}</span>` : ''}</td>
+      <td class="more-cell"><button class="icon-btn row-more" data-more="${esc(d.id)}" title="${esc(t('moreActions'))}" aria-label="${esc(t('moreActions'))}">${icon('more')}</button></td></tr>`).join('')
       || `<tr><td colspan="10" class="empty">${S.devices.length ? t('noMatch') : t('noDevicesHint')}</td></tr>`);
     const sa = $('#selAll', root);
     sa.checked = list.length > 0 && list.every(d => S.selected.has(d.id));
@@ -480,19 +548,253 @@ function renderBulkBar(el) {
   const n = S.selected.size;
   el.hidden = !n;
   if (!n) { patch(el, ''); return; }
-  const b = (act, label, ic, cls = '') => `<button class="btn sm ${cls}" data-do="bulk" data-act="${act}">${icon(ic)}${label}</button>`;
-  patch(el, `<b>${t('selectedN', { n })}</b>
-    ${can('control') ? b('next', t('act_next'), 'next') + b('unfreeze', t('act_unfreeze'), 'play') + b('restart_player', t('act_restart_player'), 'restart') + b('reboot', t('act_reboot'), 'power', 'danger') : ''}
-    ${can('content') ? `<button class="btn sm" data-do="bulkAddContent">${icon('plus')}${t('addContent')}</button><button class="btn sm" data-do="bulkCopy">${icon('copy')}${t('copyPlaylistHere')}</button>` : ''}
-    ${can('control') ? `<button class="btn sm" data-do="bulkNotify">${icon('attention')}${t('notifySend')}</button>` : ''}
-    ${can('content') ? `<button class="btn sm" data-do="bulkNotifySettings">${icon('settings')}${t('notifySettings')}</button><button class="btn sm" data-do="bulkNotifySound">${icon('upload')}${t('notifySoundUpload')}</button><button class="btn sm" data-do="bulkWatcher">${icon('eye')}${t('addWatcher')}</button><button class="btn sm" data-do="bulkOverlay">${icon('settings')}${t('overlayBar')}</button>` : ''}
-    ${can('manage') ? b('update_agent', t('act_update_agent'), 'agent') + `<button class="btn sm" data-do="bulkAssign">${icon('group')}${t('assignGroupLocation')}</button>
-      <button class="btn sm" data-do="bulkSetHub">${icon('upload')}${t('act_set_hub')}</button>
-      <button class="btn sm" data-do="bulkDownloadSource">${icon('download')}${t('downloadSource')}</button>
-      <button class="btn sm" data-do="bulkNodeAdmin">${icon('lock')}${t('webAdmin')}</button>
-      <button class="btn sm" data-do="caracalUpdate">${icon('updates')}${t('act_update_caracal')}</button>` : ''}
+  patch(el, `<b>${t('selectedN', { n })}</b>${actionBar()}<span class="grow"></span>
     <button class="btn sm ghost" data-do="clearSel">${icon('x')}${t('clearSelection')}</button>`);
 }
+
+// Actions of one device (d) or of the selected devices (d = null). One model feeds the action bar, the right-click
+// menu and the command palette, so every place offers the same set in the same order.
+function deviceActions(d = null) {
+  const off = !!d && !d.online;
+  // a feature that depends on the node's version is offered when the device (or any selected one) supports it;
+  // for the selection the hub skips the others
+  const sel = d ? [d] : [...S.selected].map(dev).filter(Boolean);
+  const why = ok => (ok ? '' : t(d ? 'needNewerCaracal' : 'noneSelectedSupport'));
+  const has = cap => sel.some(x => (x.capabilities || {})[cap]);
+  const notify = sel.some(x => notifySupport(x) === 'ok');
+  const notifyWhy = notify ? '' : d ? t(notifySupport(d) === 'node' ? 'notifyNeedCaracal' : 'notifyNeedAgent') : why(false);
+  const sound = notify && has('notify_sound'), overlay = has('overlay'), admin = sel.some(adminSupport);
+  // the look editor needs a node that reports its look (newer CARACAL) and an agent that passes it on
+  const look = notify && sel.some(x => lookSupport(x));
+  const ctl = can('control'), content = can('content'), manage = can('manage');
+  const A = (todo, ic, label, o = {}) => ({ todo, ic, label, ...o, why: o.disabled ? o.why || t('offline') : '' });
+  const cmd = d ? 'cmd' : 'bulk';
+  const play = ctl ? [
+    // resuming makes sense only for a frozen screen; the selection may contain one
+    (!d || d.frozen) && A(cmd, 'play', t('act_unfreeze'), { act: 'unfreeze', disabled: off }),
+    A(cmd, 'next', t('act_next'), { act: 'next', disabled: off }),
+    A(cmd, 'restart', t('act_restart_player'), { act: 'restart_player', disabled: off }),
+  ].filter(Boolean) : [];
+  const menus = [
+    { ic: 'playlists', label: t('menuContent'), sections: [
+      [content && A('bulkAddContent', 'plus', t('addContent')), content && A('bulkCopy', 'copy', t('copyPlaylistHere'))],
+      [content && A(d ? 'overlaySettings' : 'bulkOverlay', 'settings', t('overlayBar'), { disabled: !overlay, why: why(overlay) })],
+    ] },
+    { ic: 'attention', label: t('menuNotify'), sections: [
+      [ctl && A(d ? 'notifySend' : 'bulkNotify', 'plus', t('notifySend'), { disabled: !notify, why: notifyWhy })],
+      [content && A(d ? 'notifySettings' : 'bulkNotifySettings', 'settings', t('notifySettings'), { disabled: !notify, why: notifyWhy }),
+        content && A(d ? 'notifySound' : 'bulkNotifySound', 'upload', t('notifySoundUpload'), { disabled: !sound, why: notifyWhy || why(sound) }),
+        content && A(d ? 'addWatcher' : 'bulkWatcher', 'eye', t('addWatcher'), { disabled: !notify, why: notifyWhy })],
+      [content && A('notifyStyle', 'image', t('notifyLook'), { disabled: !look, why: notifyWhy || why(look) })],
+    ] },
+    { ic: 'settings', label: t('menuManage'), sections: [
+      [manage && A('muteAlerts', 'bell', d && d.muted_until ? t('unmuteAlerts') : t('muteAlerts')),
+        manage && A('bulkAssign', 'group', t('assignGroupLocation')),
+        manage && A(d ? 'nodeAdmin' : 'bulkNodeAdmin', 'lock', t('webAdmin'), { disabled: off || !admin, why: why(admin) || t('offline') }),
+        manage && (!d || d.download_source) && A(d ? 'downloadSource' : 'bulkDownloadSource', 'download', t('downloadSource'))],
+      [manage && A(cmd, 'agent', t('act_update_agent'), { act: 'update_agent', disabled: off }),
+        manage && A('caracalUpdate', 'updates', t('act_update_caracal'), { disabled: off }),
+        manage && d && d.runtime === 'host' && A('convertNodes', 'upload', t('convertToDocker'), { disabled: off })],
+      [manage && d && A('provision', 'ssh', t('sshInstall'), { data: { host: d.ip || '', name: d.name } }),
+        manage && d && A('', 'console', t('console'), { href: '#/console/' + encodeURIComponent(d.id) })],
+      [manage && A('bulkSetHub', 'upload', t('act_set_hub')),
+        ctl && A(cmd, 'power', t('act_reboot'), { act: 'reboot', cls: 'danger', disabled: off })],
+    ] },
+  ].map(m => ({ ...m, sections: m.sections.map(x => x.filter(Boolean)).filter(x => x.length) })).filter(m => m.sections.length);
+  return { play, menus };
+}
+
+const actionAttrs = (a, id) => `data-do="${a.todo}"${a.act ? ` data-act="${a.act}"` : ''}${id ? ` data-id="${esc(id)}"` : ''}`
+  + Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
+function actionItem(a, id, cls = 'mi', compact = false) {
+  const inner = `${icon(a.ic)}<span>${a.label}${a.disabled && !compact ? `<small>${t(a.why && a.why !== t('offline') ? 'needsUpdate' : 'offline')}</small>` : ''}</span>`;
+  if (a.href) return `<a class="${cls}" role="menuitem" href="${a.href}">${inner}</a>`;
+  return `<button class="${cls} ${a.cls || ''}" role="menuitem" ${actionAttrs(a, id)} ${a.disabled ? `disabled title="${esc(a.why)}"` : ''}>${inner}</button>`;
+}
+const menuHtml = (sections, id) => sections.map(x => x.map(a => actionItem(a, id)).join('')).join('<hr>');
+
+// playback as buttons, everything else in the menus Content, Notifications and Manage
+function actionBar(d = null) {
+  const { play, menus } = deviceActions(d), id = d && d.id;
+  return `<div class="action-bar">
+    ${play.length ? `<div class="action-group">${play.map(a => `<button class="btn" ${actionAttrs(a, id)} title="${esc(a.label)}" ${a.disabled ? 'disabled' : ''}>${icon(a.ic)}<span>${a.label}</span></button>`).join('')}</div>` : ''}
+    ${menus.map(m => `<div class="menu"><button class="btn" data-menu aria-haspopup="menu" aria-expanded="false">${icon(m.ic)}<span>${m.label}</span>${icon('chev', 'chev')}</button>
+      <div class="menu-pop" role="menu" hidden>${menuHtml(m.sections, id)}</div></div>`).join('')}</div>`;
+}
+
+// Right click (or the … button) on a device: everything it can do, without opening it first.
+// On a selected row of several, the menu acts on the whole selection.
+function openContextMenu(id, x, y) {
+  const d = dev(id);
+  if (!d) return;
+  const bulk = S.route.view === 'devices' && S.selected.size > 1 && S.selected.has(id);
+  const { play, menus } = deviceActions(bulk ? null : d), did = bulk ? null : d.id;
+  let pop = $('#ctxMenu');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.id = 'ctxMenu';
+    pop.className = 'menu-pop ctx';
+    pop.setAttribute('role', 'menu');
+    document.body.append(pop);
+  }
+  pop.innerHTML = `<div class="ctx-head">${bulk ? `<b>${t('selectedN', { n: S.selected.size })}</b>` : `${dot(d)}<b>${esc(d.name)}</b>`}</div>`
+    + [bulk ? '' : `<a class="mi" role="menuitem" href="#/device/${encodeURIComponent(d.id)}">${icon('devices')}<span>${t('open')}</span></a>`,
+      play.map(a => actionItem(a, did, 'mi', true)).join(''),
+      ...menus.map(m => `<div class="ctx-label">${m.label}</div>${m.sections.map(x => x.map(a => actionItem(a, did, 'mi', true)).join('')).join('<hr>')}`)].filter(Boolean).join('<hr>');
+  closeMenus();
+  pop.hidden = false;
+  menuOpenedAt = performance.now();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(x, innerWidth - w - 8)) + 'px';
+  pop.style.top = Math.max(8, Math.min(y, innerHeight - h - 8)) + 'px';
+  menuItems(pop)[0]?.focus({ preventScroll: true });
+}
+const deviceIdOf = el => decodeURIComponent((el.getAttribute('href') || el.dataset.href || '').split('/')[2] || '');
+document.addEventListener('contextmenu', e => {
+  const el = e.target.closest('tr[data-href^="#/device/"], a.tile');
+  if (!el || !S.me) return;
+  e.preventDefault();
+  openContextMenu(deviceIdOf(el), e.clientX, e.clientY);
+});
+
+// ---------- command palette (Ctrl/⌘ K): jump to a device or a page, or run an action, all from the keyboard
+
+const norm = v => String(v ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
+function paletteResults(q) {
+  const words = norm(q).split(/\s+/).filter(Boolean);
+  const hit = text => words.every(w => text.includes(w));
+  const groups = [];
+  const add = (title, items, max) => { const list = items.filter(x => !words.length || hit(x.text)).slice(0, max); if (list.length) groups.push({ title, list }); };
+  const actionsOf = (d, id, extra) => {
+    const { play, menus } = deviceActions(d);
+    return [...play, ...menus.flatMap(m => m.sections.flat())].filter(a => !a.disabled)
+      .map(a => ({ html: actionItem(a, id, 'pi').replace('<span>', `<span>${extra ? `<small class="pi-ctx">${esc(extra)}</small>` : ''}`), text: norm(a.label + ' ' + (extra || '')) }));
+  };
+  const here = S.route.view === 'device' && S.detail ? dev(S.detail.id) : null;
+  if (here) add(t('paletteThisDevice', { name: here.name }), actionsOf(here, here.id, ''), words.length ? 6 : 8);
+  if (S.selected.size && S.route.view === 'devices') add(t('selectedN', { n: S.selected.size }), actionsOf(null, null, ''), words.length ? 6 : 8);
+  add(t('nav_devices'), S.devices.map(d => ({
+    html: `<a class="pi" href="#/device/${encodeURIComponent(d.id)}">${dot(d)}<span>${esc(d.name)}<small>${esc([d.location, d.group, d.ip].filter(Boolean).join(' / ') || d.id)}</small></span></a>`,
+    text: norm([d.name, d.id, d.ip, d.location, d.group, d.current_name].join(' ')),
+  })), words.length ? 6 : 5);
+  if (words.length) add(t('paletteActions'), S.devices.filter(d => d !== here).flatMap(d => actionsOf(d, d.id, d.name)), 8);
+  add(t('palettePages'), NAV.filter(([, p]) => can(p)).map(([v]) => ({ html: `<a class="pi" href="#/${v}">${icon(v)}<span>${t('nav_' + v)}</span></a>`, text: norm(t('nav_' + v)) })), words.length ? 4 : 11);
+  add(t('paletteGeneral'), [
+    can('manage') && { html: `<button class="pi" data-do="provision">${icon('plus')}<span>${t('addDevice')}</span></button>`, text: norm(t('addDevice')) },
+    { html: `<button class="pi" data-do="toggleTheme">${icon('moon')}<span>${t('paletteTheme')}</span></button>`, text: norm(t('paletteTheme') + ' dark light') },
+    { html: `<button class="pi" data-do="switchLang">${icon('web')}<span>${t('paletteLang')}</span></button>`, text: norm(t('paletteLang') + ' language jazyk') },
+    { html: `<button class="pi" data-do="showShortcuts">${icon('keyboard')}<span>${t('shortcuts')}</span></button>`, text: norm(t('shortcuts') + ' keyboard klavesnice') },
+    { html: `<button class="pi" data-do="signOut">${icon('back')}<span>${t('signOut')}</span></button>`, text: norm(t('signOut')) },
+  ].filter(Boolean), 4);
+  return groups;
+}
+
+function openPalette() {
+  if (!S.me) return;
+  let box = $('#palette');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'palette';
+    box.className = 'palette';
+    document.body.append(box);
+    box.addEventListener('mousedown', e => { if (e.target === box) closePalette(); });
+    box.addEventListener('mousemove', e => { const it = e.target.closest('.pi'); if (it && !it.disabled) paletteActive(it); });
+  }
+  box.innerHTML = `<div class="palette-box" role="dialog" aria-label="${esc(t('search'))}">
+    <label class="palette-search">${icon('search')}<input id="paletteQ" placeholder="${esc(t('paletteHint'))}" autocomplete="off" spellcheck="false"><kbd>esc</kbd></label>
+    <div class="palette-list" id="paletteList" role="listbox"></div>
+    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> ${t('paletteMove')}</span><span><kbd>↵</kbd> ${t('paletteRun')}</span></div></div>`;
+  box.hidden = false;
+  closeMenus();
+  const q = $('#paletteQ', box);
+  q.oninput = () => paletteRender(q.value);
+  q.onkeydown = e => {
+    const items = $$('.pi', box), i = items.indexOf($('.pi.active', box));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); paletteActive(items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length], true); }
+    else if (e.key === 'Enter') { e.preventDefault(); $('.pi.active', box)?.click(); }
+    else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+  };
+  paletteRender('');
+  q.focus();
+}
+function paletteRender(q) {
+  const groups = paletteResults(q);
+  $('#paletteList').innerHTML = groups.map(g => `<div class="pg"><div class="pg-title">${esc(g.title)}</div>${g.list.map(x => x.html).join('')}</div>`).join('')
+    || `<div class="palette-empty">${t('paletteEmpty')}</div>`;
+  paletteActive($('#paletteList .pi'));
+}
+function paletteActive(it, scroll = false) {
+  $$('#palette .pi.active').forEach(x => x.classList.remove('active'));
+  if (!it) return;
+  it.classList.add('active');
+  if (scroll) it.scrollIntoView({ block: 'nearest' });
+}
+function closePalette() { const box = $('#palette'); if (box) box.hidden = true; }
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette:not([hidden])') ? closePalette() : openPalette(); }
+  else if (e.key === '/' && !e.target.closest('input, textarea, select, [contenteditable]') && !$('#modal').open) { e.preventDefault(); openPalette(); }
+  else if (e.key === '?' && S.me && !e.target.closest('input, textarea, select, [contenteditable]') && !$('#modal').open) { e.preventDefault(); ACTIONS_UI.showShortcuts(); }
+});
+
+// the large page title shrinks into the toolbar once the page scrolls
+window.addEventListener('scroll', () => { $('.topbar')?.classList.toggle('scrolled', scrollY > 6); }, { passive: true });
+
+// The thumb of the segmented tabs slides from the tab it was on.
+let thumbFrom = null;
+function slideThumb(nav) {
+  const a = nav && $('a.active', nav);
+  if (!a) return;
+  let th = $('.tab-thumb', nav);
+  if (!th) {
+    th = document.createElement('i');
+    th.className = 'tab-thumb';
+    nav.prepend(th);
+    if (thumbFrom) { th.style.transition = 'none'; th.style.width = thumbFrom.w + 'px'; th.style.transform = `translateX(${thumbFrom.x}px)`; th.getBoundingClientRect(); th.style.transition = ''; }
+  }
+  thumbFrom = { x: a.offsetLeft, w: a.offsetWidth };
+  th.style.width = thumbFrom.w + 'px';
+  th.style.transform = `translateX(${thumbFrom.x}px)`;
+}
+
+const menuItems = pop => $$('.mi:not(:disabled)', pop);
+function closeMenus(except = null) {
+  $$('.menu-pop').forEach(p => {
+    if (p === except || p.hidden) return;
+    p.hidden = true;
+    const b = p.previousElementSibling;
+    if (b && b.hasAttribute('data-menu')) b.setAttribute('aria-expanded', 'false');
+  });
+}
+function toggleMenu(btn) {
+  const pop = btn.nextElementSibling;
+  closeMenus(pop);
+  if (!pop.hidden) { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); return; }
+  pop.hidden = false;
+  menuOpenedAt = performance.now();
+  btn.setAttribute('aria-expanded', 'true');
+  // fixed position, so the menu is not cut off by a scrolling or clipped panel
+  const r = btn.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+  pop.style.top = (r.bottom + 4 + h > innerHeight && r.top - 4 - h > 0 ? r.top - 4 - h : r.bottom + 4) + 'px';
+  menuItems(pop)[0]?.focus();
+}
+document.addEventListener('keydown', e => {
+  const pop = e.target.closest && e.target.closest('.menu-pop');
+  if (!pop) return;
+  const items = menuItems(pop), i = items.indexOf(e.target);
+  if (e.key === 'Escape') { const b = pop.previousElementSibling; closeMenus(); if (b && b.hasAttribute('data-menu')) b.focus(); }
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus(); }
+  else if (e.key === 'Tab') closeMenus();
+});
+window.addEventListener('resize', () => closeMenus());
+// scrolling moves a menu's anchor away, so it closes - except right after opening (the click may scroll its row into view)
+let menuOpenedAt = 0;
+window.addEventListener('scroll', e => {
+  if (performance.now() - menuOpenedAt < 400 || (e.target.closest && e.target.closest('.menu-pop'))) return;
+  closeMenus();
+}, true);
 
 // ---------- attention
 
@@ -541,9 +843,8 @@ VIEWS.device = {
   mount(root) {
     const d = S.detail;
     if (!d) { setTitle(t('device')); root.innerHTML = `<div class="card empty">${t('err_device_not_found')}</div>`; return; }
-    setTitle(d.name, t('nav_devices').toUpperCase());
-    root.innerHTML = `<a class="back" href="#/devices">${icon('back')}${t('nav_devices')}</a>
-      <section class="card dev-hero" id="devHero"></section>
+    setTitle(d.name, t('nav_devices'), '#/devices');
+    root.innerHTML = `<section class="card device-hero"><div id="devHero"></div><div id="devActions"></div></section>
       <div id="devAtt"></div>
       <nav class="tabs" id="devTabs"></nav>
       <div id="devTab"></div>`;
@@ -554,9 +855,11 @@ VIEWS.device = {
     const tab = DEVICE_TABS.includes(S.route.tab) ? S.route.tab : 'overview';
     patch($('#devHero', root), `<div class="hero-main"><div class="hero-title">${statusBadge(d)}<h2>${esc(d.name)}</h2></div>
       <div class="chips"><span>${esc(d.id)}</span><span>${esc(d.ip || '—')}</span>${d.location ? `<span>${icon('location')}${esc(d.location)}</span>` : ''}${d.group ? `<span>${icon('group')}${esc(d.group)}</span>` : ''}
-      <span>CARACAL ${esc(d.caracal_version || '?')} · ${runtimeLabel(d)}</span><span>${t('agent')} ${esc(d.version || '—')}</span>${d.model ? `<span>${esc(d.model)}</span>` : ''}<span>${d.online ? t('uptime') + ' ' + dur(d.uptime) : t('lastSeen') + ' ' + ago(d.last_seen)}</span></div></div>
-      <div class="hero-actions">${controlButtons(d)}</div>`);
+      ${d.caracal_version || d.runtime ? `<span>CARACAL ${esc(d.caracal_version || '?')} · ${runtimeLabel(d)}</span>` : ''}
+      ${d.muted_until ? `<span class="chip-muted">${icon('bell')}${t('mutedUntil', { time: clock(d.muted_until) })}</span>` : ''}<span>${t('agent')} ${esc(d.version || '—')}</span>${d.model ? `<span>${esc(d.model)}</span>` : ''}<span>${d.online ? t('uptime') + ' ' + dur(d.uptime) : t('lastSeen') + ' ' + ago(d.last_seen)}</span></div></div>`);
+    patch($('#devActions', root), actionBar(d));
     patch($('#devTabs', root), deviceTabs(d, tab));
+    slideThumb($('#devTabs', root));
     patch($('#devAtt', root), d.attention.length ? `<div class="alert-list">${d.attention.map(a => `<div class="alert ${a.level}"><b>${esc(attText(a))}</b><span>${esc(t('hint_' + a.code))}</span>${quickFix(d, a, true)}</div>`).join('')}</div>` : '');
     const el = $('#devTab', root);
     if (tab === 'overview') patch(el, deviceOverview(d));
@@ -568,18 +871,6 @@ VIEWS.device = {
     else if (tab === 'settings') { if (!el._html) patch(el, deviceSettings(d)); }
   },
 };
-
-function controlButtons(d) {
-  if (!can('control')) return '';
-  const b = (act, ic, label, cls = '') => `<button class="btn ${cls}" data-do="cmd" data-id="${esc(d.id)}" data-act="${act}" ${d.online ? '' : 'disabled'}>${icon(ic)}<span>${label}</span></button>`;
-  return b('unfreeze', 'play', t('act_unfreeze')) + b('next', 'next', t('act_next')) + b('restart_player', 'restart', t('act_restart_player'))
-    + b('reboot', 'power', t('act_reboot'), 'danger')
-    + (can('manage') ? `<button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="update_agent" ${d.online ? '' : 'disabled'}>${icon('agent')}<span>${t('act_update_agent')}</span></button>
-       ${d.runtime === 'host' ? `<button class="btn" data-do="convertNodes" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('upload')}<span>${t('convertToDocker')}</span></button>` : ''}
-       <button class="btn" data-do="caracalUpdate" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('updates')}<span>${t('act_update_caracal')}</span></button>
-       <button class="btn" data-do="provision" data-host="${esc(d.ip)}" data-name="${esc(d.name)}">${icon('ssh')}<span>${t('sshInstall')}</span></button>
-       <a class="btn" href="#/console/${encodeURIComponent(d.id)}">${icon('console')}<span>${t('console')}</span></a>` : '');
-}
 
 // ---------- SSH console (#/console/<device id>): the hub opens an SSH shell on the node and relays it over a WebSocket
 
@@ -620,9 +911,8 @@ VIEWS.console = {
   mount(root) {
     const d = S.detail;
     if (!d || !can('manage')) { setTitle(t('console')); root.innerHTML = `<div class="card empty">${t(d ? 'err_forbidden' : 'err_device_not_found')}</div>`; return; }
-    setTitle(t('console') + ' · ' + d.name, t('nav_devices').toUpperCase());
-    root.innerHTML = `<a class="back" href="#/device/${encodeURIComponent(d.id)}">${icon('back')}${esc(d.name)}</a>
-      <form class="card console-login" id="conForm" novalidate><div class="form">
+    setTitle(t('console'), d.name, '#/device/' + encodeURIComponent(d.id));
+    root.innerHTML = `<form class="card console-login" id="conForm" novalidate><div class="form">
         <div class="row2"><label>${t('hostIp')}<input name="host" value="${esc(d.ip)}" required></label><label>${t('sshPort')}<input name="port" type="number" min="1" max="65535" value="22"></label></div>
         <div class="row2"><label>${t('sshUser')}<input name="username" value="${esc(store.get('caracalSshUser', 'pi'))}" autocomplete="off" required></label><label>${t('sshPassword')}<input name="password" type="password" autocomplete="off"></label></div>
         <details><summary>${t('sshKeyAuth')}</summary><label>${t('privateKey')}<textarea name="private_key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label><label>${t('passphrase')}<input name="passphrase" type="password" autocomplete="off"></label></details>
@@ -719,16 +1009,21 @@ async function openConsole(d, data, root) {
 }
 
 function deviceOverview(d) {
-  const metric = (label, html) => `<div class="metric"><span>${label}</span>${html}</div>`;
+  loadMetrics(d);
+  const m = METRICS.id === d.id && METRICS.data;
+  const metric = (label, html, idx, lo, hi, unit) => `<div class="metric"><span>${label}</span>${html}${m ? sparkline(m, idx, lo, hi, unit) : ''}</div>`;
   const total = num(d.duration), rem = num(d.remaining);
   return `<div class="grid metrics4">
-      ${metric('CPU', bar(d.online ? d.cpu : null, 80, 95))}${metric('RAM', bar(d.online ? d.ram : null, 80, 90))}
-      ${metric(t('disk'), bar(d.disk, 85, 95))}${metric(t('temperature'), bar(d.online ? d.temp : null, 70, 80, 'C'))}</div>
+      ${metric('CPU', bar(d.online ? d.cpu : null, 80, 95), 1, 0, 100, '%')}${metric('RAM', bar(d.online ? d.ram : null, 80, 90), 2, 0, 100, '%')}
+      ${metric(t('disk'), bar(d.disk, 85, 95), 3, 0, 100, '%')}${metric(t('temperature'), bar(d.online ? d.temp : null, 70, 80, 'C'), 4, 20, 90, '°C')}</div>
+    ${m ? uptimeCard(m) : ''}
     <div class="grid two">
       <section class="card"><div class="card-head"><h2>${t('nowPlaying')}</h2>${d.frozen ? `<span class="tag frozen">${icon('snow')}${t('frozen')}</span>` : ''}</div>
-        <div class="now-big">${d.current_kind ? kindIcon(d.current_kind) : ''}<b>${esc(d.current_name || t('nothingPlaying'))}</b></div>
-        ${d.frozen ? `<p class="muted">${d.frozen_until ? t('frozenUntil', { time: dt(d.frozen_until) }) : t('frozenIndef')}</p>`
-          : total ? `<div class="prog big"><i style="width:${rem !== null ? Math.max(0, Math.min(100, (1 - rem / total) * 100)) : 0}%"></i></div><p class="muted">${t('remaining')}: ${dur(rem)} / ${dur(total)}</p>` : ''}
+        <div class="screen screen-lg ${d.online ? '' : 'off'}" data-dev="${esc(d.id)}" data-now="${esc(d.online ? d.current_name || '' : '')}">${!d.online ? `<span class="no-signal">${t('offline')}</span>`
+          : `${d.current_kind ? kindIcon(d.current_kind) : ''}<div class="now"><div class="now-name"><span>${esc(d.current_name || t('nothingPlaying'))}</span></div>
+          ${!d.frozen && total ? `<div class="prog"><i style="width:${rem !== null ? Math.max(0, Math.min(100, (1 - rem / total) * 100)) : 0}%"></i></div>` : ''}</div>`}</div>
+        ${!d.online ? '' : d.frozen ? `<p class="muted">${d.frozen_until ? t('frozenUntil', { time: dt(d.frozen_until) }) : t('frozenIndef')}</p>`
+          : total ? `<p class="muted">${t('remaining')}: ${dur(rem)} / ${dur(total)}</p>` : ''}
         <p class="muted">${t('playlistItems')}: ${d.playlist_count} · ${t('collections')}: ${d.collection_count}</p></section>
       <section class="card"><div class="card-head"><h2>${t('info')}</h2></div><dl class="kv">
         <dt>${t('hostname')}</dt><dd>${esc(d.hostname || '—')}</dd><dt>${t('model')}</dt><dd>${esc(d.model || '—')}</dd>
@@ -852,7 +1147,98 @@ function payloadSummary(json) {
   return parts.join(' · ');
 }
 
-const deviceHistory = d => `<section class="card flush">${commandsTable(d.commands, false)}</section>`;
+const shortcutsHtml = () => {
+  const mod = isMac ? '⌘' : 'Ctrl';
+  const row = (keys, text) => `<dt>${keys.map(k => `<kbd>${k}</kbd>`).join('')}</dt><dd>${text}</dd>`;
+  return `<dl class="keys">${row([mod, 'K'], t('key_palette'))}${row(['/'], t('key_palette'))}${row(['?'], t('key_help'))}
+    ${row(['↑', '↓', '↵'], t('key_menu'))}${row(['Esc'], t('key_close'))}${row([t('key_rightClick')], t('key_context'))}</dl>`;
+};
+
+// ---------- metric history and the timeline of a device
+
+const METRICS = { id: '', range: 24, at: 0, data: null, busy: false };
+function loadMetrics(d) {
+  if (METRICS.busy || (METRICS.id === d.id && METRICS.data && Date.now() - METRICS.at < 60000)) return;
+  METRICS.busy = true;
+  api(`/api/devices/${encodeURIComponent(d.id)}/metrics?hours=${METRICS.range}`)
+    .then(m => { Object.assign(METRICS, { id: d.id, at: Date.now(), data: m }); render(); })
+    .catch(() => {}).finally(() => { METRICS.busy = false; });
+}
+
+// A line of one metric over the chosen range; gaps where the node did not report stay empty.
+function sparkline(m, idx, lo, hi, unit) {
+  const span = m.to - m.from;
+  let path = '', prev = null, peak = null;
+  for (const p of m.points) {
+    const v = p[idx];
+    if (v == null) { prev = null; continue; }
+    peak = peak == null ? v : Math.max(peak, v);
+    const x = (p[0] - m.from) / span * 100, y = 23 - (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo) * 21;
+    path += `${prev !== null && p[0] - prev <= m.bucket * 1.5 ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`;
+    prev = p[0];
+  }
+  if (!path) return '';
+  return `<svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path d="${path}" vector-effect="non-scaling-stroke"/></svg>
+    <small class="spark-meta">${t('peak')} ${Math.round(peak * 10) / 10} ${unit} · ${t('range' + METRICS.range)}</small>`;
+}
+
+// When the node reported: one cell per 15 minutes (24 h) or per hour (7 days).
+function uptimeCard(m) {
+  const cells = METRICS.range <= 24 ? 96 : 168, cell = (m.to - m.from) / cells, now = Date.now() / 1000;
+  const have = new Set(m.points.map(p => p[0]));
+  const stats = Array.from({ length: cells }, () => ({ exp: 0, got: 0 }));
+  let exp = 0, got = 0;
+  for (let b = m.from; b < now; b += m.bucket) {
+    if (m.first_sample == null || b < m.first_sample) continue;
+    const i = Math.min(cells - 1, Math.floor((b - m.from) / cell));
+    const ok = have.has(b) || b > now - m.bucket;
+    stats[i].exp++; exp++;
+    if (ok) { stats[i].got++; got++; }
+  }
+  const label = i => clock(m.from + i * cell);
+  const bar = stats.map((x, i) => `<i class="${!x.exp ? 'none' : x.got >= x.exp ? 'up' : x.got ? 'part' : 'down'}" title="${esc(label(i))}"></i>`).join('');
+  const range = r => `<button class="${METRICS.range === r ? 'active' : ''}" data-do="metricsRange" data-range="${r}">${t('range' + r)}</button>`;
+  return `<section class="card uptime"><div class="card-head"><h2>${t('availability')}</h2><div class="seg-mini">${range(24)}${range(168)}</div></div>
+    <div class="uptime-num"><b>${exp ? (Math.floor(got / exp * 1000) / 10).toLocaleString(S.lang) : '—'} %</b><span class="muted">${t('availabilityHint')}</span></div>
+    <div class="uptime-bar">${bar}</div><div class="uptime-axis"><span>${label(0)}</span><span>${t('now')}</span></div></section>`;
+}
+
+const HISTORY = { id: '', at: 0, rows: null, filter: 'all' };
+function loadHistory(d) {
+  if (HISTORY.id === d.id && Date.now() - HISTORY.at < 30000) return;
+  HISTORY.at = Date.now();
+  api(`/api/events?device_id=${encodeURIComponent(d.id)}&hours=720&limit=400`)
+    .then(rows => { HISTORY.id = d.id; HISTORY.rows = rows; render(); }).catch(() => {});
+}
+
+// One timeline: problems that started and ended (with how long they lasted) and the commands sent to the node.
+function deviceHistory(d) {
+  loadHistory(d);
+  const events = HISTORY.id === d.id ? HISTORY.rows || [] : [];
+  const open = {}, lasted = {};
+  for (const e of [...events].reverse()) {
+    if (e.kind === 'start') open[e.code] = e.ts;
+    else if (open[e.code] != null) { lasted[e.id] = e.ts - open[e.code]; delete open[e.code]; }
+  }
+  for (const c of d.commands) RESULTS[c.id] = c;
+  const f = HISTORY.filter;
+  const items = [
+    ...(f === 'commands' ? [] : events.map(e => ({ ts: e.ts, html: `<div class="tl-item ${e.kind === 'end' ? 'ok' : e.level}"><span class="tl-dot"></span>
+      <div class="tl-body"><b>${esc(eventText(e))}</b>${lasted[e.id] ? ` <small class="muted">${t('lasted', { d: dur(lasted[e.id]) })}</small>` : ''}</div><time>${clock(e.ts)}</time></div>` }))),
+    ...(f === 'problems' ? [] : d.commands.map(c => ({ ts: c.created, html: `<div class="tl-item cmd"><span class="tl-dot"></span>
+      <div class="tl-body"><b>${esc(t('act_' + c.action))}</b> <small class="muted">${esc([payloadSummary(c.payload_json), c.username].filter(Boolean).join(' · '))}</small>
+        <span class="badge st-${c.state}">${t('state_' + c.state)}</span>
+        ${c.result ? `<button type="button" class="result result-btn" data-do="showResult" data-cid="${c.id}">${esc(c.result.slice(0, 90))}</button>` : ''}
+        ${c.state === 'queued' && can('control') ? `<button class="btn sm ghost" data-do="cancelCmd" data-cid="${c.id}">${t('cancel')}</button>` : ''}</div><time>${clock(c.created)}</time></div>` }))),
+  ].sort((a, b) => b.ts - a.ts);
+  const day = ts => { const x = new Date(ts * 1000), today = new Date(); const y = new Date(); y.setDate(today.getDate() - 1);
+    return x.toDateString() === today.toDateString() ? t('today') : x.toDateString() === y.toDateString() ? t('yesterday') : x.toLocaleDateString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB', { weekday: 'long', day: 'numeric', month: 'long' }); };
+  let last = '', body = '';
+  for (const it of items) { const dl = day(it.ts); if (dl !== last) { body += `<div class="tl-day">${esc(dl)}</div>`; last = dl; } body += it.html; }
+  const tab = (k) => `<button class="${f === k ? 'active' : ''}" data-do="historyFilter" data-f="${k}">${t('tl_' + k)}</button>`;
+  return `<section class="card"><div class="card-head"><h2>${t('timeline')}</h2><div class="seg-mini">${tab('all')}${tab('problems')}${tab('commands')}</div></div>
+    ${body ? `<div class="timeline">${body}</div>` : emptyState('check', t('noHistory'), t('noHistoryHint'), '')}</section>`;
+}
 
 function deviceSettings(d) {
   return `<section class="card narrow"><form id="devForm" class="form" data-id="${esc(d.id)}">
@@ -1016,7 +1402,9 @@ const choice = (list, sel, prefix) => list.map(x => `<option value="${x}" ${x ==
 
 function renderNotifications(d) {
   const support = notifySupport(d), n = d.notifications;
-  if (support !== 'ok' || !n) return `<section class="card"><div class="note">${t(support === 'node' ? 'notifyNeedCaracal' : 'notifyNeedAgent')}</div></section>`;
+  if (support !== 'ok' || !n) return `<section class="card">${emptyState('attention', t('notifyUnsupported'), t(support === 'node' ? 'notifyNeedCaracal' : 'notifyNeedAgent'),
+    can('manage') && d.online ? (support === 'node' ? `<button class="btn primary" data-do="caracalUpdate" data-id="${esc(d.id)}">${icon('updates')}${t('act_update_caracal')}</button>`
+      : `<button class="btn primary" data-do="cmd" data-id="${esc(d.id)}" data-act="update_agent">${icon('agent')}${t('act_update_agent')}</button>`) : '')}</section>`;
   const s = { ...NOTIFY_DEFAULTS, ...n.settings }, edit = can('content'), ctl = can('control'), caps = d.capabilities || {};
   const cur = n.current;
   return `<div class="grid two">
@@ -1029,7 +1417,7 @@ function renderNotifications(d) {
         ${caps.notify_skip ? `<button class="btn" data-do="notifySkip" data-id="${esc(d.id)}" ${cur && d.online ? '' : 'disabled'}>${icon('next')}${t('notifySkip')}</button>` : ''}
         <button class="btn" data-do="notifyClear" data-id="${esc(d.id)}" ${n.waiting || cur ? '' : 'disabled'}>${icon('trash')}${t('notifyClear')}</button>` : ''}
         ${caps.notify_log ? `<button class="btn" data-do="notifyLog" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('audit')}${t('notifyLog')}</button>` : ''}</div></section>
-    <section class="card"><div class="card-head"><h2>${t('notifySettings')}</h2>${edit ? `<button class="btn sm" data-do="notifySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</div>
+    <section class="card"><div class="card-head"><h2>${t('notifySettings')}</h2>${edit ? `<span class="row-actions">${lookSupport(d) ? `<button class="btn sm" data-do="notifyStyle" data-id="${esc(d.id)}">${icon('image')}${t('notifyLook')}</button>` : ''}<button class="btn sm" data-do="notifySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button></span>` : ''}</div>
       <dl class="kv"><dt>${t('notifyPosition')}</dt><dd>${t('notifyPos_' + s.position.replace(/-/g, '_'))}</dd>
         <dt>${t('notifyDuration')}</dt><dd>${s.duration} s</dd><dt>${t('notifySize')}</dt><dd>${s.scale} %</dd>
         <dt>${t('notifyMaxQueue')}</dt><dd>${s.max_queue}</dd>
@@ -1161,6 +1549,24 @@ function notifySoundDialog(ids, sounds = {}) {
       return ids.length === 1 ? sendCommand(ids[0], 'notify_sound', payload) : sendBulk(ids, 'notify_sound', payload);
     },
   });
+}
+
+// The look of the notifications on the TV, edited visually (static/notify-style.js, the same editor as on the node).
+const lookSupport = d => !!(d && (d.notify_style || d.notifications?.settings?.style));
+function styleDialog(ids, settings) {
+  let editor = null;
+  const dlg = modal({
+    title: t('notifyLook'), wide: true, submit: t('save'),
+    body: `${ids.length > 1 ? `<p class="muted">${t('notifyLookToSelected', { n: ids.length })}</p>` : ''}<p class="muted">${t('notifyLookHint')}</p><div id="lookEditor"></div>`,
+    onOpen: form => {
+      editor = NotifyStyle.editor($('#lookEditor', form), settings.style, { t: (cs, en) => (S.lang === 'cs' ? cs : en), position: settings.position, scale: settings.scale });
+    },
+    onSubmit: () => {
+      const payload = { style: editor.get() };
+      return ids.length === 1 ? sendCommand(ids[0], 'notify_settings', payload) : sendBulk(ids, 'notify_settings', payload);
+    },
+  });
+  dlg.classList.add('xwide');
 }
 
 function notifySettingsDialog(ids, current) {
@@ -1369,7 +1775,7 @@ VIEWS.playlists = {
     if (!ed.dataset.ready) { ed.innerHTML = '<div id="pHead"></div><div id="pPl"></div><div id="pCol"></div><div id="pLog"></div>'; ed.dataset.ready = 1; }
     patch($('#pHead', ed), `<section class="card dev-hero slim"><div class="hero-main"><div class="hero-title">${statusBadge(d)}<h2><a href="#/device/${encodeURIComponent(d.id)}">${esc(d.name)}</a></h2></div>
       <div class="chips"><span>${t('nowPlaying')}: ${esc(d.current_name || '—')}${d.frozen ? ' (' + t('frozen') + ')' : ''}</span></div></div><div class="hero-actions">${can('control') ? `
-      <button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze" ${d.online ? '' : 'disabled'}>${icon('play')}${t('act_unfreeze')}</button>
+      ${d.frozen ? `<button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze" ${d.online ? '' : 'disabled'}>${icon('play')}${t('act_unfreeze')}</button>` : ''}
       <button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="next" ${d.online ? '' : 'disabled'}>${icon('next')}${t('act_next')}</button>` : ''}</div></section>`);
     renderPlaylist($('#pPl', ed), d);
     patch($('#pCol', ed), renderCollections(d));
@@ -1394,7 +1800,8 @@ VIEWS.organization = {
           <a href="#/devices?${field}=${encodeURIComponent(o.name)}"><b>${esc(o.name)}</b><small class="muted">${esc([o.address, o.description].filter(Boolean).join(' · '))}</small></a>
           <span class="muted nowrap">${o.online}/${o.total} ${t('online').toLowerCase()}</span>
           ${can('manage') ? `<span class="row-actions"><button class="icon-btn" data-do="orgEdit" data-kind="${kind}" data-name="${esc(o.name)}" title="${t('edit')}">${icon('edit')}</button>
-          <button class="icon-btn danger" data-do="orgDelete" data-kind="${kind}" data-name="${esc(o.name)}" title="${t('delete')}">${icon('trash')}</button></span>` : ''}</div>`).join('') || `<div class="empty">${t('noEntries')}</div>`}
+          <button class="icon-btn danger" data-do="orgDelete" data-kind="${kind}" data-name="${esc(o.name)}" title="${t('delete')}">${icon('trash')}</button></span>` : ''}</div>`).join('')
+          || emptyState(kind === 'groups' ? 'group' : 'location', t(kind === 'groups' ? 'noGroups' : 'noLocations'), t(kind === 'groups' ? 'groupsHint' : 'locationsHint'), '')}
         <div class="org-row muted"><span>${t('unassigned')}</span><span>${unassigned}</span></div></div>`);
     }
   },
@@ -1474,48 +1881,75 @@ VIEWS.users = {
 
 // ---------- settings
 
+// Settings are split into sections with their own navigation (#/settings/<section>).
+const SETTINGS = [
+  ['account', 'view', 'users'], ['alerts', 'admin', 'bell'], ['install', 'admin', 'plus'], ['notifyapi', 'manage', 'web'],
+  ['proxy', 'manage', 'download'], ['branding', 'admin', 'image'], ['backup', 'admin', 'upload'],
+];
+
 VIEWS.settings = {
-  async mount(root) {
+  mount(root) {
     setTitle(t('nav_settings'));
-    root.innerHTML = `<div class="grid two"><section class="card"><h2>${t('myAccount')}</h2>
+    const list = SETTINGS.filter(([, p]) => can(p));
+    const cur = (list.find(x => x[0] === S.route.id) || list[0])[0];
+    root.innerHTML = `<div class="settings"><nav class="settings-nav">${list.map(([k, , ic]) => `<a href="#/settings/${k}" class="${k === cur ? 'active' : ''}">${icon(ic)}<span>${t('set_' + k)}</span></a>`).join('')}</nav>
+      <div class="settings-body" id="setBody"></div></div>`;
+    SETTINGS_VIEW[cur]($('#setBody', root));
+  },
+};
+
+const SETTINGS_VIEW = {
+  account(root) {
+    root.innerHTML = `<section class="card"><h2>${t('myAccount')}</h2>
       <dl class="kv"><dt>${t('username')}</dt><dd>${esc(S.me.username)}</dd><dt>${t('role')}</dt><dd>${t('role_' + S.me.role)}</dd></dl>
       <form id="pwForm" class="form"><h3>${t('changePassword')}</h3>
         <label>${t('currentPassword')}<input type="password" name="current_password" autocomplete="current-password" required></label>
         <label>${t('newPassword')}<input type="password" name="new_password" minlength="10" autocomplete="new-password" required></label>
         <div class="form-actions"><button class="btn primary">${t('changePassword')}</button></div></form></section>
-      <section class="card" id="sysCard"></section></div>`;
-    if (can('manage')) {
-      root.insertAdjacentHTML('beforeend', '<section class="card" id="ntfTokens"></section><section class="card" id="proxyCard"></section>');
-      notifyTokensCard($('#ntfTokens', root));
-      proxyCard($('#proxyCard', root));
-    }
-    if (!can('admin')) { $('#sysCard', root).innerHTML = `<h2>${t('system')}</h2><dl class="kv"><dt>${t('hubVersion')}</dt><dd>${esc(S.me.hub_version)}</dd><dt>${t('agentVersion')}</dt><dd>${esc(S.me.agent_version)}</dd></dl>`; return; }
+      <section class="card"><h2>${t('system')}</h2><dl class="kv"><dt>${t('hubVersion')}</dt><dd>${esc(S.me.hub_version)}</dd><dt>${t('agentVersion')}</dt><dd>${esc(S.me.agent_version)}</dd></dl></section>
+      <section class="card"><h2>${t('shortcuts')}</h2>${shortcutsHtml()}</section>`;
+  },
+  async install(root) {
+    root.innerHTML = `<section class="card"><div class="empty">…</div></section>`;
     const s = await api('/api/settings').catch(() => null);
-    if (!s) return;
+    if (!s || !root.isConnected) return;
     const cmd = `curl -fsSL ${location.origin}/api/bootstrap/install-agent.sh | sudo bash -s -- --hub ${location.origin} --token ${s.enroll_token} --name "NODE"`;
-    $('#sysCard', root).innerHTML = `<h2>${t('system')}</h2><dl class="kv"><dt>${t('hubVersion')}</dt><dd>${esc(s.hub_version)}</dd><dt>${t('agentVersion')}</dt><dd>${esc(s.agent_version)}</dd>
-      <dt>${t('enrollToken')}</dt><dd><code class="secret" id="tokVal">••••••••••••</code> <button class="btn sm ghost" id="tokShow">${t('show')}</button> <button class="btn sm ghost" id="tokRotate">${icon('refresh')}${t('rotateToken')}</button></dd></dl>
-      <h3>${t('sdCardTitle')}</h3><p class="muted">${t('sdCardHint')}</p><button class="btn sm" data-do="sdCard">${icon('download')}${t('sdCardTitle')}</button>
-      <h3>${t('manualInstall')}</h3><p class="muted">${t('manualInstallHint')}</p><pre class="code" id="instCmd">${esc(cmd)}</pre><button class="btn sm" id="instCopy">${icon('copy')}${t('copy')}</button>`;
+    root.innerHTML = `<section class="card"><h2>${t('sdCardTitle')}</h2><p class="muted">${t('sdCardHint')}</p>
+        <div class="form-actions start"><button class="btn primary" data-do="sdCard">${icon('download')}${t('sdCardTitle')}</button><button class="btn" data-do="discover">${icon('search')}${t('discoverTitle')}</button></div></section>
+      <section class="card"><h2>${t('manualInstall')}</h2><p class="muted">${t('manualInstallHint')}</p><pre class="code" id="instCmd">${esc(cmd)}</pre>
+        <div class="form-actions start"><button class="btn sm" id="instCopy">${icon('copy')}${t('copy')}</button></div></section>
+      <section class="card"><h2>${t('enrollToken')}</h2><p class="muted">${t('enrollTokenHint')}</p>
+        <div class="token-row"><code class="secret" id="tokVal">••••••••••••</code><button class="btn sm ghost" id="tokShow">${t('show')}</button><button class="btn sm ghost" id="tokRotate">${icon('refresh')}${t('rotateToken')}</button></div></section>`;
     $('#tokShow', root).onclick = () => { $('#tokVal', root).textContent = s.enroll_token; };
     $('#tokRotate', root).onclick = async () => {
       if (!await confirmBox(t('confirmRotateToken'))) return;
-      try { await api('/api/settings/enroll-token', { method: 'POST' }); toast(t('tokenRotated')); VIEWS.settings.mount(root); } catch (err) { toast(errText(err), 'err'); }
+      try { await api('/api/settings/enroll-token', { method: 'POST' }); toast(t('tokenRotated')); SETTINGS_VIEW.install(root); } catch (err) { toast(errText(err), 'err'); }
     };
     $('#instCopy', root).onclick = () => navigator.clipboard.writeText(cmd).then(() => toast(t('copied')));
-    root.insertAdjacentHTML('beforeend', `<div class="grid two">
-      <section class="card"><h2>${t('branding')}</h2><p class="muted">${t('brandingHint')}</p>
+  },
+  notifyapi(root) { root.innerHTML = '<section class="card" id="ntfTokens"></section>'; notifyTokensCard($('#ntfTokens', root)); },
+  proxy(root) { root.innerHTML = '<section class="card" id="proxyCard"></section>'; proxyCard($('#proxyCard', root)); },
+  branding(root) {
+    root.innerHTML = `<section class="card"><h2>${t('branding')}</h2><p class="muted">${t('brandingHint')}</p>
         <div class="logo-preview"><span class="mark" data-logo>C</span></div>
         <div class="form"><label>${t('logoFile')}<input type="file" id="logoFile" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
-        <div class="form-actions"><button class="btn ghost" id="logoRemove">${icon('trash')}${t('logoRemove')}</button><button class="btn primary" id="logoUpload">${icon('upload')}${t('logoUpload')}</button></div></div></section>
-      <section class="card"><h2>${t('backupTitle')}</h2><p class="muted">${t('backupHint')}</p>
-        <div class="form-actions start"><button class="btn primary" id="backupDownload">${icon('download')}${t('backupDownload')}</button></div>
-        <h3>${t('restoreTitle')}</h3><p class="muted">${t('restoreHint')}</p>
+        <div class="form-actions"><button class="btn ghost" id="logoRemove">${icon('trash')}${t('logoRemove')}</button><button class="btn primary" id="logoUpload">${icon('upload')}${t('logoUpload')}</button></div></div></section>`;
+    this.handlers(root);
+  },
+  backup(root) {
+    root.innerHTML = `<section class="card"><h2>${t('backupTitle')}</h2><p class="muted">${t('backupHint')}</p>
+        <div class="form-actions start"><button class="btn primary" id="backupDownload">${icon('download')}${t('backupDownload')}</button></div></section>
+      <section class="card"><h2>${t('restoreTitle')}</h2><p class="muted">${t('restoreHint')}</p>
         <div class="form"><label>${t('backupFile')}<input type="file" id="restoreFile" accept=".zip,application/zip"></label>
-        <div class="form-actions"><button class="btn danger" id="restoreRun">${icon('upload')}${t('restoreRun')}</button></div></div>
-        <h3>${t('migrateTitle')}</h3><ol class="steps">${t('migrateSteps')}</ol></section></div>`);
+        <div class="form-actions"><button class="btn danger" id="restoreRun">${icon('upload')}${t('restoreRun')}</button></div></div></section>
+      <section class="card"><h2>${t('migrateTitle')}</h2><ol class="steps">${t('migrateSteps')}</ol></section>`;
+    this.handlers(root);
+  },
+  // logo and backup buttons (each wires only what its section shows)
+  handlers(root) {
+    const on = (sel, fn) => { const el = $(sel, root); if (el) el.onclick = fn; };
     applyLogo();
-    $('#logoUpload', root).onclick = async () => {
+    on('#logoUpload', async () => {
       const f = $('#logoFile', root).files[0];
       if (!f) return toast(t('err_unsupported_file'), 'err');
       try {
@@ -1526,16 +1960,16 @@ VIEWS.settings = {
         applyLogo();
         toast(t('saved'));
       } catch (err) { toast(errText(err), 'err'); }
-    };
-    $('#logoRemove', root).onclick = async () => {
+    });
+    on('#logoRemove', async () => {
       try { PUBLIC = { ...PUBLIC, ...(await api('/api/branding/logo', { method: 'DELETE' })) }; applyLogo(); toast(t('deleted')); } catch (err) { toast(errText(err), 'err'); }
-    };
-    $('#backupDownload', root).onclick = async () => {
+    });
+    on('#backupDownload', async () => {
       try {
         await downloadResponse(await fetch('/api/backup', { headers: { Authorization: 'Bearer ' + S.token } }), 'caracal-fleet-backup.zip');
       } catch (err) { toast(errText(err), 'err'); }
-    };
-    $('#restoreRun', root).onclick = async () => {
+    });
+    on('#restoreRun', async () => {
       const f = $('#restoreFile', root).files[0];
       if (!f) return toast(t('err_invalid_backup'), 'err');
       if (!await confirmBox(t('confirmRestore'))) return;
@@ -1546,9 +1980,115 @@ VIEWS.settings = {
         toast(t('restoreDone'));
         waitForRestart();
       } catch (err) { toast(errText(err), 'err'); }
-    };
+    });
+  },
+  async alerts(root) {
+    root.innerHTML = `<section class="card"><div class="empty">…</div></section>`;
+    const conf = await api('/api/alerts').catch(err => { toast(errText(err), 'err'); return null; });
+    if (conf && root.isConnected) renderAlerts(root, conf);
   },
 };
+
+// ---------- alerts for administrators (Settings → Alerts)
+
+const CH_ICON = { email: 'bell', slack: 'web', teams: 'users', discord: 'web', ntfy: 'attention', webhook: 'upload' };
+const CH_TYPES = ['email', 'slack', 'teams', 'discord', 'ntfy', 'webhook'];
+
+function renderAlerts(root, conf) {
+  const st = conf;
+  const save = async patch => {
+    try { const next = await api('/api/alerts', { method: 'PUT', json: { ...st, ...patch } }); toast(t('saved')); renderAlerts(root, next); }
+    catch (err) { toast(errText(err), 'err'); }
+  };
+  const on = x => (x ? 'checked' : '');
+  const chRow = ch => `<div class="channel">${icon(CH_ICON[ch.type])}<div class="channel-main"><b>${esc(ch.name || t('ch_' + ch.type))}</b>
+      <small class="muted">${esc(t('ch_' + ch.type))} · ${esc(ch.to || hostOf(ch.url))}</small></div>
+      ${ch.enabled === false ? `<span class="tag">${t('chPaused')}</span>` : ''}
+      ${ch.last ? `<span class="tag ${ch.last.ok ? 'ok' : 'critical'}" title="${esc(ch.last.error || '')}">${t(ch.last.ok ? 'chOk' : 'chFailed')} · ${clock(ch.last.ts)}</span>` : ''}
+      <span class="row-actions"><button class="btn sm" data-ch-test="${esc(ch.id)}">${t('chTest')}</button>
+      <button class="icon-btn" data-ch-edit="${esc(ch.id)}" title="${t('edit')}">${icon('edit')}</button>
+      <button class="icon-btn danger" data-ch-del="${esc(ch.id)}" title="${t('delete')}">${icon('trash')}</button></span></div>`;
+  const sm = st.smtp;
+  root.innerHTML = `<section class="card"><h2>${t('alertsTitle')}</h2><p class="muted">${t('alertsHint')}</p>
+      <form class="form" id="alertForm">
+        <label class="check"><input type="checkbox" name="enabled" ${on(st.enabled)}>${t('alertsEnabled')}</label>
+        <div class="row2"><label>${t('alertsDelay')}<input type="number" name="delay" min="0" max="1440" value="${st.delay}"><small>${t('alertsDelayHint')}</small></label>
+          <label>${t('alertsLanguage')}<select name="language"><option value="cs" ${st.language === 'cs' ? 'selected' : ''}>Čeština</option><option value="en" ${st.language === 'en' ? 'selected' : ''}>English</option></select></label></div>
+        <label class="check"><input type="checkbox" name="critical" ${on(st.levels.includes('critical'))}>${t('alertsCritical')}</label>
+        <label class="check"><input type="checkbox" name="warning" ${on(st.levels.includes('warning'))}>${t('alertsWarning')}</label>
+        <label class="check"><input type="checkbox" name="recovery" ${on(st.recovery)}>${t('alertsRecovery')}</label>
+        <label>${t('alertsUrl')}<input name="public_url" value="${esc(st.public_url)}" placeholder="${esc(location.origin)}"><small>${t('alertsUrlHint')}</small></label>
+        <div class="form-actions"><button class="btn primary">${t('save')}</button></div></form></section>
+    <section class="card flush"><div class="toolbar"><h2 class="grow">${t('alertChannels')}</h2><button class="btn sm primary" id="chAdd">${icon('plus')}${t('chAdd')}</button></div>
+      ${st.channels.length ? `<div class="channel-list">${st.channels.map(chRow).join('')}</div>` : emptyState('bell', t('noChannels'), t('noChannelsHint'), '')}</section>
+    ${st.channels.some(c => c.type === 'email') ? `<section class="card"><h2>${t('smtpTitle')}</h2><p class="muted">${t('smtpHint')}</p>
+      <form class="form" id="smtpForm"><div class="row2"><label>${t('smtpHost')}<input name="host" value="${esc(sm.host)}" placeholder="smtp.firma.cz" required></label>
+        <label>${t('smtpPort')}<input name="port" type="number" min="1" max="65535" value="${sm.port}"></label></div>
+        <div class="row2"><label>${t('smtpSecurity')}<select name="security">${['starttls', 'ssl', 'none'].map(x => `<option value="${x}" ${sm.security === x ? 'selected' : ''}>${t('smtpSec_' + x)}</option>`).join('')}</select></label>
+        <label>${t('smtpSender')}<input name="sender" value="${esc(sm.sender)}" placeholder="fleet@firma.cz"></label></div>
+        <div class="row2"><label>${t('smtpUser')}<input name="username" value="${esc(sm.username)}" autocomplete="off"></label>
+        <label>${t('smtpPassword')}<input name="password" type="password" value="${esc(sm.password)}" autocomplete="new-password"></label></div>
+        <div class="form-actions"><button class="btn primary">${t('save')}</button></div></form></section>` : ''}`;
+  $('#alertForm', root).onsubmit = e => {
+    e.preventDefault();
+    const f = e.target;
+    save({ enabled: f.enabled.checked, delay: Number(f.delay.value), language: f.language.value, recovery: f.recovery.checked,
+      levels: ['critical', 'warning'].filter(x => f[x].checked), public_url: f.public_url.value.trim() });
+  };
+  const smtp = $('#smtpForm', root);
+  if (smtp) smtp.onsubmit = e => { e.preventDefault(); save({ smtp: Object.fromEntries(new FormData(smtp)) }); };
+  // the first channel switches alerts on; whoever adds a channel wants the messages
+  $('#chAdd', root).onclick = () => channelDialog(null, ch => save({ channels: [...st.channels, ch], ...(st.channels.length ? {} : { enabled: true }) }));
+  $$('[data-ch-edit]', root).forEach(b => { b.onclick = () => channelDialog(st.channels.find(c => c.id === b.dataset.chEdit), ch => save({ channels: st.channels.map(c => (c.id === ch.id ? ch : c)) })); });
+  $$('[data-ch-del]', root).forEach(b => {
+    b.onclick = async () => {
+      const ch = st.channels.find(c => c.id === b.dataset.chDel);
+      if (await confirmBox(t('confirmDeleteItem', { name: esc(ch.name || t('ch_' + ch.type)) }))) save({ channels: st.channels.filter(c => c !== ch) });
+    };
+  });
+  $$('[data-ch-test]', root).forEach(b => {
+    b.onclick = async () => {
+      b.disabled = true; b.classList.add('busy');
+      try {
+        const r = await api('/api/alerts/test', { method: 'POST', json: { channel: st.channels.find(c => c.id === b.dataset.chTest) } });
+        r.ok ? toast(t('chTestOk')) : toast(alertError(r.error), 'err');
+      } catch (err) { toast(errText(err), 'err'); } finally { b.disabled = false; b.classList.remove('busy'); }
+    };
+  });
+}
+
+const alertError = e => I18N[S.lang]['err_' + e] || I18N.en['err_' + e] || e;
+
+function channelDialog(ch, onSave) {
+  const cur = ch || { type: 'email', enabled: true };
+  const read = form => ({ id: ch ? ch.id : '', type: ch ? ch.type : form.querySelector('[name=type]:checked').value, name: form.name.value.trim(),
+    to: form.to.value.trim(), url: form.url.value.trim(), token: form.token.value.trim(), enabled: form.enabled.checked });
+  modal({
+    title: ch ? t('chEdit') : t('chAdd'),
+    body: `<div class="form">
+      ${ch ? '' : `<div class="ch-types">${CH_TYPES.map(x => `<label class="ch-type"><input type="radio" name="type" value="${x}" ${x === cur.type ? 'checked' : ''}>${icon(CH_ICON[x])}<span>${t('ch_' + x)}</span></label>`).join('')}</div>`}
+      <label>${t('name')}<input name="name" value="${esc(cur.name || '')}" placeholder="${esc(t('chNameHint'))}"></label>
+      <label data-ch="to">${t('chTo')}<input name="to" value="${esc(cur.to || '')}" placeholder="it@firma.cz, servis@firma.cz"><small>${t('chToHint')}</small></label>
+      <label data-ch="url">${t('chUrl')}<input name="url" value="${esc(cur.url || '')}" placeholder="https://"><small class="ch-hint"></small></label>
+      <label data-ch="token">${t('chToken')}<input name="token" value="${esc(cur.token || '')}" autocomplete="off"><small>${t('chTokenHint')}</small></label>
+      <label class="check"><input type="checkbox" name="enabled" ${cur.enabled !== false ? 'checked' : ''}>${t('chEnabled')}</label>
+      <div class="form-actions start"><button type="button" class="btn" id="chTry">${icon('bell')}${t('chTest')}</button></div><div class="try-result"></div></div>`,
+    onOpen: form => {
+      const sync = () => {
+        const type = ch ? ch.type : form.querySelector('[name=type]:checked').value;
+        $('[data-ch="to"]', form).hidden = type !== 'email';
+        $('[data-ch="url"]', form).hidden = type === 'email';
+        $('[data-ch="token"]', form).hidden = !['ntfy', 'webhook'].includes(type);
+        $('.ch-hint', form).textContent = type === 'email' ? '' : t('chHint_' + type);
+      };
+      $$('[name=type]', form).forEach(r => { r.onchange = sync; });
+      sync();
+      $('#chTry', form).onclick = e => tryCommand(form, e.currentTarget, () => api('/api/alerts/test', { method: 'POST', json: { channel: read(form) } }),
+        r => (r.ok ? `<div class="note info">${icon('check')}${t('chTestOk')}</div>` : `<div class="note warn">${esc(alertError(r.error))}</div>`));
+    },
+    onSubmit: (data, form) => onSave(read(form)),
+  });
+}
 
 // After a restore the hub restarts; its session secret comes from the backup, so sign in again.
 function waitForRestart() {
@@ -1839,12 +2379,12 @@ VIEWS.global = {
   mount(root) {
     setTitle(t('nav_global'));
     if (S.route.id) {
-      root.innerHTML = `<a class="back" href="#/global">${icon('back')}${t('nav_global')}</a><div id="gHead"></div><div id="gItems"></div><div id="gDeps"></div>`;
+      root.innerHTML = `<div id="gHead"></div><div id="gItems"></div><div id="gDeps"></div>`;
       return;
     }
     root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('nav_global')}</h2>
       ${can('content') ? `<button class="btn" data-do="globalFromDevice">${icon('copy')}${t('globalFromDevice')}</button><button class="btn primary" data-do="globalNew">${icon('plus')}${t('globalNew')}</button>` : ''}</div>
-      <div id="gList"></div></section><p class="muted">${t('globalHint')}</p>`;
+      <div id="gList"></div></section>`;
   },
   async update(root) {
     if (!S.route.id) {
@@ -1853,14 +2393,14 @@ VIEWS.global = {
       patch($('#gList', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('playlistItems')}</th><th>${t('lastDeployment')}</th><th>${t('updated')}</th></tr></thead>
         <tbody>${rows.map(p => `<tr data-href="#/global/${p.id}"><td><b>${esc(p.name)}</b><br><small class="muted">${esc(p.description)}</small></td><td>${p.items}</td>
         <td>${p.last_deployment ? `${dt(p.last_deployment.created)}<br><small class="muted">${t('nDevices', { n: p.last_deployment.targets })} · ${t('mode_' + p.last_deployment.mode)}</small>` : '<span class="muted">—</span>'}</td>
-        <td class="nowrap">${dt(p.updated)}<br><small class="muted">${esc(p.updated_by)}</small></td></tr>`).join('') || `<tr><td colspan="4" class="empty">${t('noGlobalPlaylists')}</td></tr>`}</tbody></table></div>`);
+        <td class="nowrap">${dt(p.updated)}<br><small class="muted">${esc(p.updated_by)}</small></td></tr>`).join('') || `<tr><td colspan="4">${emptyState('global', t('noGlobalPlaylists'), t('globalHint'), can('content') ? `<button class="btn primary" data-do="globalNew">${icon('plus')}${t('globalNew')}</button>` : '')}</td></tr>`}</tbody></table></div>`);
       return;
     }
     const p = await api('/api/global-playlists/' + encodeURIComponent(S.route.id)).catch(() => null);
     if (!$('#gHead', root)) return;
     if (!p) { patch($('#gHead', root), `<div class="card empty">${t('err_not_found')}</div>`); return; }
     S.global = p;
-    setTitle(p.name, t('nav_global').toUpperCase());
+    setTitle(p.name, t('nav_global'), '#/global');
     const edit = can('content');
     patch($('#gHead', root), `<section class="card dev-hero"><div class="hero-main"><div class="hero-title">${icon('global')}<h2>${esc(p.name)}</h2></div>
       <div class="chips"><span>${t('nItems', { n: p.items.length })}</span><span>${t('updated')} ${dt(p.updated)} · ${esc(p.updated_by)}</span></div>
@@ -1982,8 +2522,23 @@ async function proxyCard(el) {
 
 // ------------------------------------------------------------------ modals
 
+// The sheet fades out before it closes; a new sheet opened meanwhile cancels that and replaces it.
+const MODAL = { close: null, timer: null };
+function animateModalClose(dlg) {
+  if (MODAL.close) return;
+  MODAL.close = dlg.close.bind(dlg);
+  dlg.close = value => {
+    if (!dlg.open || dlg.classList.contains('closing')) return;
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return MODAL.close(value);
+    dlg.classList.add('closing');
+    MODAL.timer = setTimeout(() => { dlg.classList.remove('closing'); MODAL.close(value); }, 150);
+  };
+}
+
 function modal({ title, body, submit = t('save'), danger = false, wide = false, onSubmit, onOpen }) {
   const dlg = $('#modal');
+  animateModalClose(dlg);
+  if (dlg.classList.contains('closing')) { clearTimeout(MODAL.timer); MODAL.close(); }
   dlg.className = wide ? 'wide' : '';
   dlg.innerHTML = `<form method="dialog" class="modal-form" novalidate><header><h2>${title}</h2><button type="button" class="icon-btn ghost" data-close>${icon('x')}</button></header>
     <div class="modal-body">${body}</div><div class="form-error" id="mErr"></div>
@@ -2380,26 +2935,27 @@ const ACTIONS_UI = {
     await sendCommand(id, act, payload);
   },
   async bulk(b) {
-    const ids = [...S.selected], act = b.dataset.act;
+    const ids = targetIds(b), act = b.dataset.act;
     if (['reboot', 'restart_player', 'update_agent'].includes(act) && !await confirmBox(t('confirmBulk', { action: t('act_' + act), n: ids.length }), act === 'reboot')) return;
     await sendBulk(ids, act);
   },
-  bulkAddContent() {
+  bulkAddContent(b) {
+    const one = b.dataset.id, ids = targetIds(b);
     modal({
       title: t('addContent'), submit: t('continue'),
-      body: `<div class="radios">${bulkKinds().map((k, i) => `<label class="check"><input type="radio" name="kind" value="${k}" ${i ? '' : 'checked'}>${t('add_' + k)}</label>`).join('')}</div>`,
+      body: `<div class="radios">${bulkKinds(ids).map((k, i) => `<label class="check"><input type="radio" name="kind" value="${k}" ${i ? '' : 'checked'}>${t('add_' + k)}</label>`).join('')}</div>`,
       onSubmit: data => {
-        const ids = [...S.selected];
         setTimeout(() => {
-          if (data.kind === 'collection') bulkCollection(ids);
+          if (one) data.kind === 'collection' ? collectionDialog(one) : data.kind === 'profile' ? profileDialog(one) : assetDialog(one, data.kind);
+          else if (data.kind === 'collection') bulkCollection(ids);
           else if (data.kind === 'profile') profileDialog(ids[0], null, ids);
           else assetDialog(ids[0], data.kind, null, ids);
         }, 50);
       },
     });
   },
-  bulkCopy() { copyDialog('', { targets: [...S.selected] }); },
-  bulkAssign() { assignDialog([...S.selected]); },
+  bulkCopy(b) { copyDialog('', { targets: targetIds(b) }); },
+  bulkAssign(b) { assignDialog(targetIds(b)); },
   caracalUpdate(b) {
     if (b.dataset.release) return zipUpdateDialog({ release: Number(b.dataset.release) });
     const opts = {};
@@ -2429,8 +2985,8 @@ const ACTIONS_UI = {
     toast(t('proxyCleared', { size: fmtSize(r.freed) }));
     render(true);
   },
-  bulkSetHub() {
-    const ids = [...S.selected];
+  bulkSetHub(b) {
+    const ids = targetIds(b);
     modal({
       title: t('act_set_hub'), submit: t('confirm'), danger: true,
       body: `<div class="form"><p class="muted">${t('setHubHint')}</p><label>${t('hubUrl')}<input name="hub" type="url" placeholder="https://" required></label></div>`,
@@ -2497,8 +3053,29 @@ const ACTIONS_UI = {
     if (!await confirmBox(t('confirmNotifyClear'))) return;
     await sendCommand(b.dataset.id, 'notify_clear');
   },
-  notifySettings(b) { notifySettingsDialog([b.dataset.id], S.detail?.notifications?.settings); },
-  notifySound(b) { notifySoundDialog([b.dataset.id], S.detail?.notifications?.sounds || {}); },
+  async notifySettings(b) { const d = await detailOf(b.dataset.id); notifySettingsDialog([b.dataset.id], d?.notifications?.settings); },
+  async notifySound(b) { const d = await detailOf(b.dataset.id); notifySoundDialog([b.dataset.id], d?.notifications?.sounds || {}); },
+  toggleTheme() { $('#themeToggle').click(); },
+  showShortcuts() { modal({ title: t('shortcuts'), body: shortcutsHtml() }); },
+  async notifyStyle(b) {
+    const ids = targetIds(b);
+    const one = ids.length === 1 ? await detailOf(ids[0]) : null;
+    styleDialog(ids, one?.notifications?.settings || {});
+  },
+  async muteAlerts(b) {
+    const ids = targetIds(b), one = b.dataset.id && dev(b.dataset.id);
+    const send = async minutes => { await api('/api/alerts/mute', { method: 'POST', json: { devices: ids, minutes } }); toast(t(minutes ? 'muted' : 'unmuted')); tick(); };
+    if (one && one.muted_until) return send(0);
+    modal({
+      title: t('muteAlerts'), submit: t('mute'),
+      body: `<p class="muted">${t('muteHint')}</p><div class="radios">${[60, 240, 480, 1440, 10080].map((m, i) => `<label class="check"><input type="radio" name="minutes" value="${m}" ${i === 1 ? 'checked' : ''}>${t('mute_' + m)}</label>`).join('')}</div>`,
+      onSubmit: data => send(Number(data.minutes)),
+    });
+  },
+  metricsRange(b) { METRICS.range = Number(b.dataset.range); METRICS.at = 0; render(); },
+  historyFilter(b) { HISTORY.filter = b.dataset.f; render(); },
+  switchLang() { setLang(S.lang === 'cs' ? 'en' : 'cs'); },
+  signOut() { logout(); },
   bulkNotifySound() { notifySoundDialog([...S.selected]); },
   addWatcher(b) { watcherDialog(b.dataset.id); },
   editWatcher(b) {
@@ -2632,16 +3209,24 @@ const ACTIONS_UI = {
 };
 
 // Offer only content types every selected node can receive.
-function bulkKinds() {
-  const sel = [...S.selected].map(dev).filter(Boolean);
+function bulkKinds(ids = [...S.selected]) {
+  const sel = ids.map(dev).filter(Boolean);
   const all = cap => sel.every(d => (d.capabilities || {})[cap] !== false);
   const logins = sel.length && sel.every(d => loginSupport(d) === 'ok');
   return ['web', ...(all('upload') ? ['image', 'video'] : []), ...(all('add_grafana_tag') ? ['collection'] : []), ...(logins ? ['profile'] : [])];
 }
 
 function bulkCollection(ids) { collectionDialog(ids[0], null, ids); }
+const targetIds = b => (b.dataset.id ? [b.dataset.id] : [...S.selected]);
+const detailOf = id => (S.detail && S.detail.id === id ? S.detail : api('/api/devices/' + encodeURIComponent(id)));
 
 document.addEventListener('click', async e => {
+  const mb = e.target.closest('[data-menu]');
+  if (mb) { e.preventDefault(); e.stopPropagation(); toggleMenu(mb); return; }
+  const more = e.target.closest('[data-more]');
+  if (more) { e.preventDefault(); e.stopPropagation(); const r = more.getBoundingClientRect(); openContextMenu(more.dataset.more, r.right - 240, r.bottom + 4); return; }
+  closeMenus();
+  if (e.target.closest('#palette .pi')) closePalette();
   const b = e.target.closest('[data-do]');
   if (b) {
     e.preventDefault();
@@ -2698,10 +3283,11 @@ $('#themeToggle').onclick = () => {
 $('#refreshBtn').onclick = () => tick();
 $('#addDeviceBtn').onclick = () => provisionDialog();
 $('#menuBtn').onclick = () => $('#sidebar').classList.toggle('open');
+$('#paletteBtn').onclick = e => { e.stopPropagation(); openPalette(); };
 $('#userBtn').onclick = e => {
   e.stopPropagation();
   const d = $('#userDrop');
-  d.innerHTML = `<div class="dd-head"><b>${esc(S.me.username)}</b><small>${t('role_' + S.me.role)}</small></div><a href="#/settings">${t('nav_settings')}</a><button id="logoutBtn">${t('signOut')}</button>`;
+  d.innerHTML = `<div class="dd-head"><b>${esc(S.me.username)}</b><small>${t('role_' + S.me.role)}</small></div><a href="#/settings">${t('nav_settings')}</a><button data-do="showShortcuts">${t('shortcuts')}</button><button id="logoutBtn">${t('signOut')}</button>`;
   d.hidden = !d.hidden;
   $('#logoutBtn').onclick = logout;
 };

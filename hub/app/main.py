@@ -5,6 +5,7 @@ import json
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager
 from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request
@@ -12,15 +13,21 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import console, images, notify, playlists, provisioning, proxy, releases, sdcard, system
+from . import console, images, monitor, notify, playlists, provisioning, proxy, releases, sdcard, system
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
                    sweep_commands, token_hash, validate_admin)
 from .devices import COLLECTION_KIND, MEDIA_KINDS, build, collections_of, grafana_config
 
+@asynccontextmanager
+async def lifespan(_app):
+    monitor.start()          # the background check of the fleet (events and alerts)
+    yield
+
+
 app = FastAPI(title='CARACAL Fleet Controller', version=HUB_VERSION, docs_url=None, redoc_url=None,
-              openapi_url=None)
+              openapi_url=None, lifespan=lifespan)
 init()
 STATIC = APP_DIR / 'static'
 app.include_router(system.router)
@@ -31,6 +38,8 @@ app.include_router(sdcard.router)       # before /api/bootstrap/{name} (node-con
 app.include_router(console.router)      # SSH web console (WebSocket)
 app.include_router(notify.router)       # notification API for other apps and its tokens
 app.include_router(proxy.router)        # Fleet as the download source of nodes without internet access
+app.include_router(monitor.router)      # metric history, events and alerts for administrators
+
 
 SECURITY_HEADERS = {
     # no inline scripts, no third-party resources; inline styles are used for progress bars
@@ -185,10 +194,12 @@ def list_devices(r: Request):
         pending = {x['device_id']: x['n'] for x in c.execute(
             "SELECT device_id, COUNT(*) n FROM commands WHERE state IN ('queued','delivered') GROUP BY device_id")}
     latest = latest_versions()
+    mutes = monitor.config()['mutes']
     devices = []
     for row in rows:
         d = build(row, failed.get(row['id'], 0), latest_caracal=latest)
         d['pending_commands'] = pending.get(row['id'], 0)
+        d['muted_until'] = mutes.get(row['id'])
         devices.append(d)
     return {'devices': devices, 'attention_count': sum(1 for d in devices if d['needs_attention']),
             'agent_version': AGENT_VERSION, 'hub_version': HUB_VERSION, 'server_time': time.time()}
@@ -209,6 +220,7 @@ def device_detail(did: str, r: Request):
     d = build(row, failed.get(did, 0), full=True, latest_caracal=latest_versions())
     d['commands'] = cmds
     d['pending_commands'] = sum(1 for x in cmds if x['state'] in ('queued', 'delivered'))
+    d['muted_until'] = monitor.muted_until(did)
     return d
 
 
@@ -236,6 +248,8 @@ def delete_device(did: str, r: Request):
         row = get_device_row(c, did)
         c.execute('DELETE FROM commands WHERE device_id=?', (did,))
         c.execute('DELETE FROM devices WHERE id=?', (did,))
+        for table in ('metrics', 'issues', 'events'):
+            c.execute(f'DELETE FROM {table} WHERE device_id=?', (did,))
     audit(u, 'device.delete', did, {'name': row['name']})
     return {'ok': True}
 
@@ -575,6 +589,11 @@ def validate_notify_settings(d):
         out['sound_device'] = text(d['sound_device'], 100)
         if not re.fullmatch(r'[A-Za-z0-9:=,._-]*', out['sound_device']):
             raise HTTPException(400, 'invalid_value')
+    if 'style' in d:
+        # the look of the notifications; the node checks every value (colours, choices, ranges, icons)
+        if not isinstance(d['style'], dict) or len(json.dumps(d['style'], ensure_ascii=False)) > 4000:
+            raise HTTPException(400, 'invalid_value')
+        out['style'] = d['style']
     if not out:
         raise HTTPException(400, 'nothing_to_change')
     return out
@@ -1122,6 +1141,7 @@ async def heartbeat(did: str, r: Request):
         c.execute('UPDATE devices SET ip=?, version=?, last_seen=?, status_json=? WHERE id=?',
                   (text(d.get('ip'), 64) or _client_ip(r), text(d.get('version'), 32), time.time(),
                    json.dumps(d, ensure_ascii=False), did))
+        monitor.record_metrics(c, did, d)
     return {'ok': True, 'agent_version': AGENT_VERSION, 'server_time': time.time()}
 
 

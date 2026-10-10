@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.11.0'
+HUB_VERSION = '4.12.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -186,6 +186,14 @@ CREATE TABLE IF NOT EXISTS notify_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT, n
   prefix TEXT, scope_json TEXT DEFAULT '{}', rate_per_min INTEGER DEFAULT 30, enabled INTEGER DEFAULT 1, created REAL,
   created_by TEXT DEFAULT '', last_used REAL);
 CREATE INDEX IF NOT EXISTS idx_commands_device_state ON commands(device_id, state);
+-- monitoring: metrics in five-minute buckets, problems that are going on, and the timeline of events
+CREATE TABLE IF NOT EXISTS metrics(device_id TEXT, ts INTEGER, cpu REAL, ram REAL, disk REAL, temp REAL,
+  PRIMARY KEY(device_id, ts));
+CREATE TABLE IF NOT EXISTS issues(device_id TEXT, code TEXT, level TEXT, detail TEXT DEFAULT '', since REAL,
+  alerted INTEGER DEFAULT 0, PRIMARY KEY(device_id, code));
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, ts REAL, kind TEXT, code TEXT,
+  level TEXT, detail TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS idx_events_device ON events(device_id, ts);
 """
 
 # Columns added after the first releases; existing databases are migrated in place.

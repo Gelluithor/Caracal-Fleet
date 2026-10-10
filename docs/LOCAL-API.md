@@ -28,7 +28,7 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Edit login | `PUT /profiles/{id}` | the same fields; empty `username`/`password`/selectors keep the stored values |
 | Delete login | `DELETE /profiles/{id}` | pages that used it stay in the playlist without login → `{unassigned}` |
 | Notification | `POST /notify` | `{title, message, level, duration, key, sound}` or a webhook body (Grafana, Alertmanager, Uptime Kuma) |
-| Notification settings | `PUT /notify/settings` | any of `enabled, position, duration, max_queue, scale, sound, volume, sound_device, history_max, history_days`; missing keys stay |
+| Notification settings | `PUT /notify/settings` | any of `enabled, position, duration, max_queue, scale, sound, volume, sound_device, history_max, history_days, style` (`style`: the look of the notifications, see `docs/NOTIFICATIONS.md` of the node); missing keys stay |
 | Clear notifications | `POST /notify/clear` | removes waiting notifications and the one on screen → `{cleared}` |
 | Watcher | `POST /notify/watchers` | `{name, url, auth_type, auth_header, username, secret, client_secret, refresh_token, list_path, id_field, title_template, message_template, level, level_field, interval, verify_tls, enabled, oauth_*}` → `{id}` |
 | Edit watcher | `PUT /notify/watchers/{id}` | the same fields; empty credentials keep the stored ones → `{reset}` (true when the URL or list changed) |

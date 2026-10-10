@@ -33,7 +33,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.9.0'
+VERSION = '4.10.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -110,7 +110,7 @@ PROFILE_PUBLIC = ('id', 'name', 'login_url', 'target_url', 'user_selector', 'pas
 # Notification settings and watchers of the node. Watcher credentials (username, secret, client_secret,
 # refresh_token) only travel to the node like login credentials; the node never reports them back.
 NOTIFY_SETTINGS = ('enabled', 'position', 'duration', 'max_queue', 'scale', 'sound', 'volume', 'sound_device',
-                   'history_max', 'history_days')
+                   'history_max', 'history_days', 'style')   # style: the look of the notifications (CARACAL 2026.10.10.2+)
 WATCHER_FIELDS = ('name', 'url', 'auth_type', 'auth_header', 'username', 'secret', 'client_secret', 'refresh_token',
                   'list_path', 'id_field', 'title_template', 'message_template', 'level', 'level_field', 'interval',
                   'verify_tls', 'enabled', 'oauth_token_url', 'oauth_grant', 'oauth_client_id', 'oauth_scope',

@@ -4,24 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>CARACAL Fleet</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ed5d2f'/%3E%3Ctext x='16' y='22' font-size='18' font-family='Arial' font-weight='900' fill='white' text-anchor='middle'%3EC%3C/text%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%23c8441a'/%3E%3Crect x='6' y='9' width='20' height='12' rx='1.5' fill='none' stroke='white' stroke-width='2.5'/%3E%3Cpath d='M12 25h8' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/vendor/fonts/fonts.css?v={{VERSION}}">
   <link rel="stylesheet" href="/static/style.css?v={{VERSION}}">
 </head>
 <body>
   <div id="login" class="login" hidden>
     <div class="login-shell">
-      <section class="login-copy">
-        <div class="brand-row"><span class="mark" data-logo>C</span><span><b>CARACAL</b><small>Fleet Controller</small></span></div>
-        <div>
-          <span class="kicker" data-i="loginKicker"></span>
-          <h1 data-i="loginHero"></h1>
-          <p data-i="loginHeroSub"></p>
+      <section class="login-copy" aria-hidden="true">
+        <div class="login-screen">
+          <div class="brand-row"><span class="mark" data-logo>C</span><span><b>CARACAL</b><small>Fleet</small></span></div>
+          <div>
+            <h1 data-i="loginHero"></h1>
+            <p data-i="loginHeroSub"></p>
+          </div>
+          <i class="screen-prog"></i>
         </div>
-        <div class="login-features"><span data-i="featHealth"></span><span data-i="featContent"></span><span data-i="featRoles"></span></div>
+        <div class="login-stand"></div>
+        <ul class="login-features"><li data-i="featHealth"></li><li data-i="featContent"></li><li data-i="featRoles"></li></ul>
       </section>
       <form id="loginForm" class="login-card">
         <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="en">EN</button></div>
-        <span class="kicker" data-i="secureAccess"></span>
         <h2 data-i="welcome"></h2>
         <p class="muted" data-i="loginSub"></p>
         <label><span data-i="username"></span><input id="loginUser" autocomplete="username" required></label>
@@ -31,7 +34,7 @@
       </form>
       <form id="setupForm" class="login-card" hidden>
         <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="en">EN</button></div>
-        <span class="kicker" data-i="setupKicker"></span>
+        <span class="step-note" data-i="setupKicker"></span>
         <h2 data-i="setupTitle"></h2>
         <p class="muted" data-i="setupSub"></p>
         <label><span data-i="setupCode"></span><input id="setupCode" autocomplete="off" required></label>
@@ -55,8 +58,9 @@
     <div class="main">
       <header class="topbar">
         <button class="icon-btn ghost menu-btn" id="menuBtn" aria-label="Menu"></button>
-        <div class="crumbs"><small id="crumb">CARACAL FLEET</small><h1 id="title"></h1></div>
+        <div class="crumbs"><small id="crumb"></small><h1 id="title"></h1></div>
         <div class="top-actions">
+          <button class="search-pill" id="paletteBtn" type="button"></button>
           <span id="liveDot" class="live-dot" title=""></span>
           <button class="btn" id="refreshBtn"></button>
           <button class="btn primary" id="addDeviceBtn"></button>
@@ -73,6 +77,7 @@
   <dialog id="modal"></dialog>
   <div id="toasts"></div>
   <script src="/static/i18n.js?v={{VERSION}}"></script>
+  <script src="/static/notify-style.js?v={{VERSION}}"></script>
   <script src="/static/app.js?v={{VERSION}}"></script>
 </body>
 </html>

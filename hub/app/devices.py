@@ -154,6 +154,8 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'playlist_count': len(assets), 'collection_count': len(collections), 'profile_count': len(profiles),
         'notify_waiting': notifications['waiting'] if notifications else None,
         'watcher_count': len(notifications['watchers']) if notifications else 0,
+        # the node reports the look of its notifications (and the agent passes it on): the look editor works
+        'notify_style': bool(notifications and isinstance(notifications['settings'].get('style'), dict)),
         'status_age': now - (row['last_seen'] or now),
         'capabilities': status.get('capabilities') or {},
         'caracal_version': status.get('caracal_version') or '', 'maintenance': status.get('maintenance') or '',
