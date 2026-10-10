@@ -68,7 +68,7 @@ async def setup(r: Request):
         code = SETUP_CODE.read_text().strip() if SETUP_CODE.exists() else ''
         if not code or not secrets.compare_digest(str(d.get('setup_code', '')).strip().upper(), code):
             raise HTTPException(401, 'invalid_setup_code')
-        if not USERNAME_RE.match(username):
+        if not USERNAME_RE.fullmatch(username):
             raise HTTPException(400, 'invalid_username')
         if len(password) < 10:
             raise HTTPException(400, 'password_too_short')
@@ -183,7 +183,7 @@ def _validate_and_unpack(archive, target):
         raise HTTPException(400, 'invalid_backup')
     with z:
         names = [n for n in z.namelist() if not n.endswith('/')]
-        if any(not BACKUP_NAMES.match(n) for n in names) or 'hub.db' not in names or 'config.json' not in names:
+        if any(not BACKUP_NAMES.fullmatch(n) for n in names) or 'hub.db' not in names or 'config.json' not in names:
             raise HTTPException(400, 'invalid_backup')
         if sum(i.file_size for i in z.infolist()) > BACKUP_MAX:
             raise HTTPException(400, 'invalid_backup')

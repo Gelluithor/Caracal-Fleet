@@ -50,8 +50,10 @@ def env(hub_app):
     (data / 'fleet-key').write_text(enrolled['device_token'])   # what the agent writes to /etc/caracal-fleet-key
     agent = load_agent().Agent({'hub': hub_url, 'local_api': node_url, **enrolled})
     agent.service_active = lambda name: None
+    local = requests.Session()   # what the player and the overlay send: the key from the node's data directory
+    local.headers['X-Caracal-Local'] = (data / 'local.key').read_text().strip()
     e = {'hub': hub_url, 'node': node_url, 'h': h, 'id': enrolled['device_id'], 'agent': agent, 'mod': node,
-         'data': data, 'key': enrolled['device_token']}
+         'data': data, 'key': enrolled['device_token'], 'local': local}
     beat(e)
     return e
 
@@ -60,7 +62,7 @@ def beat(env, **state):
     """What the CARACAL player sends every second (/api/v2/player/heartbeat, localhost only)."""
     body = {'current_id': None, 'current_name': '', 'frozen': False, 'collection_frozen': False, 'remaining': 10,
             'duration': 30, **state}
-    requests.post(env['node'] + '/api/v2/player/heartbeat', json=body).raise_for_status()
+    env['local'].post(env['node'] + '/api/v2/player/heartbeat', json=body).raise_for_status()
     env['agent'].heartbeat()
 
 
@@ -111,20 +113,20 @@ def test_grafana_collection(env):
     assert [c['tag'] for c in device(env)['collections']] == ['linka']
     run(env, 'freeze_collection', {'collection_id': col['id']})
     # the player reads exactly this command
-    command = requests.get(env['node'] + '/api/v6/player/command').json()
+    command = env['local'].get(env['node'] + '/api/v6/player/command').json()
     assert command['action'] == 'freeze_collection' and command['collection_id'] == col['id']
 
 
 def test_show_and_freeze_reach_the_player(env):
     item = next(x for x in node_assets(env) if x['kind'] == 'web')
     run(env, 'freeze', {'item_id': item['id'], 'minutes': 5})
-    command = requests.get(env['node'] + '/api/v6/player/command').json()
+    command = env['local'].get(env['node'] + '/api/v6/player/command').json()
     assert command['action'] == 'freeze' and command['item_id'] == item['id']
     beat(env, current_id=item['id'], current_name=item['name'], frozen=True)
     d = device(env)
     assert d['frozen'] and d['current_name'] == item['name']
     run(env, 'unfreeze')
-    assert requests.get(env['node'] + '/api/v6/player/command').json()['action'] == 'unfreeze'
+    assert env['local'].get(env['node'] + '/api/v6/player/command').json()['action'] == 'unfreeze'
 
 
 def test_player_down_is_detected(env):
@@ -163,7 +165,16 @@ def test_node_security(env):
     remote = TestClient(env['mod'].app)   # requests from another host than 127.0.0.1
     assert remote.get('/api/player/playlist-expanded').status_code == 403
     assert remote.get('/api/player/playlist').status_code == 403
-    assert requests.get(node + '/api/player/playlist-expanded').status_code == 200   # local player
+    assert env['local'].get(node + '/api/player/playlist-expanded').status_code == 200   # local player
+    # 127.0.0.1 alone is not enough: a reverse proxy on the same host connects from there too
+    for path in ('/api/player/playlist-expanded', '/api/player/profile/1', '/api/v6/player/command', '/api/notify/overlay'):
+        assert requests.get(node + path).status_code == 403, path
+        assert requests.get(node + path, headers={'X-Caracal-Local': 'wrong'}).status_code == 403, path
+    assert requests.post(node + '/api/v2/player/heartbeat', json={'current_name': 'x'}).status_code == 403
+    assert oct((env['data'] / 'local.key').stat().st_mode & 0o777) == '0o600'
+    # security headers of the admin UI
+    page = requests.get(node + '/')
+    assert page.headers['X-Frame-Options'] == 'DENY' and "frame-ancestors 'none'" in page.headers['Content-Security-Policy']
     fails = [remote.post('/api/login', data={'username': 'x', 'password': 'y'}).status_code for _ in range(11)]
     assert fails[:10] == [401] * 10 and fails[10] == 429
 
@@ -188,7 +199,7 @@ def test_docker_runtime_requests(env):
         assert after['requests']['reboot'] == before['requests']['reboot'] + 1
         assert after['requests']['restart_player'] == before['requests']['restart_player'] + 1
         # the player sees the restart request in its command channel
-        assert requests.get(env['node'] + '/api/v6/player/command').json()['restart_id'] == after['requests']['restart_player']
+        assert env['local'].get(env['node'] + '/api/v6/player/command').json()['restart_id'] == after['requests']['restart_player']
     finally:
         node.RUNTIME = old
 
@@ -206,7 +217,7 @@ def test_login_profiles(env):
     stored = env['mod'].rows('SELECT * FROM auth_profiles WHERE id=?', (pid,))[0]
     assert b'S3cret' not in stored['password_enc'] and stored['user_selector'] == '#name'
     # the player gets the decrypted login (localhost only)
-    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    player = env['local'].get(f"{env['node']}/api/player/profile/{pid}").json()
     assert player['username'] == 'monitor' and player['password'] == 'S3cret "pass"'
     # the hub keeps no credentials: history, audit and the stored command
     assert 'S3cret' not in row['payload_json'] and 'monitor' not in row['payload_json']
@@ -228,10 +239,10 @@ def test_login_profiles(env):
     # editing without credentials keeps them, a new password replaces only the password
     run(env, 'update_profile', {'id': pid, 'name': 'Zabbix NOC', 'login_url': zabbix['login_url'],
                                 'target_url': zabbix['target_url'], 'user_selector': '', 'password': ''})
-    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    player = env['local'].get(f"{env['node']}/api/player/profile/{pid}").json()
     assert player['name'] == 'Zabbix NOC' and player['password'] == 'S3cret "pass"' and player['user_selector'] == '#name'
     run(env, 'update_profile', {'id': pid, 'password': 'new-pass'})
-    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    player = env['local'].get(f"{env['node']}/api/player/profile/{pid}").json()
     assert player['username'] == 'monitor' and player['password'] == 'new-pass' and player['name'] == 'Zabbix NOC'
 
     # the hub rejects what the node would reject, before queueing
@@ -372,12 +383,12 @@ def test_http_login_profile(env):
     row = run(env, 'add_profile', {'auth_type': 'http', 'name': 'Router', 'target_url': 'https://router.example/',
                                    'username': 'admin', 'password': 'R0uter-pw'})
     pid = json.loads(row['result'])['id']
-    player = requests.get(f"{env['node']}/api/player/profile/{pid}").json()
+    player = env['local'].get(f"{env['node']}/api/player/profile/{pid}").json()
     assert player['auth_type'] == 'http' and player['login_url'] == 'https://router.example/' and player['password'] == 'R0uter-pw'
     assert next(p for p in device(env)['profiles'] if p['id'] == pid)['auth_type'] == 'http'
     assert 'R0uter' not in row['payload_json']
     run(env, 'update_profile', {'id': pid, 'name': 'Router 2'})
-    assert requests.get(f"{env['node']}/api/player/profile/{pid}").json()['auth_type'] == 'http'
+    assert env['local'].get(f"{env['node']}/api/player/profile/{pid}").json()['auth_type'] == 'http'
     run(env, 'delete_profile', {'id': pid})
 
 
@@ -446,8 +457,8 @@ def test_notification_sounds(env):
     assert stored.read_bytes() == mp3
     assert device(env)['notifications']['sounds']['critical']['name'] == 'gong.mp3'
     # the overlay learns that the level has its own sound and downloads it from the device itself
-    overlay = requests.get(env['node'] + '/api/notify/overlay').json()
-    assert overlay['sounds']['critical'] and requests.get(env['node'] + '/api/notify/sounds/critical/overlay').content == mp3
+    overlay = env['local'].get(env['node'] + '/api/notify/overlay').json()
+    assert overlay['sounds']['critical'] and env['local'].get(env['node'] + '/api/notify/sounds/critical/overlay').content == mp3
 
     url = f"{hub}/api/devices/{env['id']}/commands"
     for action, payload, code in [('notify_sound', {'level': 'loud', 'file_id': up['id']}, 'invalid_value'),
@@ -465,7 +476,7 @@ def test_notification_sounds(env):
 
     run(env, 'notify_sound', {'level': 'critical', 'reset': True})
     assert not stored.exists() and 'critical' not in device(env)['notifications']['sounds']
-    assert 'critical' not in requests.get(env['node'] + '/api/notify/overlay').json()['sounds']
+    assert 'critical' not in env['local'].get(env['node'] + '/api/notify/overlay').json()['sounds']
 
 
 def test_web_administrator_from_fleet(env, tmp_path):
@@ -547,7 +558,7 @@ def test_notification_queue_history_and_audit_from_fleet(env):
     run(env, 'notify_remove', {'id': queue[1]['id']})
     assert [x['title'] for x in device(env)['notifications']['queue']] == ['První', 'Třetí']
     # the overlay shows the first one; skipping it ends it
-    requests.get(env['node'] + '/api/notify/overlay')
+    env['local'].get(env['node'] + '/api/notify/overlay')
     run(env, 'notify_skip')
     assert node.rows('SELECT done FROM notifications WHERE title=?', ('První',))[0]['done'] == 3
 

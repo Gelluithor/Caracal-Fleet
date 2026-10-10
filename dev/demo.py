@@ -73,16 +73,18 @@ def seed_history(db_path, device_ids):
     c.close()
 
 
-def simulated_player(node):
+def simulated_player(node, key_file):
     """What the CARACAL player does for the overlay and Fleet: plays the playlist, reports it every second and
     follows the commands of the node's admin UI (v2) and of CARACAL Fleet (v6): next, show, freeze, unfreeze."""
     index, left, frozen, seen = 0, None, False, {}
+    local = requests.Session()   # the node's local endpoints want the key from its data directory, as the player
     while True:
         try:
-            items = requests.get(node + '/api/player/playlist', timeout=5).json() or []
+            local.headers['X-Caracal-Local'] = key_file.read_text().strip()
+            items = local.get(node + '/api/player/playlist', timeout=5).json() or []
             ids = [x['id'] for x in items]
             for path, target in (('/api/v2/player/command', 'asset_id'), ('/api/v6/player/command', 'item_id')):
-                cmd = requests.get(node + path, timeout=5).json()
+                cmd = local.get(node + path, timeout=5).json()
                 if path not in seen:
                     seen[path] = cmd['command_id']
                 if cmd['command_id'] == seen[path]:
@@ -99,13 +101,13 @@ def simulated_player(node):
                 item = items[index]
                 duration = max(5, int(item.get('duration') or 30))
                 left = duration if left is None else left
-                requests.post(node + '/api/v2/player/heartbeat', timeout=5, json={
+                local.post(node + '/api/v2/player/heartbeat', timeout=5, json={
                     'current_id': item['id'], 'current_name': item['name'], 'frozen': frozen, 'remaining': left, 'duration': duration})
                 if not frozen:
                     left -= 1
                     if left <= 0:
                         index, left = index + 1, None
-        except (requests.RequestException, ValueError, KeyError):
+        except (requests.RequestException, ValueError, KeyError, OSError):
             pass
         time.sleep(1)
 
@@ -145,7 +147,7 @@ def start_real_node(hub, agent_mod, with_overlay):
     if not s.get(node + '/api/assets').json():
         for name, url, duration in (('Uvítání', 'https://example.com', 20), ('Výroba – Grafana', 'https://grafana.com', 30), ('Jídelníček', 'https://example.org', 15)):
             s.post(node + '/api/assets/url', data={'name': name, 'source': url, 'duration': duration})
-    threading.Thread(target=simulated_player, args=(node,), daemon=True).start()
+    threading.Thread(target=simulated_player, args=(node, data / 'local.key'), daemon=True).start()
     agent = agent_mod.Agent({'hub': hub, 'local_api': node, **enrolled})
     agent.service_active = lambda name: None
     threading.Thread(target=agent.run, daemon=True).start()

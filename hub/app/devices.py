@@ -8,6 +8,11 @@ MEDIA_KINDS = ('image', 'video')
 COLLECTION_KIND = 'grafana-tag'   # Grafana collections kept as playlist assets on CARACAL nodes
 
 
+def dicts(value):
+    # lists of objects the agent reports; anything that is not a list of objects counts as empty
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
 def normalize_asset(a):
     a = dict(a or {})
     a['kind'] = str(a.get('kind') or a.get('type') or a.get('mimetype') or 'web').lower()
@@ -35,7 +40,7 @@ def grafana_config(source):
 
 def collections_of(status):
     """Grafana collections are the playlist assets of kind grafana-tag ('profiles' are login profiles)."""
-    return [normalize_asset(a) for a in status.get('assets') or []
+    return [normalize_asset(a) for a in dicts(status.get('assets'))
             if str(a.get('kind') or a.get('type')) == COLLECTION_KIND]
 
 
@@ -51,18 +56,31 @@ def profiles_of(status):
     return out
 
 
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _num(v):
+    # a metric the agent reports: a number or None; anything else must not break the device list
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v else None
+
+
 def notifications_of(status):
     """On-screen notifications of the node (agents from 4.7 on CARACAL with notifications); None = not reported."""
     n = status.get('notifications')
     if not isinstance(n, dict):
         return None
     return {'settings': n.get('settings') if isinstance(n.get('settings'), dict) else {},
-            'waiting': n.get('waiting') or 0, 'current': n.get('current'), 'tokens': n.get('tokens') or 0,
+            'waiting': _int(n.get('waiting')), 'current': n.get('current'), 'tokens': _int(n.get('tokens')),
             'sounds': n.get('sounds') if isinstance(n.get('sounds'), dict) else {},
             'watchers': [w for w in n.get('watchers') or [] if isinstance(w, dict)],
             # agents from 4.9: the queue, the size of the history and the audit log, the node's own tokens
             'queue': [x for x in n.get('queue') or [] if isinstance(x, dict)] if 'queue' in n else None,
-            'history_count': n.get('history_count'), 'audit_count': n.get('audit_count'),
+            'history_count': None if n.get('history_count') is None else _int(n.get('history_count')),
+            'audit_count': None if n.get('audit_count') is None else _int(n.get('audit_count')),
             'token_list': [x for x in n.get('token_list') or [] if isinstance(x, dict)] if 'token_list' in n else None}
 
 
@@ -76,7 +94,7 @@ def admin_of(status):
 def overlay_of(status):
     """The countdown bar on the TV: {'enabled', 'size'}; None when the node does not report it."""
     o = status.get('overlay')
-    return {'enabled': bool(o.get('enabled', True)), 'size': int(o.get('size') or 16)} if isinstance(o, dict) else None
+    return {'enabled': bool(o.get('enabled', True)), 'size': _int(o.get('size')) or 16} if isinstance(o, dict) else None
 
 
 def player_of(status):
@@ -134,7 +152,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
     player = player_of(status)
     now = time.time()
     online = now - (row['last_seen'] or 0) < ONLINE_TIMEOUT
-    assets = [normalize_asset(a) for a in status.get('assets') or []]
+    assets = [normalize_asset(a) for a in dicts(status.get('assets'))]
     collections = collections_of(status)
     profiles = profiles_of(status)
     notifications = notifications_of(status)
@@ -143,8 +161,8 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'version': row['version'] or '', 'last_seen': row['last_seen'], 'online': online,
         'group': row['device_group'] or '', 'location': row['location'] or '', 'notes': row['notes'] or '',
         'hostname': status.get('hostname', ''), 'model': status.get('model', ''),
-        'cpu': status.get('cpu'), 'ram': status.get('ram'), 'disk': status.get('disk'), 'temp': status.get('temp'),
-        'uptime': status.get('uptime'), 'load': status.get('load'),
+        'cpu': _num(status.get('cpu')), 'ram': _num(status.get('ram')), 'disk': _num(status.get('disk')),
+        'temp': _num(status.get('temp')), 'uptime': _num(status.get('uptime')), 'load': status.get('load'),
         'api_ok': status.get('api_ok'), 'api_error': status.get('api_error', ''),
         'player_online': player.get('player_online'), 'player_error': player.get('error', ''),
         'current_id': player.get('current_id'), 'current_name': player.get('current_name') or '',
@@ -157,14 +175,14 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         # the node reports the look of its notifications (and the agent passes it on): the look editor works
         'notify_style': bool(notifications and isinstance(notifications['settings'].get('style'), dict)),
         'status_age': now - (row['last_seen'] or now),
-        'capabilities': status.get('capabilities') or {},
+        'capabilities': status.get('capabilities') if isinstance(status.get('capabilities'), dict) else {},
         'caracal_version': status.get('caracal_version') or '', 'maintenance': status.get('maintenance') or '',
         # agents before 4.5 do not report the runtime; they only ran on classic installations
         'runtime': status['runtime'] if 'runtime' in status else ('host' if status.get('caracal_version') else ''),
         'caracal_image': status.get('caracal_image') or '',
         # where the node downloads CARACAL and system packages ('' = agent too old to report it)
         'download_source': status.get('download_source') or '', 'arch': status.get('arch') or '',
-        'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in status.get('assets') or []),
+        'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in dicts(status.get('assets'))),
         'admin': admin_of(status), 'overlay': overlay_of(status),
     }
     d['current_asset_id'] = None

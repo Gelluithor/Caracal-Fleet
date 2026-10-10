@@ -1045,7 +1045,7 @@ function nodeAdminCard(d) {
   return `<section class="card"><div class="card-head"><h2>${t('webAdmin')}</h2>${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">${icon('web')}${t('webAdminOpen')}</a>` : ''}</div>
     <dl class="kv"><dt>${t('webAdminAccount')}</dt><dd>${!a ? '—' : a.configured ? `<b>${esc(a.username)}</b>` : `<span class="tag critical">${t('webAdminMissing')}</span>`}
         ${can('manage') && adminSupport(d) ? ` <button class="btn sm ghost" data-do="nodeAdmin" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('lock')}${t(a && a.configured ? 'webAdminChange' : 'webAdminCreate')}</button>` : ''}</dd>
-      <dt>${t('overlayBar')}</dt><dd>${o ? `${t(o.enabled ? 'overlayOn' : 'overlayOff')}${o.enabled ? ` · ${o.size} px` : ''}` : '—'}
+      <dt>${t('overlayBar')}</dt><dd>${o ? `${t(o.enabled ? 'overlayOn' : 'overlayOff')}${o.enabled ? ` · ${esc(o.size)} px` : ''}` : '—'}
         ${can('content') && (d.capabilities || {}).overlay ? ` <button class="btn sm ghost" data-do="overlaySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd></dl>
     <p class="muted">${t('webAdminHint')}</p></section>`;
 }
@@ -1410,7 +1410,7 @@ function renderNotifications(d) {
   return `<div class="grid two">
     <section class="card"><div class="card-head"><h2>${t('notifyScreen')}</h2><span class="tag ${s.enabled ? 'ok' : ''}">${t(s.enabled ? 'notifyOn' : 'notifyOff')}</span></div>
       <dl class="kv"><dt>${t('notifyCurrent')}</dt><dd>${cur ? `<span class="tag ${LEVEL_TAG[cur.level] || 'info'}">${t('notifyLevel_' + (cur.level || 'info'))}</span> ${esc(cur.title || cur.message)}` : '—'}</dd>
-        <dt>${t('notifyWaiting')}</dt><dd>${n.waiting}</dd><dt>${t('notifyNodeTokens')}</dt><dd>${n.tokens}</dd>
+        <dt>${t('notifyWaiting')}</dt><dd>${esc(n.waiting)}</dd><dt>${t('notifyNodeTokens')}</dt><dd>${esc(n.tokens)}</dd>
         ${n.history_count != null ? `<dt>${t('notifyHistory')}</dt><dd>${t('nRecords', { n: n.history_count })} · ${t('notifyAudit')}: ${t('nRecords', { n: n.audit_count ?? 0 })}</dd>` : ''}</dl>
       ${!d.online ? `<p class="muted">${t('notifyOfflineHint')}</p>` : ''}
       <div class="form-actions start">${ctl ? `<button class="btn primary" data-do="notifySend" data-id="${esc(d.id)}">${icon('plus')}${t('notifySend')}</button>
@@ -1419,9 +1419,9 @@ function renderNotifications(d) {
         ${caps.notify_log ? `<button class="btn" data-do="notifyLog" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('audit')}${t('notifyLog')}</button>` : ''}</div></section>
     <section class="card"><div class="card-head"><h2>${t('notifySettings')}</h2>${edit ? `<span class="row-actions">${lookSupport(d) ? `<button class="btn sm" data-do="notifyStyle" data-id="${esc(d.id)}">${icon('image')}${t('notifyLook')}</button>` : ''}<button class="btn sm" data-do="notifySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button></span>` : ''}</div>
       <dl class="kv"><dt>${t('notifyPosition')}</dt><dd>${t('notifyPos_' + s.position.replace(/-/g, '_'))}</dd>
-        <dt>${t('notifyDuration')}</dt><dd>${s.duration} s</dd><dt>${t('notifySize')}</dt><dd>${s.scale} %</dd>
-        <dt>${t('notifyMaxQueue')}</dt><dd>${s.max_queue}</dd>
-        <dt>${t('notifySound')}</dt><dd>${t('notifySound_' + s.sound)}${s.sound !== 'off' ? ` · ${s.volume} %` : ''}</dd>
+        <dt>${t('notifyDuration')}</dt><dd>${esc(s.duration)} s</dd><dt>${t('notifySize')}</dt><dd>${esc(s.scale)} %</dd>
+        <dt>${t('notifyMaxQueue')}</dt><dd>${esc(s.max_queue)}</dd>
+        <dt>${t('notifySound')}</dt><dd>${t('notifySound_' + s.sound)}${s.sound !== 'off' ? ` · ${esc(s.volume)} %` : ''}</dd>
         <dt>${t('notifyHistory')}</dt><dd>${t('notifyHistoryValue', { n: s.history_max, days: s.history_days })}</dd>
         <dt>${t('notifySounds')}</dt><dd>${NOTIFY_LEVELS.map(l => n.sounds && n.sounds[l] ? `<span class="tag info" title="${esc(n.sounds[l].name)}">${t('notifyLevel_' + l)}: ${esc(n.sounds[l].name)}</span>` : '').join(' ') || t('notifySoundsDefault')}
           ${edit && (d.capabilities || {}).notify_sound ? `<button class="btn sm ghost" data-do="notifySound" data-id="${esc(d.id)}">${icon('upload')}${t('notifySoundUpload')}</button>` : ''}</dd></dl></section></div>
@@ -1445,7 +1445,7 @@ function renderNotifications(d) {
 
 function notifyQueueCard(d, n, ctl) {
   if (!n.queue || !n.queue.length) return '';
-  return `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('notifyQueue')} <span class="muted">(${n.waiting})</span></h2></div>
+  return `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('notifyQueue')} <span class="muted">(${esc(n.waiting)})</span></h2></div>
     <div class="table-wrap"><table class="table"><thead><tr><th>${t('notifyLevel')}</th><th>${t('notifyTitle')}</th><th>${t('notifySource')}</th><th>${t('time')}</th><th></th></tr></thead>
     <tbody>${n.queue.map(x => `<tr><td><span class="tag ${LEVEL_TAG[x.level] || 'info'}">${t('notifyLevel_' + (x.level || 'info'))}</span></td>
       <td><b>${esc(x.title || '')}</b>${x.message ? `<br><small class="muted">${esc(x.message)}</small>` : ''}</td><td><small>${esc(x.source || '')}</small></td>
@@ -1704,7 +1704,7 @@ async function notifyTokensCard(el) {
     <p class="muted">${t('notifyApiHint')}</p>
     <div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('notifyScope')}</th><th>${t('notifyRate')}</th><th>${t('notifyLastUsed')}</th><th></th></tr></thead>
     <tbody>${list.map(x => `<tr><td><b>${esc(x.name)}</b><br><small class="muted">${esc(x.prefix)}… · ${esc(x.created_by || '')}</small>${x.enabled ? '' : ` <span class="tag">${t('disabled')}</span>`}</td>
-      <td><small>${esc(scopeText(x.scope))}</small></td><td>${x.rate_per_min}/min</td><td class="muted nowrap">${x.last_used ? ago(x.last_used) : '—'}</td>
+      <td><small>${esc(scopeText(x.scope))}</small></td><td>${esc(x.rate_per_min)}/min</td><td class="muted nowrap">${x.last_used ? ago(x.last_used) : '—'}</td>
       <td class="actions-cell"><button class="icon-btn" title="${t('edit')}" data-do="notifyTokenEdit" data-tid="${x.id}">${icon('edit')}</button>
         <button class="icon-btn danger" title="${t('delete')}" data-do="notifyTokenDelete" data-tid="${x.id}" data-name="${esc(x.name)}">${icon('trash')}</button></td></tr>`).join('')
       || `<tr><td colspan="5" class="empty">${t('notifyNoTokens')}</td></tr>`}</tbody></table></div>`;

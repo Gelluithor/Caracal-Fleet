@@ -74,7 +74,7 @@ async def upload_release(r: Request):
     data = bytes(data)
     found = await run_in_threadpool(_inspect, data)
     version = unquote(r.headers.get('X-Release-Version', '')).strip() or found
-    if not VERSION_RE.match(version or ''):
+    if not VERSION_RE.fullmatch(version or ''):
         raise HTTPException(400, 'version_required')
     name = unquote(r.headers.get('X-File-Name', 'caracal.zip'))[:200]
     notes = unquote(r.headers.get('X-Release-Notes', ''))[:2000]

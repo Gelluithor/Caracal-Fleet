@@ -95,7 +95,7 @@ async def set_node_image(r: Request):
     u = current_user(r, 'admin')
     d = await r.json()
     image = str(d.get('image', '')).strip().lower()
-    if image and not IMAGE_RE.match(image):
+    if image and not IMAGE_RE.fullmatch(image):
         raise HTTPException(400, 'invalid_image')
     c = cfg()
     c['node_image'] = image
@@ -128,7 +128,7 @@ def _queue(r_user, ids, action, payload, wanted_runtime):
 async def _deploy_body(r):
     d = await r.json()
     version = str(d.get('version', '')).strip()
-    if not VERSION_RE.match(version):
+    if not VERSION_RE.fullmatch(version):
         raise HTTPException(400, 'version_required')
     ids = list(dict.fromkeys(str(x) for x in d.get('device_ids') or []))
     if not ids:

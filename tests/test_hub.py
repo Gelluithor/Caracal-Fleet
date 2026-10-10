@@ -128,3 +128,30 @@ def test_migrates_legacy_database(tmp_path, monkeypatch):
     assert admin['password_hash'] == 'legacy$deadbeef'
     assert {'payload_json', 'username', 'expires', 'followup_json'} <= cols
     assert core.cfg()['enroll_token'] == 'old' and core.cfg()['secret'] == 's' * 64
+
+
+def test_enrollment_cannot_take_over_an_online_device(client):
+    """The enrollment token and a known fingerprint do not replace the token of a device that is reporting."""
+    body = {'enroll_token': 'enroll-test-token', 'fingerprint': 'fp-takeover'}
+    first = client.post('/api/device/enroll', json=body).json()
+    r = client.post('/api/device/enroll', json=body)          # no token of its own, device seen just now
+    assert r.status_code == 409 and r.json()['detail'] == 'device_online'
+    assert client.post('/api/device/enroll', json={**body, 'device_token': first['device_token']}).json() == first
+    with core.db() as c:                                      # long offline: a reinstalled device gets a new token
+        c.execute('UPDATE devices SET last_seen=0 WHERE id=?', (first['device_id'],))
+    again = client.post('/api/device/enroll', json=body).json()
+    assert again['device_id'] == first['device_id'] and again['device_token'] != first['device_token']
+
+
+def test_finished_command_keeps_its_result(client, admin_headers):
+    """A device cannot rewrite the result of a finished command (nor run its follow-ups again)."""
+    dev = client.post('/api/device/enroll', json={'enroll_token': 'enroll-test-token', 'fingerprint': 'fp-replay'}).json()
+    h = {'X-Device-Token': dev['device_token']}
+    cid = client.post(f"/api/devices/{dev['device_id']}/commands", headers=admin_headers,
+                      json={'action': 'add_web', 'payload': {'name': 'X', 'source': 'https://x.test', 'duration': 5}}).json()['id']
+    assert client.get(f"/api/device/{dev['device_id']}/commands", headers=h).status_code == 200
+    client.post(f"/api/device/{dev['device_id']}/commands/{cid}/result", headers=h, json={'ok': True, 'result': 'done'})
+    r = client.post(f"/api/device/{dev['device_id']}/commands/{cid}/result", headers=h, json={'ok': False, 'result': 'rewritten'})
+    assert r.json().get('ignored')
+    row = client.get(f'/api/commands/{cid}', headers=admin_headers).json()
+    assert (row['state'], row['result']) == ('completed', 'done')

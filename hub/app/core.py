@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.12.0'
+HUB_VERSION = '4.12.1'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -219,11 +219,16 @@ def cfg():
 
 def save_cfg(c):
     tmp = CFG_PATH.with_suffix('.tmp')
-    tmp.write_text(json.dumps(c, indent=2))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(json.dumps(c, indent=2))
+    os.chmod(tmp, 0o600)
     tmp.replace(CFG_PATH)
 
 
 def init():
+    # everything the hub creates (database, configuration, media, backups) is readable by the hub only
+    os.umask(0o077)
     DATA.mkdir(parents=True, exist_ok=True)
     FILES.mkdir(parents=True, exist_ok=True)
     BRANDING.mkdir(parents=True, exist_ok=True)
@@ -241,6 +246,12 @@ def init():
         changed = True
     if changed:
         save_cfg(config)
+    for path in (CFG_PATH, DB_PATH):   # data from older versions
+        try:
+            if path.exists():
+                os.chmod(path, 0o600)
+        except OSError:   # e.g. owned by another user after a manual restore; the hub still starts
+            pass
 
     with db() as c:
         c.execute('PRAGMA journal_mode=WAL')

@@ -33,7 +33,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.10.0'
+VERSION = '4.10.1'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -862,13 +862,17 @@ class Agent:
     def update_docker(self, p):
         """Pull the new image and recreate the containers; the previous version is restored on failure."""
         version = str(p.get('version') or '').strip()
-        if not re.match(r'^[A-Za-z0-9._+-]{1,64}$', version):
+        if not re.fullmatch(r'[A-Za-z0-9._+-]{1,64}', version):
             raise RuntimeError('Invalid version')
+        image = str(p.get('image') or '')
+        # both end up in the compose .env: a newline would add settings of its own
+        if image and not re.fullmatch(r'[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+', image):
+            raise RuntimeError('Invalid image')
         env = read_env()
         previous = dict(env)
         env['CARACAL_VERSION'] = version
-        if p.get('image'):
-            env['CARACAL_IMAGE'] = str(p['image'])
+        if image:
+            env['CARACAL_IMAGE'] = image
         # the compose file of the hub comes with every update, so existing nodes get new container settings too
         # (e.g. the sound device of the overlay); it is restored with the previous version on failure
         compose_file = NODE_DIR / 'compose.yml'

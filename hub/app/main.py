@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import console, images, monitor, notify, playlists, provisioning, proxy, releases, sdcard, system
-from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, PERMS, ROLES, USERNAME_RE, APP_DIR,
+from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
                    sweep_commands, token_hash, validate_admin)
@@ -350,7 +350,7 @@ def validate_command(c, row, action, payload):
                    'sha256': rel['sha256']}
     elif action in ('update_caracal', 'convert_to_docker'):   # Docker image version
         version = text(payload.get('version'), 64)
-        if not images.VERSION_RE.match(version):
+        if not images.VERSION_RE.fullmatch(version):
             raise HTTPException(400, 'version_required')
         if not images.node_image():
             raise HTTPException(400, 'node_image_missing')
@@ -938,7 +938,7 @@ async def create_user(r: Request):
     d = await body(r)
     username, password = text(d.get('username'), 64), str(d.get('password', ''))
     role, language = d.get('role', 'viewer'), d.get('language', 'cs')
-    if not USERNAME_RE.match(username):
+    if not USERNAME_RE.fullmatch(username):
         raise HTTPException(400, 'invalid_username')
     if role not in ROLES or language not in LANGUAGES:
         raise HTTPException(400, 'invalid_role')
@@ -1044,7 +1044,7 @@ async def provision(r: Request):
         if not params['image']:
             raise HTTPException(400, 'node_image_missing')
         params['version'] = text(d.get('version'), 64) or images.latest_version() or 'latest'
-        if not images.VERSION_RE.match(params['version']):
+        if not images.VERSION_RE.fullmatch(params['version']):
             raise HTTPException(400, 'version_required')
     job_id = provisioning.create_job('node_install' if params['mode'] == 'node' else 'agent_install',
                                      params['host'], u['username'])
@@ -1111,6 +1111,12 @@ async def enroll(r: Request):
         row = c.execute('SELECT * FROM devices WHERE id=?', (did,)).fetchone()
         if row and existing_token and secrets.compare_digest(row['token_hash'] or '', token_hash(existing_token)):
             tok = existing_token  # re-enrollment keeps the working token
+        elif row and now - (row['last_seen'] or 0) < ONLINE_TIMEOUT * 3:
+            # Someone with the enrollment token and the same fingerprint (a cloned SD card, a guessed hostname)
+            # must not take over a device that is reporting right now with its own token: the impostor would get
+            # its commands, including login credentials. A reinstalled device enrolls once the old one is offline.
+            audit(None, 'device.enroll_refused', did, {'name': name, 'reason': 'device online with its own token'})
+            raise HTTPException(409, 'device_online')
         else:
             tok = secrets.token_urlsafe(32)
         if row:
@@ -1171,6 +1177,10 @@ async def command_result(did: str, cid: int, r: Request):
         row = c.execute('SELECT * FROM commands WHERE id=? AND device_id=?', (cid, did)).fetchone()
         if not row:
             raise HTTPException(404, 'not_found')
+        # a finished command keeps its result: a device cannot rewrite history or run follow-ups (imports) again;
+        # a late result after a timeout is still taken (long installations)
+        if row['state'] not in ('delivered', 'timeout'):
+            return {'ok': True, 'ignored': True}
         c.execute('UPDATE commands SET state=?, result=?, updated=? WHERE id=?',
                   ('completed' if ok else 'failed', result[-16000:], time.time(), cid))
         if ok and row['followup_json']:

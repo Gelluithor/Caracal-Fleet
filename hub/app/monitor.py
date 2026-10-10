@@ -245,6 +245,9 @@ async def mute_devices(r: Request):
         minutes = max(0, min(int(d.get('minutes') or 0), 60 * 24 * 30))
     except (TypeError, ValueError):
         raise HTTPException(400, 'invalid_value')
+    with db() as c:   # only devices that exist, so the configuration cannot be filled with anything else
+        known = {x['id'] for x in c.execute('SELECT id FROM devices')}
+    ids = [x for x in dict.fromkeys(ids) if x in known]
     if not ids:
         raise HTTPException(400, 'no_targets')
     with _lock:
@@ -254,6 +257,7 @@ async def mute_devices(r: Request):
                 conf['mutes'][did] = time.time() + minutes * 60
             else:
                 conf['mutes'].pop(did, None)
+        conf['mutes'] = {k: v for k, v in conf['mutes'].items() if k in known}
         _save(conf)
     audit(u, 'alerts.mute' if minutes else 'alerts.unmute', ', '.join(ids)[:300], json.dumps({'minutes': minutes}))
     return {'ok': True, 'until': time.time() + minutes * 60 if minutes else None}
@@ -407,10 +411,13 @@ def _deliver(ch, conf, title, lines, payload, level):
             smtp.send_message(msg)
         return
     if t == 'slack':
-        data = {'text': f'*{title}*\n' + '\n'.join(f'{line}{url_of(x)}' for line, x in zip(lines, items))
-                if items else f'*{title}*\n{body}'}
+        # Slack treats <...> as links and mentions (<!channel>); text from devices is escaped as Slack asks
+        sl = lambda v: v.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        data = {'text': f'*{sl(title)}*\n' + '\n'.join(f'{sl(line)}{url_of(x)}' for line, x in zip(lines, items))
+                if items else f'*{sl(title)}*\n{sl(body)}'}
     elif t == 'discord':
-        data = {'content': (f'**{title}**\n{body}')[:1900]}
+        # no @everyone / @here / role or user mentions from device names
+        data = {'content': (f'**{title}**\n{body}')[:1900], 'allowed_mentions': {'parse': []}}
     elif t == 'teams':
         # Workflows ("When a Teams webhook request is received") expect an Adaptive Card
         card = {'type': 'AdaptiveCard', 'version': '1.4', '$schema': 'http://adaptivecards.io/schemas/adaptive-card.json',

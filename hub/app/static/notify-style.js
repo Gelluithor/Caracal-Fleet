@@ -14,11 +14,28 @@
       warning: { color: '#f59e0b', icon: '⚠' }, critical: { color: '#ef4444', icon: '✖' } },
   };
   const clone = o => JSON.parse(JSON.stringify(o));
+  // Every value is checked before it is used: the look comes from the device (in Fleet from what the node
+  // reports), and it ends up in style attributes, so only known choices, #RRGGBB colours and bounded numbers pass.
+  const CHOICES = { fill: ['stripe', 'solid', 'border'], font: ['DejaVu Sans', 'DejaVu Serif', 'DejaVu Sans Mono'], align: ['left', 'center'], animation: ['slide', 'fade', 'none'] };
+  const RANGES = { stripe: [0, 300], opacity: [50, 100], width: [0, 100], speed: [100, 1500] };
+  const COLOR = /^#[0-9a-fA-F]{6}$/;
+  const pick = (k, v, fallback) => {
+    if (k in CHOICES) return CHOICES[k].includes(v) ? v : fallback;
+    if (k in RANGES) { const n = Math.round(Number(v)); return Number.isFinite(n) ? Math.min(RANGES[k][1], Math.max(RANGES[k][0], n)) : fallback; }
+    if (typeof fallback === 'boolean') return typeof v === 'boolean' ? v : fallback;
+    if (typeof v === 'string' && COLOR.test(fallback)) return COLOR.test(v) ? v.toLowerCase() : fallback;
+    return fallback;
+  };
   const merge = (base, d) => {
     const o = clone(base);
-    for (const [k, v] of Object.entries(d || {})) {
-      if (k === 'levels') for (const l of LEVELS) o.levels[l] = { ...o.levels[l], ...((v || {})[l] || {}) };
-      else if (k in o) o[k] = v;
+    for (const [k, v] of Object.entries(d && typeof d === 'object' ? d : {})) {
+      if (k === 'levels' && v && typeof v === 'object') {
+        for (const l of LEVELS) {
+          const x = v[l] && typeof v[l] === 'object' ? v[l] : {};
+          if (typeof x.color === 'string' && COLOR.test(x.color)) o.levels[l].color = x.color.toLowerCase();
+          if (typeof x.icon === 'string') o.levels[l].icon = [...x.icon].slice(0, 3).join('');
+        }
+      } else if (k in o && k !== 'levels') o[k] = pick(k, v, o[k]);
     }
     return o;
   };
@@ -161,12 +178,12 @@
       el.querySelectorAll('.nse-controls [data-k]').forEach(i => {
         i.oninput = i.onchange = () => {
           const k = i.dataset.k;
-          s[k] = i.type === 'checkbox' ? i.checked : ['stripe', 'opacity', 'speed', 'width'].includes(k) ? Number(i.value) : i.value;
+          s[k] = pick(k, i.type === 'checkbox' ? i.checked : i.value, s[k]);
           changed();
         };
       });
       el.querySelectorAll('.nse-controls [data-level]').forEach(i => {
-        i.oninput = () => { s.levels[i.dataset.level][i.dataset.f] = i.value; level = i.dataset.level; el.querySelectorAll('[data-l]').forEach(b => b.classList.toggle('on', b.dataset.l === level)); changed(); };
+        i.oninput = () => { const lv = s.levels[i.dataset.level]; if (i.dataset.f === 'color') { if (COLOR.test(i.value)) lv.color = i.value.toLowerCase(); } else lv.icon = [...i.value].slice(0, 3).join(''); level = i.dataset.level; el.querySelectorAll('[data-l]').forEach(b => b.classList.toggle('on', b.dataset.l === level)); changed(); };
       });
       el.querySelectorAll('.nse-controls [data-seg] button').forEach(b => {
         b.onclick = () => { s[b.parentElement.dataset.seg] = b.dataset.v; b.parentElement.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); changed(); };

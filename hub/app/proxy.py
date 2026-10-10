@@ -326,7 +326,7 @@ def proxy_image(r: Request, version: str = '', arch: str = ''):
     image = images.node_image()
     if not image:
         raise HTTPException(400, 'node_image_missing')
-    if not images.VERSION_RE.match(version):
+    if not images.VERSION_RE.fullmatch(version):
         raise HTTPException(400, 'version_required')
     if arch not in ARCHES:
         raise HTTPException(400, 'invalid_value')

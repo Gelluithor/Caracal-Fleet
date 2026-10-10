@@ -105,7 +105,11 @@ def test_alert_settings_need_admin(client, admin_headers):
     r = client.post('/api/login', json={'username': 'mon-manager', 'password': 'long-password-1'})
     h = {'Authorization': 'Bearer ' + r.json()['token']}
     assert client.get('/api/alerts', headers=h).status_code == 403
-    assert client.post('/api/alerts/mute', headers=h, json={'devices': ['x'], 'minutes': 5}).status_code == 200
+    did, _ = enroll(client, 'fp-mute-manager')
+    assert client.post('/api/alerts/mute', headers=h, json={'devices': [did], 'minutes': 5}).status_code == 200
+    # only existing devices can be muted, so the configuration cannot be filled with arbitrary keys
+    assert client.post('/api/alerts/mute', headers=h, json={'devices': ['x' * 100], 'minutes': 5}).status_code == 400
+    assert 'x' * 100 not in monitor.config()['mutes']
 
 
 def test_test_message_reports_delivery_errors(client, admin_headers, monkeypatch):
@@ -144,3 +148,18 @@ def test_deleting_a_device_removes_its_history(client, admin_headers):
     with core.db() as c:
         for table in ('metrics', 'issues', 'events'):
             assert not c.execute(f'SELECT 1 FROM {table} WHERE device_id=?', (did,)).fetchone()
+
+
+def test_malformed_status_does_not_break_the_device_list(client, admin_headers):
+    """Whatever a (buggy or hostile) agent reports, the hub keeps listing all devices."""
+    did, h = enroll(client, 'fp-malformed')
+    weird = [{'cpu': 'x', 'ram': [], 'disk': {}, 'temp': 'hot', 'uptime': 'long'},
+             {'assets': 'not a list', 'notifications': {'waiting': '<b>', 'tokens': 'x', 'settings': 'x'}},
+             {'assets': ['x', 1, None], 'profiles': 'x', 'player': 'x', 'overlay': {'size': 'big'}, 'capabilities': 'x'},
+             {'notifications': {'watchers': 'x', 'queue': 'x', 'sounds': 'x', 'history_count': 'x'}, 'collections': 'x'}]
+    for status in weird:
+        r = client.post(f'/api/device/{did}/heartbeat', headers=h, json={'version': core.AGENT_VERSION, **status})
+        assert r.status_code == 200, r.text
+        assert client.get('/api/devices', headers=admin_headers).status_code == 200, status
+        assert client.get(f'/api/devices/{did}', headers=admin_headers).status_code == 200, status
+    monitor.check(time.time(), lambda *a: None)
