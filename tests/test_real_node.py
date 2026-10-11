@@ -6,6 +6,7 @@ Python dependencies are installed; skipped otherwise (e.g. in CI). Grafana disco
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -175,6 +176,13 @@ def test_node_security(env):
     # security headers of the admin UI
     page = requests.get(node + '/')
     assert page.headers['X-Frame-Options'] == 'DENY' and "frame-ancestors 'none'" in page.headers['Content-Security-Policy']
+    # scripts only from the node itself: the admin UI has no inline scripts or event handlers, and its files carry
+    # the version in their address (a new CARACAL never runs with old files from the browser cache)
+    assert "script-src 'self';" in page.headers['Content-Security-Policy']
+    assert '{{VERSION}}' not in page.text and '/static/app.js?v=' in page.text
+    assert not re.search(r'<script>|\son[a-z]+=', page.text)
+    app_js = requests.get(node + '/static/app.js').text
+    assert not re.search(r'\son(click|change|input|submit)="', app_js)
     fails = [remote.post('/api/login', data={'username': 'x', 'password': 'y'}).status_code for _ in range(11)]
     assert fails[:10] == [401] * 10 and fails[10] == 429
 
