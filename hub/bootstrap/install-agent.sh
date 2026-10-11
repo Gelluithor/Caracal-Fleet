@@ -5,7 +5,10 @@
 # or reinstalled. An existing enrollment (device id + token in /etc/caracal-agent.json) is kept.
 #
 #   sudo bash install-agent.sh --hub https://caracal.example --token ENROLL_TOKEN [--name NAME]
-#        [--reenroll] [--local-api http://127.0.0.1:8080] [--admin-file FILE]
+#        [--reenroll] [--local-api http://127.0.0.1:8080] [--admin-file FILE] [--template ID]
+#
+# --template: a node template of the hub, applied by the hub once the node reports.
+# Runs as a systemd service, or an OpenRC service on Alpine Linux.
 #
 # --admin-file: JSON {"username", "password"} of CARACAL's web administrator (created, or its password set);
 #               the file is removed afterwards. Never pass passwords on the command line.
@@ -14,7 +17,7 @@
 #   curl -fsSL https://HUB/api/bootstrap/install-agent.sh | sudo bash -s -- --hub https://HUB --token TOKEN
 set -euo pipefail
 
-HUB=''; TOKEN=''; NAME=''; REENROLL=''; LOCAL_API=''; DOWNLOAD_SOURCE=''; ADMIN_FILE=''
+HUB=''; TOKEN=''; NAME=''; REENROLL=''; LOCAL_API=''; DOWNLOAD_SOURCE=''; ADMIN_FILE=''; TEMPLATE=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -24,6 +27,7 @@ while [ $# -gt 0 ]; do
     --local-api) LOCAL_API=$2; shift 2;;
     --download-source) DOWNLOAD_SOURCE=$2; shift 2;;   # internet or fleet (apt and CARACAL through the hub)
     --admin-file) ADMIN_FILE=$2; shift 2;;
+    --template) TEMPLATE=$2; shift 2;;
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
 done
@@ -39,8 +43,12 @@ fi
 
 echo '==> Checking Python dependencies'
 if ! python3 -c 'import requests, psutil' 2>/dev/null; then
-  apt-get update -qq || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-requests python3-psutil
+  if command -v apk >/dev/null; then
+    apk add -q python3 py3-requests py3-psutil
+  else
+    apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-requests python3-psutil
+  fi
 fi
 
 SRC_DIR=''
@@ -72,9 +80,35 @@ ARGS=(enroll --hub "$HUB" --token "$TOKEN")
 [ -n "$NAME" ] && ARGS+=(--name "$NAME")
 [ -n "$REENROLL" ] && ARGS+=("$REENROLL")
 [ -n "$LOCAL_API" ] && ARGS+=(--local-api "$LOCAL_API")
+[ -n "$TEMPLATE" ] && ARGS+=(--template "$TEMPLATE")
 python3 /opt/caracal-agent/agent.py "${ARGS[@]}"
 [ -n "$DOWNLOAD_SOURCE" ] && python3 /opt/caracal-agent/agent.py download-source "$DOWNLOAD_SOURCE"
 
+if ! { [ -d /run/systemd/system ] && command -v systemctl >/dev/null; } && command -v rc-service >/dev/null; then
+  # OpenRC (Alpine Linux): restarted by supervise-daemon like systemd's Restart=always (also after a self-update)
+  cat > /etc/init.d/caracal-agent.new <<'EOF'
+#!/sbin/openrc-run
+description="CARACAL Fleet Agent"
+supervisor=supervise-daemon
+command=/usr/bin/python3
+command_args="/opt/caracal-agent/agent.py run"
+respawn_delay=5
+respawn_max=0
+output_log=/var/log/caracal-agent.log
+error_log=/var/log/caracal-agent.log
+
+depend() {
+  need net
+  after docker
+}
+EOF
+  chmod 755 /etc/init.d/caracal-agent.new
+  mv /etc/init.d/caracal-agent.new /etc/init.d/caracal-agent
+  rc-update add caracal-agent default >/dev/null
+  rc-service caracal-agent restart >/dev/null 2>&1 || rc-service caracal-agent start
+  sleep 3
+  rc-service caracal-agent status >/dev/null 2>&1 || { tail -n 30 /var/log/caracal-agent.log; exit 4; }
+else
 UNIT=/etc/systemd/system/caracal-agent.service
 cat > "$UNIT.new" <<'EOF'
 [Unit]
@@ -97,6 +131,7 @@ systemctl enable caracal-agent.service >/dev/null
 systemctl restart caracal-agent.service
 sleep 3
 systemctl is-active --quiet caracal-agent.service || { journalctl -u caracal-agent.service -n 30 --no-pager; exit 4; }
+fi
 
 echo '==> Checking local CARACAL API'
 python3 /opt/caracal-agent/agent.py check || echo 'WARNING: agent runs, but the local CARACAL Fleet API is not fully available (see docs/LOCAL-API.md).'

@@ -64,6 +64,8 @@ select, input:not([type=checkbox]):not([type=radio]):not([type=file]) { height: 
 .palette-search input { height: auto; }
 input[type=file]::file-selector-button { margin-right: 10px; padding: 4px 11px; border: 0; border-radius: var(--r-xs); background: var(--fill); color: var(--ink); font: 500 13px var(--body); cursor: pointer; }
 input[type=checkbox], input[type=radio] { width: 16px; height: 16px; padding: 0; accent-color: var(--accent); flex: none; }
+/* sliders are not text fields: without the field padding, border and background the track and its fill line up with the thumb */
+input[type=range] { height: auto !important; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none !important; accent-color: var(--accent); cursor: pointer; }
 /* on/off settings in forms are switches; picking devices from a list stays a checkbox */
 .form label.check > input[type=checkbox] { appearance: none; position: relative; width: 36px; height: 21px; border: 0; border-radius: 99px; background: var(--fill); cursor: pointer; box-shadow: none; transition: background-color .2s; }
 .form label.check > input[type=checkbox]::after { content: ""; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; box-shadow: 0 2px 4px rgb(0 0 0 / .2), 0 0 0 .5px rgb(0 0 0 / .04); transition: transform .3s var(--spring); }
@@ -792,3 +794,16 @@ dialog.closing::backdrop { animation: fade .16s ease-in reverse forwards; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; transition-duration: 0s !important; }
   .screen-prog { animation: none !important; }
 }
+/* node templates */
+button.link { padding: 0; border: 0; background: none; color: var(--accent); cursor: pointer; }
+.card-intro { margin: 0; padding: 0 18px 12px; max-width: 80ch; }
+.tpl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 20px; }
+.tpl-part { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tpl-part .card-head { margin-bottom: 0; align-items: center; flex-wrap: wrap; }
+.tpl-part .card-head h2 { display: flex; align-items: center; gap: 8px; }
+.tpl-part .card-head h2 .ic { width: 18px; height: 18px; color: var(--muted); }
+.tpl-part > p.muted { margin: 0; font-size: 13px; }
+.tpl-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.tpl-look { display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.tpl-look .nse-tv { border-width: 4px; border-radius: 9px; }
+@media (max-width: 560px) { .tpl-look { grid-template-columns: minmax(0, 1fr); } }

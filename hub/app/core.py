@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.13.1'
+HUB_VERSION = '4.14.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -197,6 +197,9 @@ CREATE TABLE IF NOT EXISTS issues(device_id TEXT, code TEXT, level TEXT, detail 
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, ts REAL, kind TEXT, code TEXT,
   level TEXT, detail TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_events_device ON events(device_id, ts);
+-- node templates: parts of a node's setup applied to many nodes (hub/app/templates.py)
+CREATE TABLE IF NOT EXISTS node_templates(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT DEFAULT '',
+  data_json TEXT DEFAULT '{}', image_file_id TEXT DEFAULT '', created REAL, updated REAL, updated_by TEXT DEFAULT '');
 """
 
 # Columns added after the first releases; existing databases are migrated in place.
@@ -213,6 +216,7 @@ COLUMNS = [
     ('commands', 'followup_json', "TEXT DEFAULT ''"),
     ('files', 'pinned', 'INTEGER DEFAULT 0'),
     ('jobs', 'result_json', "TEXT DEFAULT ''"),
+    ('devices', 'pending_template', 'INTEGER'),   # template of a new node, applied after its first report
 ]
 
 
@@ -315,16 +319,18 @@ def cleanup_files():
         old = [r['id'] for r in c.execute(
             "SELECT id FROM files WHERE created<? AND COALESCE(pinned, 0)=0 "
             "AND id NOT IN (SELECT file_id FROM global_playlist_items WHERE file_id != '') "
-            "AND id NOT IN (SELECT file_id FROM node_releases)", (limit,))]
+            "AND id NOT IN (SELECT file_id FROM node_releases) "
+            "AND id NOT IN (SELECT image_file_id FROM node_templates)", (limit,))]
         for fid in old:
             (FILES / fid).unlink(missing_ok=True)
             c.execute('DELETE FROM files WHERE id=?', (fid,))
 
 
 def refresh_pin(c, fid):
-    """A file stays pinned while a global playlist item or a CARACAL release uses it."""
+    """A file stays pinned while a global playlist item, a CARACAL release or a node template uses it."""
     used = c.execute('SELECT 1 FROM global_playlist_items WHERE file_id=? UNION SELECT 1 FROM node_releases '
-                     'WHERE file_id=?', (fid, fid)).fetchone()
+                     'WHERE file_id=? UNION SELECT 1 FROM node_templates WHERE image_file_id=?',
+                     (fid, fid, fid)).fetchone()
     c.execute('UPDATE files SET pinned=? WHERE id=?', (1 if used else 0, fid))
 
 

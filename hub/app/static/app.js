@@ -91,6 +91,7 @@ const ICONS = {
   attention: 'M12 3 2 21h20zM12 10v5M12 18h.01',
   playlists: 'M4 6h12M4 12h12M4 18h8M18 15v6l4-3z',
   global: 'M3 7h18v13H3zM6 4h12M9 11h6M9 15h4',
+  templates: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM16.5 13v7M13 16.5h7',
   updates: 'M12 3v12M7 10l5 5 5-5M5 21h14',
   upload: 'M12 21V9M7 14l5-5 5 5M5 3h14',
   download: 'M12 3v12M7 10l5 5 5-5M5 21h14',
@@ -308,7 +309,7 @@ async function refresh() {
 
 const NAV = [
   ['overview', 'view'], ['devices', 'view'], ['attention', 'view'], ['playlists', 'view'], ['global', 'view'],
-  ['organization', 'view'],
+  ['templates', 'view'], ['organization', 'view'],
   ['operations', 'view'], ['updates', 'manage'], ['audit', 'manage'], ['users', 'admin'], ['settings', 'view'],
 ];
 
@@ -473,7 +474,7 @@ const eventRow = (e, withDevice) => `<a class="event ${e.kind === 'end' ? 'ok' :
 function welcomeCard() {
   const opt = (todo, ic, title, text) => `<button class="welcome-opt" data-do="${todo}">${icon(ic)}<b>${title}</b><span>${text}</span></button>`;
   return `<section class="card welcome"><div class="welcome-head">${icon('devices')}<div><h2>${t('welcomeTitle')}</h2><p class="muted">${t('welcomeText')}</p></div></div>
-    ${can('manage') ? `<div class="welcome-opts">${opt('sdCard', 'download', t('sdCardTitle'), t('welcomeSd'))}${opt('discover', 'search', t('discoverTitle'), t('welcomeDiscover'))}${opt('provision', 'ssh', t('sshInstall'), t('welcomeSsh'))}</div>`
+    ${can('manage') ? `<div class="welcome-opts">${opt('sdCard', 'download', t('sdCardTitle'), t('welcomeSd'))}${opt('discover', 'search', t('discoverTitle'), t('welcomeDiscover'))}${opt('provision', 'ssh', t('sshInstall'), t('welcomeSsh'))}${can('admin') ? opt('oneCommand', 'console', t('oneCommand'), t('welcomeOneCommand')) : ''}</div>`
       : `<p class="muted">${t('welcomeViewer')}</p>`}</section>`;
 }
 
@@ -593,6 +594,8 @@ function deviceActions(d = null) {
     { ic: 'settings', label: t('menuManage'), sections: [
       [manage && A('muteAlerts', 'bell', d && d.muted_until ? t('unmuteAlerts') : t('muteAlerts')),
         manage && A('bulkAssign', 'group', t('assignGroupLocation')),
+        manage && A('templateApplyTo', 'templates', t('templateApply')),
+        manage && d && A('templateFromDevice', 'copy', t('saveAsTemplate')),
         manage && A(d ? 'nodeAdmin' : 'bulkNodeAdmin', 'lock', t('webAdmin'), { disabled: off || !admin, why: why(admin) || t('offline') }),
         manage && (!d || d.download_source) && A(d ? 'downloadSource' : 'bulkDownloadSource', 'download', t('downloadSource'))],
       [manage && A(cmd, 'agent', t('act_update_agent'), { act: 'update_agent', disabled: off }),
@@ -2008,6 +2011,8 @@ const SETTINGS_VIEW = {
     const cmd = `curl -fsSL ${location.origin}/api/bootstrap/install-agent.sh | sudo bash -s -- --hub ${location.origin} --token ${s.enroll_token} --name "NODE"`;
     root.innerHTML = `<section class="card"><h2>${t('sdCardTitle')}</h2><p class="muted">${t('sdCardHint')}</p>
         <div class="form-actions start"><button class="btn primary" data-do="sdCard">${icon('download')}${t('sdCardTitle')}</button><button class="btn" data-do="discover">${icon('search')}${t('discoverTitle')}</button></div></section>
+      <section class="card"><h2>${t('oneCommand')}</h2><p class="muted">${t('oneCommandHint')}</p>
+        <div class="form-actions start"><button class="btn" data-do="oneCommand">${icon('console')}${t('oneCommand')}</button></div></section>
       <section class="card"><h2>${t('manualInstall')}</h2><p class="muted">${t('manualInstallHint')}</p><pre class="code" id="instCmd">${esc(cmd)}</pre>
         <div class="form-actions start"><button class="btn sm" id="instCopy">${icon('copy')}${t('copy')}</button></div></section>
       <section class="card"><h2>${t('enrollToken')}</h2><p class="muted">${t('enrollTokenHint')}</p>
@@ -2398,25 +2403,31 @@ async function pollDiscovery(id) {
 }
 
 // Zero-touch SD card: files for the boot partition of a fresh Raspberry Pi OS Lite / DietPi card.
-async function sdCardDialog() {
-  const img = await api('/api/node-image').catch(() => ({ image: '' }));
+async function sdCardDialog(template = '') {
+  const [img] = await Promise.all([api('/api/node-image').catch(() => ({ image: '' })), loadTemplates()]);
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
   const country = ((navigator.language || '').split('-')[1] || (S.lang === 'cs' ? 'CZ' : '')).toUpperCase();
   modal({
     title: t('sdCardTitle'), submit: t('sdCardDownload'), wide: true,
     body: `<div class="form"><p class="muted">${t('sdCardHint')}</p>
       ${img.image ? '' : `<div class="note warn">${t('err_node_image_missing')} <a href="#/updates">${t('nav_updates')}</a></div>`}
-      <div class="mode-pick"><label class="check"><input type="radio" name="os" value="raspios" checked><span><b>${t('osRaspios')}</b><small>${t('osRaspiosHint')}</small></span></label>
+      <h3>${t('sdBoardPi')}</h3><div class="mode-pick"><label class="check"><input type="radio" name="os" value="raspios" checked><span><b>${t('osRaspios')}</b><small>${t('osRaspiosHint')}</small></span></label>
       <label class="check"><input type="radio" name="os" value="dietpi"><span><b>${t('osDietpi')}</b><small>${t('osDietpiHint')}</small></span></label></div>
+      <h3>${t('sdBoardPc')}</h3><div class="mode-pick"><label class="check"><input type="radio" name="os" value="alpine"><span><b>${t('osAlpine')}</b><small>${t('osAlpineHint')}</small></span></label>
+      <label class="check"><input type="radio" name="os" value="ubuntu"><span><b>${t('osUbuntu')}</b><small>${t('osUbuntuHint')}</small></span></label></div>
+      <p class="muted pc-only">${t('sdPcOther')} <button type="button" class="link" data-do="oneCommand">${t('oneCommand')}</button></p>
+      <div class="note warn pc-only">${t('sdPcErase')}</div>
+      <label class="alpine-only">${t('installDisk')}<input name="disk" value="auto" pattern="auto|/dev/[a-z][a-z0-9]{1,15}" spellcheck="false"><small class="muted">${t('installDiskHint')}</small></label>
       <label class="dietpi-only">${t('dietpiTxt')}<input type="file" id="sdDietpi" accept=".txt,text/plain"><small class="muted">${t('dietpiTxtHint')}</small></label>
+      ${templatePick(template)}
       <label>${t('hubUrl')}<input name="hub_url" value="${esc(location.origin)}" required></label>
       <div class="row2"><label>${t('namePrefix')}<input name="name_prefix" value="caracal" pattern="[a-z0-9][a-z0-9\\-]{0,30}" required></label>
       <label>${t('timezone')}<input name="timezone" value="${esc(tz)}"></label></div>
-      <details><summary>${t('wifi')}</summary><div class="row2"><label>${t('wifiSsid')}<input name="wifi_ssid" maxlength="32"></label>
+      <details class="no-alpine"><summary>${t('wifi')}</summary><div class="row2"><label>${t('wifiSsid')}<input name="wifi_ssid" maxlength="32"></label>
         <label>${t('wifiPassword')}<input name="wifi_password" type="password" autocomplete="off" minlength="8" maxlength="63"></label></div>
         <label>${t('wifiCountry')}<input name="wifi_country" value="${esc(country)}" maxlength="2"></label></details>
       <details><summary>${t('deviceLogin')}</summary><p class="muted">${t('deviceLoginHint')}</p>
-        <div class="row2"><label class="raspios-only">${t('username')}<input name="user" value="admin"></label>
+        <div class="row2"><label class="user-field">${t('username')}<input name="user" value="admin"></label>
         <label>${t('password')}<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="100"></label></div>
         <label>${t('sshPublicKey')}<textarea name="ssh_key" rows="2" placeholder="ssh-ed25519 AAAA… user@pc"></textarea></label></details>
       <details><summary>${t('staticIp')}</summary><p class="muted">${t('staticIpHint')}</p>
@@ -2432,9 +2443,12 @@ async function sdCardDialog() {
       <div class="note info">${t('sdCardTokenNote')}</div></div>`,
     onOpen: form => {
       const sync = () => {
-        const dietpi = form.os.value === 'dietpi';
-        $$('.dietpi-only', form).forEach(x => { x.hidden = !dietpi; });
-        $$('.raspios-only', form).forEach(x => { x.hidden = dietpi; });
+        const os = form.os.value, pc = ['alpine', 'ubuntu'].includes(os);
+        $$('.dietpi-only', form).forEach(x => { x.hidden = os !== 'dietpi'; });
+        $$('.user-field', form).forEach(x => { x.hidden = os === 'dietpi'; });
+        $$('.alpine-only', form).forEach(x => { x.hidden = os !== 'alpine'; });
+        $$('.no-alpine', form).forEach(x => { x.hidden = os === 'alpine'; });
+        $$('.pc-only', form).forEach(x => { x.hidden = !pc; });
       };
       $$('input[name=os]', form).forEach(x => { x.onchange = sync; });
       sync();
@@ -2450,8 +2464,10 @@ async function sdCardDialog() {
         body.dietpi_txt = await f.text();
       }
       const r = await fetch('/api/sdcard', { method: 'POST', body: JSON.stringify(body), headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/json' } });
+      if (data.os === 'alpine') delete body.wifi_ssid;
       await downloadResponse(r, `caracal-sdcard-${data.os}.zip`);
-      setTimeout(() => modal({ title: t('sdCardTitle'), body: `<ol class="steps">${t(data.os === 'dietpi' ? 'sdCardStepsDietpi' : 'sdCardSteps')}</ol>` }), 50);
+      const steps = { dietpi: 'sdCardStepsDietpi', alpine: 'usbStepsAlpine', ubuntu: 'usbStepsUbuntu' }[data.os] || 'sdCardSteps';
+      setTimeout(() => modal({ title: t(['alpine', 'ubuntu'].includes(data.os) ? 'usbTitle' : 'sdCardTitle'), body: `<ol class="steps">${t(steps)}</ol>` }), 50);
     },
   });
 }
@@ -2582,6 +2598,161 @@ function globalDeployDialog(p) {
       toast(t('deployQueued', { n: targets.length }));
       if (r.media_unsupported.length) toast(t('deployMediaSkipped', { list: r.media_unsupported.join(', ') }), 'warn');
       render();
+    },
+  });
+}
+
+// ---------- node templates: parts of a node's setup defined once, applied to nodes or baked into zero-touch media
+
+const tplParts = p => [p.playlist_id && 'playlist', p.notify && 'notify', p.image && 'picture', p.overlay && 'overlay', (p.group || p.location) && 'org'].filter(Boolean);
+const tplChips = p => tplParts(p).map(x => `<span>${t('tplPart_' + x)}</span>`).join('') || `<span>${t('tplEmpty')}</span>`;
+
+// a template choice for new nodes (SD card, USB stick, installation); S.templates is loaded by the caller
+const templatePick = (sel = '') => `<label>${t('nodeTemplate')}<select name="template"><option value="">${t('noTemplate')}</option>${(S.templates || []).map(p => `<option value="${p.id}" ${String(p.id) === String(sel) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select><small class="muted">${t('nodeTemplateHint')}</small></label>`;
+async function loadTemplates() { S.templates = await api('/api/templates').catch(() => S.templates || []); return S.templates; }
+
+VIEWS.templates = {
+  mount(root) {
+    setTitle(t('nav_templates'));
+    if (S.route.id) { root.innerHTML = `<div id="tHead"></div><div id="tParts"></div><div id="tUsed"></div>`; return; }
+    root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('nav_templates')}</h2>
+      ${can('manage') ? `<button class="btn" data-do="templateFromDevice">${icon('copy')}${t('templateFromDevice')}</button><button class="btn primary" data-do="templateNew">${icon('plus')}${t('templateNew')}</button>` : ''}</div>
+      <p class="muted card-intro">${t('templatesHint')}</p><div id="tList"></div></section>`;
+  },
+  async update(root) {
+    if (!S.route.id) {
+      const rows = await loadTemplates();
+      if (!$('#tList', root)) return;
+      patch($('#tList', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('tplContains')}</th><th>${t('updated')}</th></tr></thead>
+        <tbody>${rows.map(p => `<tr data-href="#/templates/${p.id}"><td><b>${esc(p.name)}</b>${p.description ? `<br><small class="muted">${esc(p.description)}</small>` : ''}</td>
+        <td><div class="chips">${tplChips(p)}</div></td><td class="nowrap">${dt(p.updated)}<br><small class="muted">${esc(p.updated_by)}</small></td></tr>`).join('')
+        || `<tr><td colspan="3">${emptyState('templates', t('noTemplates'), t('templatesHint'), can('manage') ? `<button class="btn primary" data-do="templateNew">${icon('plus')}${t('templateNew')}</button>` : '')}</td></tr>`}</tbody></table></div>`);
+      return;
+    }
+    const p = await api('/api/templates/' + encodeURIComponent(S.route.id)).catch(() => null);
+    if (!$('#tHead', root)) return;
+    if (!p) { patch($('#tHead', root), `<div class="card empty">${t('err_not_found')}</div>`); return; }
+    S.template = p;
+    setTitle(p.name, t('nav_templates'), '#/templates');
+    const edit = can('manage'), n = p.notify || {};
+    const editBtn = (todo, label = t('edit')) => (edit ? `<button class="btn sm" data-do="${todo}">${icon('edit')}${label}</button>` : '');
+    const off = `<span class="muted">${t('tplKeep')}</span>`;
+    patch($('#tHead', root), `<section class="card dev-hero"><div class="hero-main"><div class="hero-title">${icon('templates')}<h2>${esc(p.name)}</h2></div>
+      <div class="chips">${tplChips(p)}<span>${t('updated')} ${dt(p.updated)} · ${esc(p.updated_by)}</span></div>
+      ${p.description ? `<p class="muted">${esc(p.description)}</p>` : ''}</div>
+      ${edit ? `<div class="hero-actions"><button class="btn primary" data-do="templateApply" ${tplParts(p).length ? '' : 'disabled'}>${icon('upload')}${t('templateApply')}</button>
+        <button class="btn" data-do="sdCard" data-template="${p.id}">${icon('download')}${t('zeroTouchMedia')}</button>
+        <button class="btn" data-do="oneCommand" data-template="${p.id}">${icon('console')}${t('oneCommand')}</button>
+        <button class="btn" data-do="templateEdit">${icon('edit')}${t('edit')}</button><button class="btn danger" data-do="templateDelete">${icon('trash')}${t('delete')}</button></div>` : ''}</section>`);
+    const part = (ic, title, hint, body, actions) => `<section class="card tpl-part"><div class="card-head"><h2>${icon(ic)}${title}</h2><div class="tpl-actions">${actions}</div></div><p class="muted">${hint}</p>${body}</section>`;
+    patch($('#tParts', root), `<div class="tpl-grid">
+      ${part('playlists', t('playlist'), t('tplPlaylistHint'), p.playlist_id ? (p.playlist ? `<dl class="kv"><dt>${t('globalPlaylist')}</dt><dd><a href="#/global/${p.playlist_id}">${esc(p.playlist.name)}</a> <span class="muted">(${t('nItems', { n: p.playlist.items })})</span></dd><dt>${t('mode')}</dt><dd>${t('mode_' + (p.playlist_mode || 'replace'))}</dd></dl>` : `<div class="note warn">${t('tplPlaylistMissing')}</div>`) : off, editBtn('templatePlaylist'))}
+      ${part('bell', t('notifySettings'), t('tplNotifyHint'), p.notify ? `<div class="tpl-look"><div id="tplPreview"></div><dl class="kv">
+        ${'enabled' in n ? `<dt>${t('notifyEnabled')}</dt><dd>${n.enabled ? t('yes') : t('no')}</dd>` : ''}${n.position ? `<dt>${t('notifyPosition')}</dt><dd>${t('notifyPos_' + n.position.replace(/-/g, '_'))}</dd>` : ''}
+        ${n.duration ? `<dt>${t('notifyDuration')}</dt><dd>${n.duration} s</dd>` : ''}${n.sound ? `<dt>${t('notifySound')}</dt><dd>${t('notifySound_' + n.sound)}</dd>` : ''}
+        <dt>${t('notifyLook')}</dt><dd>${n.style ? t('tplCustomLook') : t('tplDefaultLook')}${p.image ? ` · ${t('tplWithPicture')}` : ''}</dd></dl></div>` : off,
+        editBtn('templateNotify', t('notifySettings')) + editBtn('templateLook', t('notifyLook')) + (edit && p.notify ? `<button class="btn sm ghost" data-do="templateClear" data-part="notify">${icon('x')}${t('tplRemovePart')}</button>` : ''))}
+      ${part('settings', t('overlayBar'), t('overlayHint'), p.overlay ? `<dl class="kv"><dt>${t('overlayEnabled')}</dt><dd>${p.overlay.enabled ? t('yes') : t('no')}</dd>${p.overlay.size ? `<dt>${t('overlaySize')}</dt><dd>${p.overlay.size} px</dd>` : ''}</dl>` : off, editBtn('templateOverlay'))}
+      ${part('group', t('groupAndLocation'), t('tplOrgHint'), p.group || p.location ? `<dl class="kv">${p.group ? `<dt>${t('group')}</dt><dd>${esc(p.group)}</dd>` : ''}${p.location ? `<dt>${t('location')}</dt><dd>${esc(p.location)}</dd>` : ''}</dl>` : off, editBtn('templateOrg'))}
+    </div>`);
+    const prev = $('#tplPreview', root);
+    if (prev && !prev.childElementCount) {
+      NotifyStyle.preview(prev, n.style, { t: (cs, en) => (S.lang === 'cs' ? cs : en), position: n.position, scale: n.scale });
+      if (p.image) fetch(`/api/templates/${p.id}/image`, { headers: { Authorization: 'Bearer ' + S.token } }).then(r => (r.ok ? r.blob() : null))
+        .then(b => { if (b && prev.isConnected) NotifyStyle.preview(prev, n.style, { t: (cs, en) => (S.lang === 'cs' ? cs : en), position: n.position, scale: n.scale, image: URL.createObjectURL(b) }); }).catch(() => {});
+    }
+    const skipped = x => x.skipped.map(s => `${t('act_' + s.action)}: ${errText(new Error(s.reason))}`).join(', ');
+    patch($('#tUsed', root), `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('tplApplied')}</h2></div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>${t('time')}</th><th>${t('device')}</th><th>${t('user')}</th><th>${t('result')}</th></tr></thead>
+      <tbody>${p.applied.map(x => `<tr><td class="nowrap">${dt(x.created)}</td><td><a href="#/device/${encodeURIComponent(x.device_id)}">${esc(x.device_name || x.device_id)}</a></td>
+        <td>${x.automatic ? t('tplAutomatic') : esc(x.username)}</td><td>${x.queued.map(a => `<span class="badge st-completed">${esc(a === 'organization' ? t('groupAndLocation') : t('act_' + a))}</span>`).join(' ')}
+        ${x.skipped.length ? `<small class="muted" title="${esc(skipped(x))}">${t('tplSkippedN', { n: x.skipped.length })}</small>` : ''}</td></tr>`).join('')
+        || `<tr><td colspan="4" class="empty">${t('tplNeverApplied')}${p.devices ? ' ' + t('tplWaitingN', { n: p.devices }) : ''}</td></tr>`}</tbody></table></div></section>`);
+  },
+};
+
+const tplSave = async (patchData, msg = t('saved')) => { await api('/api/templates/' + S.template.id, { method: 'PATCH', json: patchData }); toast(msg); render(); };
+
+function templateApplyDialog(p, preselect = []) {
+  modal({
+    title: t('templateApplyTitle', { name: esc(p.name) }), submit: t('templateApply'), wide: true,
+    body: `<div class="form"><p class="muted">${t('templateApplyHint')}</p><div class="chips">${tplChips(p)}</div>${targetPicker(null, preselect)}
+      ${p.playlist_id && p.playlist_mode !== 'append' ? `<div class="note warn">${t('tplReplaceWarning')}</div>` : ''}</div>`,
+    onOpen: bindTargetPicker,
+    onSubmit: async data => {
+      const targets = pickedTargets(data);
+      if (!targets.length) throw new Error('no_devices');
+      const r = await api(`/api/templates/${p.id}/apply`, { method: 'POST', json: { target_ids: targets } });
+      const skipped = r.results.filter(x => x.skipped.length);
+      toast(t('templateApplied', { n: targets.length }));
+      if (skipped.length) toast(t('templatePartsSkipped', { list: skipped.map(x => `${x.device_name}: ${x.skipped.map(s => t('act_' + s.action)).join(', ')}`).join('; ') }), 'warn');
+      render();
+    },
+  });
+}
+
+function templateLookDialog(p) {
+  let editor = null;
+  const n = p.notify || {};
+  const dlg = modal({
+    title: t('notifyLook'), wide: true, submit: t('save'),
+    body: `<p class="muted">${t('tplLookHint')}</p><div id="lookEditor"></div>`,
+    onOpen: form => {
+      editor = NotifyStyle.editor($('#lookEditor', form), n.style, {
+        t: (cs, en) => (S.lang === 'cs' ? cs : en), position: n.position, scale: n.scale,
+        // the picture is stored with the template right away (sent to the nodes when the template is applied)
+        onImage: async file => {
+          if (file.size > 5 * 1024 * 1024) { toast(errText(new Error('file_too_large')), 'err'); throw new Error('file_too_large'); }
+          try { const up = await uploadFile(file, () => {}); await api(`/api/templates/${p.id}/image`, { method: 'POST', json: { file_id: up.id } }); } catch (err) { toast(errText(err), 'err'); throw err; }
+          return URL.createObjectURL(file);
+        },
+        onImageRemove: async () => { await api(`/api/templates/${p.id}/image`, { method: 'POST', json: { reset: true } }); },
+      });
+      if (p.image) fetch(`/api/templates/${p.id}/image`, { headers: { Authorization: 'Bearer ' + S.token } })
+        .then(r => (r.ok ? r.blob() : null)).then(b => { if (b && editor) editor.setImage(URL.createObjectURL(b)); }).catch(() => {});
+    },
+    onSubmit: () => tplSave({ notify: { ...n, style: editor.get() } }),
+  });
+  dlg.addEventListener('close', () => render(), { once: true });
+  dlg.classList.add('xwide');
+}
+
+function templateNotifyDialog(p) {
+  const s = { ...NOTIFY_DEFAULTS, ...(p.notify || {}) };
+  const numIn = (name, min, max, step = 1) => `<input name="${name}" type="number" min="${min}" max="${max}" step="${step}" value="${esc(s[name])}" required>`;
+  modal({
+    title: t('notifySettings'), wide: true,
+    body: `<div class="form"><p class="muted">${t('tplNotifyHint')}</p>
+      <label class="check"><input type="checkbox" name="enabled" ${s.enabled ? 'checked' : ''}>${t('notifyEnabled')}</label>
+      <div class="row2"><label>${t('notifyPosition')}<select name="position">${choice(NOTIFY_POSITIONS, s.position, 'notifyPos_')}</select></label>
+      <label>${t('notifyDuration')}${numIn('duration', 3, 120)}</label></div>
+      <div class="row2"><label>${t('notifySize')}${numIn('scale', 50, 300, 10)}</label><label>${t('notifyMaxQueue')}${numIn('max_queue', 1, 200)}</label></div>
+      <div class="row2"><label>${t('notifySound')}<select name="sound">${choice(NOTIFY_SOUNDS, s.sound, 'notifySound_')}</select></label><label>${t('notifyVolume')}${numIn('volume', 0, 100, 10)}</label></div>
+      <div class="row2"><label>${t('notifyHistoryMax')}${numIn('history_max', 50, 5000, 50)}</label><label>${t('notifyHistoryDays')}${numIn('history_days', 1, 90)}</label></div></div>`,
+    onSubmit: data => {
+      const notify = { ...(p.notify || {}), enabled: !!data.enabled, position: data.position, sound: data.sound };
+      for (const k of ['duration', 'scale', 'max_queue', 'volume', 'history_max', 'history_days']) notify[k] = Number(data[k]);
+      return tplSave({ notify });
+    },
+  });
+}
+
+// one command for a running Linux (Debian, Ubuntu, Raspberry Pi OS, Alpine): needs the enrollment token (admin)
+async function oneCommandDialog(template = '') {
+  const [s] = await Promise.all([api('/api/settings'), loadTemplates()]);
+  const command = (tpl, fleet, wget) => `${wget ? `wget -qO- ${location.origin}/api/bootstrap/caracal-install.sh | sh -s --` : `curl -fsSL ${location.origin}/api/bootstrap/caracal-install.sh | sudo sh -s --`} --hub ${location.origin} --token ${s.enroll_token}${tpl ? ` --template ${tpl}` : ''}${fleet ? ' --via-fleet' : ''}`;
+  modal({
+    title: t('oneCommand'), wide: true,
+    body: `<div class="form"><p class="muted">${t('oneCommandHint')}</p>${templatePick(template)}
+      <label class="check"><input type="checkbox" name="via_fleet">${t('viaFleet')}</label>
+      <h3>Debian · Ubuntu · Raspberry Pi OS</h3><pre class="code" id="ocCurl"></pre><div class="form-actions start"><button type="button" class="btn sm" data-copy="ocCurl">${icon('copy')}${t('copy')}</button></div>
+      <h3>Alpine Linux <small class="muted">(root)</small></h3><pre class="code" id="ocWget"></pre><div class="form-actions start"><button type="button" class="btn sm" data-copy="ocWget">${icon('copy')}${t('copy')}</button></div>
+      <div class="note info">${t('oneCommandToken')}</div></div>`,
+    onOpen: form => {
+      const sync = () => { $('#ocCurl', form).textContent = command(form.template.value, form.via_fleet.checked, false); $('#ocWget', form).textContent = command(form.template.value, form.via_fleet.checked, true); };
+      form.template.onchange = form.via_fleet.onchange = sync;
+      $$('[data-copy]', form).forEach(b => { b.onclick = () => navigator.clipboard.writeText($('#' + b.dataset.copy, form).textContent).then(() => toast(t('copied'))); });
+      sync();
     },
   });
 }
@@ -2899,7 +3070,7 @@ function copyDialog(sourceId, opts = {}) {
 }
 
 async function provisionDialog(host = '', name = '', mode = 'node') {
-  const img = await api('/api/node-image').catch(() => ({ image: '', versions: [] }));
+  const [img] = await Promise.all([api('/api/node-image').catch(() => ({ image: '', versions: [] })), loadTemplates()]);
   modal({
     title: t('addDevice'), submit: t('install'), wide: true,
     body: `<div class="form">
@@ -2912,6 +3083,7 @@ async function provisionDialog(host = '', name = '', mode = 'node') {
       <details><summary>${t('sshKeyAuth')}</summary><label>${t('privateKey')}<textarea name="private_key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label><label>${t('passphrase')}<input name="passphrase" type="password"></label></details>
       <label>${t('deviceName')}<input name="name" value="${esc(name)}"></label>
       <div class="row2"><label>${t('group')}<input name="group" list="dlGroups"></label><label>${t('location')}<input name="location" list="dlLocations"></label></div>${orgDatalists()}
+      ${templatePick()}
       <label>${t('hubUrl')}<input name="hub_url" value="${esc(location.origin)}" required></label>
       <label class="check agent-only"><input type="checkbox" name="reenroll">${t('reenroll')}</label>
       <label class="check"><input type="checkbox" name="via_fleet">${t('viaFleet')}</label>
@@ -3061,7 +3233,87 @@ const ACTIONS_UI = {
   convertNodes(b) { convertDialog(b.dataset.id ? { targets: [b.dataset.id] } : {}); },
   imageRefresh() { api('/api/node-image?refresh=true').then(img => { S.image = img; render(); toast(t('refresh')); }).catch(err => toast(errText(err), 'err')); },
   discover() { discoverDialog(); },
-  sdCard() { sdCardDialog(); },
+  sdCard(b) { sdCardDialog(b.dataset.template || ''); },
+  oneCommand(b) { oneCommandDialog(b.dataset.template || ''); },
+  templateNew() {
+    modal({
+      title: t('templateNew'),
+      body: `<div class="form"><p class="muted">${t('templatesHint')}</p><label>${t('name')}<input name="name" required></label><label>${t('description')}<textarea name="description" rows="2"></textarea></label></div>`,
+      onSubmit: async data => { const r = await api('/api/templates', { method: 'POST', json: data }); location.hash = '#/templates/' + r.id; },
+    });
+  },
+  templateFromDevice(b) {
+    const here = b.dataset.id || (S.route.view === 'device' ? S.route.id : '');
+    modal({
+      title: t('templateFromDevice'),
+      body: `<div class="form"><p class="muted">${t('templateFromDeviceHint')}</p><label>${t('sourceDevice')}<select name="device_id" required><option value="">—</option>${S.devices.map(d => `<option value="${esc(d.id)}" ${d.id === here ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>
+        <label>${t('name')}<input name="name"></label><label class="check"><input type="checkbox" name="playlist" checked>${t('templateWithPlaylist')}</label></div>`,
+      onSubmit: async data => {
+        const r = await api('/api/templates/from-device', { method: 'POST', json: { ...data, playlist: !!data.playlist } });
+        if (r.skipped.length) toast(t('copySkipped', { list: r.skipped.join(', ') }), 'warn');
+        if (r.image_missing) toast(t('templateImageMissing'), 'warn');
+        location.hash = '#/templates/' + r.id;
+      },
+    });
+  },
+  templateEdit() {
+    const p = S.template;
+    modal({
+      title: t('edit'),
+      body: `<div class="form"><label>${t('name')}<input name="name" value="${esc(p.name)}" required></label><label>${t('description')}<textarea name="description" rows="2">${esc(p.description)}</textarea></label></div>`,
+      onSubmit: data => tplSave(data),
+    });
+  },
+  async templateDelete() {
+    if (!await confirmBox(t('confirmDeleteItem', { name: esc(S.template.name) }))) return;
+    await api('/api/templates/' + S.template.id, { method: 'DELETE' });
+    toast(t('deleted'));
+    location.hash = '#/templates';
+  },
+  templateApply() { templateApplyDialog(S.template); },
+  async templateApplyTo(b) {
+    const rows = await loadTemplates();
+    if (!rows.length) { toast(t('noTemplates'), 'warn'); location.hash = '#/templates'; return; }
+    const ids = targetIds(b);
+    modal({
+      title: t('templateApply'), submit: t('nextStep'),
+      body: `<div class="form"><label>${t('nodeTemplate')}<select name="template" required>${rows.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label></div>`,
+      onSubmit: data => { setTimeout(() => templateApplyDialog(rows.find(p => String(p.id) === data.template), ids), 50); },
+    });
+  },
+  async templatePlaylist() {
+    const p = S.template, lists = await api('/api/global-playlists');
+    modal({
+      title: t('playlist'),
+      body: `<div class="form"><p class="muted">${t('tplPlaylistHint')}</p><label>${t('globalPlaylist')}<select name="playlist_id"><option value="">${t('tplKeep')}</option>${lists.map(x => `<option value="${x.id}" ${x.id === p.playlist_id ? 'selected' : ''}>${esc(x.name)} (${x.items})</option>`).join('')}</select></label>
+        <div class="radios"><label class="check"><input type="radio" name="playlist_mode" value="replace" ${p.playlist_mode !== 'append' ? 'checked' : ''}>${t('mode_replace')}</label>
+        <label class="check"><input type="radio" name="playlist_mode" value="append" ${p.playlist_mode === 'append' ? 'checked' : ''}>${t('mode_append')}</label></div>
+        ${lists.length ? '' : `<div class="note">${t('noGlobalPlaylists')} <a href="#/global">${t('nav_global')}</a></div>`}</div>`,
+      onSubmit: data => tplSave({ playlist_id: data.playlist_id ? Number(data.playlist_id) : null, playlist_mode: data.playlist_mode }),
+    });
+  },
+  templateNotify() { templateNotifyDialog(S.template); },
+  templateLook() { templateLookDialog(S.template); },
+  templateOverlay() {
+    const o = { enabled: true, size: 16, ...(S.template.overlay || {}) };
+    modal({
+      title: t('overlayBar'),
+      body: `<div class="form"><p class="muted">${t('overlayHint')}</p><label class="check"><input type="checkbox" name="keep" ${S.template.overlay ? '' : 'checked'}>${t('tplKeep')}</label>
+        <label class="check"><input type="checkbox" name="enabled" ${o.enabled ? 'checked' : ''}>${t('overlayEnabled')}</label>
+        <label>${t('overlaySize')}<input name="size" type="number" min="4" max="200" value="${esc(o.size)}" required></label></div>`,
+      onSubmit: data => tplSave({ overlay: data.keep ? null : { enabled: !!data.enabled, size: Number(data.size) } }),
+    });
+  },
+  templateOrg() {
+    const p = S.template;
+    modal({
+      title: t('groupAndLocation'),
+      body: `<div class="form"><p class="muted">${t('tplOrgHint')}</p><div class="row2"><label>${t('group')}<input name="group" list="dlGroups" value="${esc(p.group || '')}"></label>
+        <label>${t('location')}<input name="location" list="dlLocations" value="${esc(p.location || '')}"></label></div>${orgDatalists()}</div>`,
+      onSubmit: data => tplSave({ group: data.group.trim(), location: data.location.trim() }),
+    });
+  },
+  templateClear(b) { tplSave({ [b.dataset.part]: null }); },
   installHost(b) { provisionDialog(b.dataset.host, '', 'node'); },
   async releaseDelete(b) {
     if (!await confirmBox(t('confirmDeleteItem', { name: esc(b.dataset.name) }))) return;

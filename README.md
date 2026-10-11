@@ -3,6 +3,9 @@
 Central management for [CARACAL](https://github.com/Gelluithor/Caracal) digital signage screens, self-hosted
 with one `docker compose up`.
 
+![CARACAL Fleet: overview, devices, a node with its live screen, the notification look editor, node templates and a
+zero-touch USB stick](docs/fleet.gif)
+
 - **Monitoring:** online state, CPU, RAM, disk, temperature and what each screen is playing right now, plus
   a *Needs attention* list with the reason for each issue; metric graphs and availability for 24 hours or 7 days and a
   timeline of outages, problems and commands per device
@@ -18,8 +21,13 @@ with one `docker compose up`.
   lets other apps reach many screens with one request
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations
-- **Zero-touch installation:** prepare an SD card in Fleet, or find a fresh Raspberry Pi in the network and
-  install it over SSH; every installation can create the administrator of the node's own web administration
+- **Zero-touch installation:** prepare an SD card for a Raspberry Pi or a USB stick for a PC (Alpine Linux fully
+  hands-off, Ubuntu Server autoinstall), install any running Debian, Ubuntu or Alpine with one command, or find a
+  fresh Raspberry Pi in the network and install it over SSH; every installation can create the administrator of the
+  node's own web administration
+- **Node templates:** the playlist, notification settings and look (with picture), the countdown bar, group and
+  location defined once; applied to existing nodes or baked into a zero-touch card, USB stick or installation, so a
+  new node is set up as soon as it connects
 - **Everything the node's web administration does:** besides content and notifications also its administrator
   (create, new name and password), the countdown bar on the TV, the notification queue, history and audit log, the
   node's own app tokens, trying a watcher or a Grafana tag before saving
@@ -69,8 +77,9 @@ Data live in the volume `hub-data` (`hub.db`, `config.json`, logo, media). Updat
 
 ## Adding screens
 
-A screen is a Raspberry Pi 4/5 (or a PC) with a display. Fleet turns it into a CARACAL node: Docker, the X display,
-the CARACAL containers and the Fleet Agent.
+A screen is a Raspberry Pi 4/5 or a PC (x86_64, arm64) with a display. Fleet turns it into a CARACAL node: Docker,
+the X display, the CARACAL containers and the Fleet Agent. Supported systems: Raspberry Pi OS, DietPi, Debian,
+Ubuntu (apt and systemd) and Alpine Linux (apk and OpenRC; the display runs on vt7, the console stays on tty1).
 
 1. **SD card (zero-touch):** *Add device → Prepare SD card* (admin). Write Raspberry Pi OS Lite (64-bit) with
    Raspberry Pi Imager, or DietPi, copy the downloaded files to the boot partition and power the device on.
@@ -78,10 +87,23 @@ the CARACAL containers and the Fleet Agent.
    (with gateway and DNS), a time server, the time zone, Docker's address range (instead of 172.17.0.0/16), the
    download source (internet or Fleet) and an optional maintenance login are set in the same dialog. The enrollment token on the card is removed on the
    first boot; if a card is lost before that, rotate the token in *Settings*.
-2. **Network discovery + SSH:** *Add device → Find devices in the network* lists devices with SSH and
+2. **USB stick for a PC (zero-touch):** the same dialog, *PC*:
+   - **Alpine Linux** (recommended for single-purpose devices): Fleet makes `caracal.apkovl.tar.gz`, an overlay the
+     live system of the official Alpine ISO (Standard or Extended) loads from the root of the stick (written with
+     Rufus in ISO mode) or of a second FAT32 stick. Alpine sets up the wired network, installs itself on the largest
+     internal disk (or the one set in the dialog; the disk is **erased**), reboots and installs CARACAL. The screen
+     shows the progress. If the PC boots from the stick again, it finds CARACAL installed and powers off.
+     Wi-Fi is not supported for this installation.
+   - **Ubuntu Server 24.04+**: `user-data` and `meta-data` of the autoinstall for a second stick named `CIDATA`.
+     The installer asks *Continue with autoinstall?* once (answer `yes`), erases the largest disk and installs
+     Ubuntu; its first boot installs CARACAL.
+3. **One command** on a running Debian, Ubuntu, Raspberry Pi OS, DietPi or Alpine (*Settings → Installation* or a
+   template, admin): `curl -fsSL https://HUB/api/bootstrap/caracal-install.sh | sudo sh -s -- --hub https://HUB
+   --token TOKEN [--template ID] [--via-fleet]` (on Alpine `wget -qO- … | sh -s -- …` as root).
+4. **Network discovery + SSH:** *Add device → Find devices in the network* lists devices with SSH and
    recognises Raspberry Pi OS and DietPi. *Install* connects over SSH (credentials are not stored) and runs
    `hub/bootstrap/install-node.sh`.
-3. **Existing CARACAL installation:** *Add device → Fleet Agent only* connects a running classic node without
+5. **Existing CARACAL installation:** *Add device → Fleet Agent only* connects a running classic node without
    touching it. *Convert to Docker* then moves it to containers; the data in `/var/lib/caracal` are kept.
 
 Every way of installing can also set the **administrator of the node's web administration** (CARACAL's own UI on
@@ -92,8 +114,22 @@ goes to the node only: in a root-only file for the installers (never on a comman
 command as soon as the agent fetched it, never in the history or the audit. On the SD card it is in
 `caracal-firstboot.conf`, which the first boot removes from the card like the enrollment token.
 
-Diagnostics on a node: `sudo python3 /opt/caracal-agent/agent.py check`, `journalctl -u caracal-agent -f`,
-`/var/log/caracal-firstboot.log` (SD card installation).
+Diagnostics on a node: `sudo python3 /opt/caracal-agent/agent.py check`, `journalctl -u caracal-agent -f`
+(Alpine: `/var/log/caracal-agent.log`), `/var/log/caracal-firstboot.log` (zero-touch and one-command installation).
+
+### Node templates
+
+*Node templates* hold any of these parts: a global playlist (replace or append), the notification settings and their
+look with a picture, the countdown bar, and the group and location in Fleet. A part that is not set is left alone on
+the node. *Template from a device* copies them from a node (its web pages and Grafana collections can become a new
+global playlist).
+
+- **Existing nodes:** *Apply template* on the template, or *Manage → Apply template* on a device or a selection. The
+  parts are queued as normal commands (offline nodes get them when they connect); a part the node does not support
+  yet (older agent or CARACAL) is skipped and reported.
+- **New nodes:** choose the template on the zero-touch card or USB stick, in the one-command installation or the SSH
+  installation. The node sends it with its enrollment and the hub applies it once the node reports what it supports.
+  The template's page lists where it was applied.
 
 ## Nodes without internet access (Fleet as the download source)
 
@@ -163,8 +199,8 @@ Harbor…) anonymously, so the image must be public or reachable without credent
 |---|---|
 | viewer | read: state, content, command history |
 | operator | + playback control, player and node restart, playlists, media, collections, website logins, copying |
-| manager | + devices, groups, locations, installation and updates, audit |
-| admin | + users, system settings, enrollment token, SD cards, backup |
+| manager | + devices, groups, locations, node templates, installation and updates, audit |
+| admin | + users, system settings, enrollment token, SD cards and USB sticks, one-command installation, backup |
 
 ## How commands work
 
@@ -204,7 +240,7 @@ the nodes (through agent and CARACAL updates), so protect admin and manager acco
 
 ```
 hub/app/            FastAPI hub (API + web UI in hub/app/static, no build step)
-hub/bootstrap/      Fleet Agent and installers served to the nodes (agent, node, SD card first boot)
+hub/bootstrap/      Fleet Agent and installers served to the nodes (agent, node, first boot, Alpine, one command)
 deploy/             Caddyfile for the https profile
 dev/                mock CARACAL node and a local demo
 docs/LOCAL-API.md   contract of the local CARACAL API used by the agent

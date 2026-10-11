@@ -1,4 +1,5 @@
-"""Zero-touch SD cards: files for the boot partition of a freshly written Raspberry Pi OS Lite or DietPi card.
+"""Zero-touch SD cards and USB sticks: files for a freshly written Raspberry Pi OS Lite or DietPi card, or for
+installing a PC with Alpine Linux or Ubuntu Server.
 
 On the first boot the card connects to the network, downloads the installer from the hub and turns the device
 into a CARACAL node on Docker that enrolls itself (hub/bootstrap/caracal-firstboot.sh). The enrollment token is
@@ -7,7 +8,15 @@ rotating the token in Settings.
 
 Raspberry Pi OS (Trixie and newer) is configured with cloud-init (user-data, network-config), DietPi with its own
 dietpi.txt (patched copy of the one from the card), dietpi-wifi.txt and Automation_Custom_Script.sh.
+
+PCs (x86_64, arm64):
+- Alpine Linux: caracal.apkovl.tar.gz, an overlay the live system of the Alpine ISO loads from a USB stick; it
+  installs Alpine on the internal disk and then CARACAL (hub/bootstrap/caracal-alpine.sh).
+- Ubuntu Server: user-data and meta-data of the autoinstall for a USB stick named CIDATA; the installed system runs
+  caracal-firstboot.sh through cloud-init.
+A node template (hub/app/templates.py) chosen for the card is applied by the hub once the new node reports.
 """
+import base64
 import io
 import ipaddress
 import json
@@ -15,13 +24,14 @@ import os
 import re
 import secrets
 import shlex
+import tarfile
 import time
 import zipfile
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 
-from . import images
+from . import images, templates
 from .core import ADMIN_USER_RE, BOOT, audit, cfg, current_user, save_cfg
 
 router = APIRouter()
@@ -34,7 +44,9 @@ COUNTRY_RE = re.compile(r'^[A-Z]{2}$')
 SSH_KEY_RE = re.compile(r'^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-[a-z0-9@.-]+) [A-Za-z0-9+/=]{16,}( [^\r\n]{0,200})?$')
 RESERVED_USERS = {'root', 'caracal', 'daemon', 'nobody'}
 DIETPI_TXT_MAX = 256 * 1024
-OS_NAMES = ('raspios', 'dietpi')
+OS_NAMES = ('raspios', 'dietpi', 'alpine', 'ubuntu')
+PC_OS = ('alpine', 'ubuntu')
+DISK_RE = re.compile(r'^(auto|/dev/[a-z][a-z0-9]{1,15})$')
 
 
 # ---------------------------------------------------------------- public: what the first boot installs
@@ -91,6 +103,8 @@ def _options(d):
         'dns': _clean(d.get('dns'), 200), 'ntp': _clean(d.get('ntp'), 253),
         # CARACAL's web administrator, created by the installation (otherwise whoever opens it first creates it)
         'admin_user': _clean(d.get('admin_user'), 64), 'admin_password': str(d.get('admin_password') or ''),
+        # Alpine: the disk to install on (auto = the largest internal disk)
+        'disk': _clean(d.get('disk'), 24) or 'auto',
     }
     checks = (
         (o['os'], 'invalid_os'),
@@ -112,6 +126,9 @@ def _options(d):
          'invalid_admin_user'),
         (not (o['admin_user'] or o['admin_password']) or 10 <= len(o['admin_password']) <= 200,
          'admin_password_short'),
+        (DISK_RE.match(o['disk']), 'invalid_disk'),
+        # Alpine's live system has no Wi-Fi setup here: the installation needs a network cable
+        (not (o['os'] == 'alpine' and o['wifi_ssid']), 'wifi_unsupported'),
     )
     for ok, error in checks:
         if not ok:
@@ -119,6 +136,7 @@ def _options(d):
     for key in ('wifi_password', 'password', 'admin_password'):
         if any(ord(ch) < 32 for ch in o[key]):
             raise HTTPException(400, 'invalid_' + key)
+    o['template'] = templates.template_id(d.get('template'))
     return o
 
 
@@ -172,7 +190,102 @@ def firstboot_conf(o):
             + (f'DOCKER_POOL={shlex.quote(pool)}\n' if pool else '')
             + ('DOWNLOAD_SOURCE=fleet\n' if o.get('download_source') == 'fleet' else '')
             + (f"ADMIN_USER={shlex.quote(o['admin_user'])}\nADMIN_PASSWORD={shlex.quote(o['admin_password'])}\n"
-               if o.get('admin_user') else ''))
+               if o.get('admin_user') else '')
+            + (f"TEMPLATE={o['template']}\n" if o.get('template') else ''))
+
+
+def alpine_conf(o):
+    """The settings of caracal-alpine.sh, which sets up the PC itself (Raspberry Pi OS and Ubuntu do that with
+    cloud-init, DietPi with dietpi.txt)."""
+    values = {'DISK': o['disk'], 'TIMEZONE': o['timezone'], 'LOGIN_USER': o['user'], 'LOGIN_PASSWORD': o['password'],
+              'SSH_KEY': o['ssh_key'], 'STATIC_IP': o['static_ip'], 'GATEWAY': o['gateway'],
+              'DNS': ' '.join(_dns(o['dns'])) if o['dns'] else '', 'NTP': o['ntp']}
+    return ''.join(f'{k}={shlex.quote(v)}\n' for k, v in values.items() if v)
+
+
+def _tar_add(tar, name, data=b'', mode=0o644, link=''):
+    info = tarfile.TarInfo(name)
+    info.mtime, info.uid, info.gid, info.uname, info.gname = int(time.time()), 0, 0, 'root', 'root'
+    if link:
+        info.type, info.linkname, info.mode = tarfile.SYMTYPE, link, 0o777
+        tar.addfile(info)
+    elif name.endswith('/'):
+        info.type, info.mode = tarfile.DIRTYPE, 0o755
+        tar.addfile(info)
+    else:
+        data = data.encode() if isinstance(data, str) else data
+        info.size, info.mode = len(data), mode
+        tar.addfile(info, io.BytesIO(data))
+
+
+def alpine_files(o):
+    """caracal.apkovl.tar.gz: the overlay of Alpine's live system. Without an overlay Alpine adds its default boot
+    services itself; .default_boot_services asks for them also with this one. /etc/local.d/caracal.start runs
+    caracal-alpine.sh at the end of the boot (OpenRC service "local")."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+        for d in ('etc/', 'etc/apk/', 'etc/local.d/', 'etc/runlevels/', 'etc/runlevels/default/', 'etc/caracal/'):
+            _tar_add(tar, d)
+        _tar_add(tar, 'etc/.default_boot_services')
+        _tar_add(tar, 'etc/hostname', o['prefix'] + '\n')
+        _tar_add(tar, 'etc/apk/world', 'alpine-base\n')
+        _tar_add(tar, 'etc/runlevels/default/local', link='/etc/init.d/local')
+        _tar_add(tar, 'etc/local.d/caracal.start', '#!/bin/sh\n# CARACAL zero-touch (generated by CARACAL Fleet)\n'
+                                                   'exec sh /etc/caracal/caracal-alpine.sh start\n', 0o755)
+        for name in ('caracal-alpine.sh', 'caracal-firstboot.sh'):
+            _tar_add(tar, f'etc/caracal/{name}', (BOOT / name).read_text(encoding='utf-8').replace('\r\n', '\n'), 0o755)
+        _tar_add(tar, 'etc/caracal-firstboot.conf', firstboot_conf(o) + alpine_conf(o), 0o600)
+    return {'caracal.apkovl.tar.gz': buf.getvalue()}
+
+
+def ubuntu_files(o):
+    """Ubuntu Server autoinstall (24.04 and newer) for a USB stick named CIDATA. JSON is valid YAML, so the
+    configuration is written as JSON after the #cloud-config line."""
+    script = (BOOT / 'caracal-firstboot.sh').read_text(encoding='utf-8').replace('\r\n', '\n')
+    user = {'name': o['user'], 'groups': ['adm', 'sudo', 'video', 'audio', 'input', 'plugdev'], 'shell': '/bin/bash',
+            'sudo': 'ALL=(ALL) NOPASSWD:ALL', 'lock_passwd': not o['password']}
+    if o['password']:
+        user['plain_text_passwd'] = o['password']
+    if o['ssh_key']:
+        user['ssh_authorized_keys'] = [o['ssh_key']]
+    user_data = {
+        'hostname': o['prefix'], 'users': [user], 'ssh_pwauth': bool(o['password']),
+        'write_files': [
+            {'path': '/var/lib/caracal-zero-touch/caracal-firstboot.sh', 'permissions': '0755', 'encoding': 'b64',
+             'content': base64.b64encode(script.encode()).decode()},
+            {'path': '/etc/caracal-firstboot.conf', 'permissions': '0600', 'content': firstboot_conf(o)}],
+        'runcmd': [['bash', '/var/lib/caracal-zero-touch/caracal-firstboot.sh', 'install']],
+    }
+    if o['ntp']:
+        user_data['ntp'] = {'enabled': True, 'servers': [o['ntp']]}
+    auto = {'version': 1, 'locale': 'en_US.UTF-8', 'keyboard': {'layout': 'us'},
+            'storage': {'layout': {'name': 'direct'}},   # the largest disk, ERASED
+            'ssh': {'install-server': bool(o['password'] or o['ssh_key']), 'allow-pw': bool(o['password']),
+                    'authorized-keys': [o['ssh_key']] if o['ssh_key'] else []},
+            'user-data': user_data, 'shutdown': 'reboot'}
+    if o['timezone']:
+        auto['timezone'] = o['timezone']
+    if o['static_ip'] or o['wifi_ssid']:
+        auto['network'] = ubuntu_network(o)
+    return {'user-data': '#cloud-config\n# CARACAL zero-touch node (generated by CARACAL Fleet): Ubuntu autoinstall\n'
+                         + json.dumps({'autoinstall': auto}, indent=2, ensure_ascii=False) + '\n',
+            'meta-data': f'instance-id: caracal-{secrets.token_hex(4)}\n'}
+
+
+def ubuntu_network(o):
+    """netplan for the installer and the installed system: interface names differ per PC (enp3s0, wlp2s0)."""
+    def address(static):
+        if not static:
+            return {'dhcp4': True, 'optional': True}
+        return {'dhcp4': False, 'optional': True, 'addresses': [o['static_ip']],
+                'routes': [{'to': 'default', 'via': o['gateway']}],
+                'nameservers': {'addresses': _dns(o['dns']) if o['dns'] else [o['gateway']]}}
+    static = bool(o['static_ip'])
+    net = {'version': 2, 'ethernets': {'wired': {'match': {'name': 'en*'}, **address(static and not o['wifi_ssid'])}}}
+    if o['wifi_ssid']:
+        net['wifis'] = {'wireless': {'match': {'name': 'wl*'}, **address(static), 'regulatory-domain': o['wifi_country'],
+                                     'access-points': {o['wifi_ssid']: {'password': o['wifi_password']}}}}
+    return net
 
 
 def _yaml(value):
@@ -336,6 +449,35 @@ reboots once during the installation. The node then appears in CARACAL Fleet as 
 With Wi-Fi set on the card, DietPi uses Wi-Fi only (Ethernet is disabled).
 Log on the device: /var/log/caracal-firstboot.log
 """,
+    'alpine': """CARACAL zero-touch USB stick - Alpine Linux on a PC (x86_64 or arm64)
+
+WARNING: the installation ERASES the internal disk of the PC ({disk}).
+
+1. Download Alpine Linux "Standard" or "Extended" (x86_64) from https://alpinelinux.org/downloads/
+2. Write it to a USB stick with Rufus (ISO mode, the default). The stick then stays writable (FAT32).
+   With balenaEtcher or dd the stick is read-only: put caracal.apkovl.tar.gz on a second USB stick (FAT32) instead.
+3. Copy caracal.apkovl.tar.gz to the root of the stick (next to the "boot" and "apks" folders).
+4. Connect the PC to the network with a cable, plug in the stick(s) and the screen, boot from the stick.
+
+Alpine starts, finds the overlay and installs itself on the disk ({minutes_alpine}), reboots, then installs Docker,
+the display and CARACAL ({minutes_caracal}). The progress is shown on the screen. If the PC boots from the stick
+again, it finds CARACAL already installed and powers off: remove the stick and power it on.
+The node then appears in CARACAL Fleet as "{prefix}-xxxxxx". Log on the device: /var/log/caracal-firstboot.log
+""",
+    'ubuntu': """CARACAL zero-touch USB stick - Ubuntu Server on a PC (24.04 LTS or newer)
+
+WARNING: the installation ERASES the largest disk of the PC.
+
+1. Write Ubuntu Server (live server ISO) to a USB stick (balenaEtcher, Rufus or dd).
+2. Format a second USB stick as FAT32 with the name CIDATA and copy user-data and meta-data to it.
+3. Connect the PC to the network, plug in both sticks and the screen, boot from the Ubuntu stick.
+4. The installer finds the configuration and asks "Continue with autoinstall?": type yes and press Enter.
+   (No question with "autoinstall" added to the kernel command line in the boot menu.)
+
+Ubuntu installs itself and reboots (remove the sticks then if the PC would boot from them again). The first boot
+installs Docker, the display and CARACAL (10-20 minutes). The node then appears in CARACAL Fleet as
+"{prefix}-xxxxxx". Log on the device: /var/log/caracal-firstboot.log
+""",
 }
 
 
@@ -362,11 +504,17 @@ async def sd_card(r: Request):
         if not dietpi_txt or len(dietpi_txt) > DIETPI_TXT_MAX:
             raise HTTPException(400, 'invalid_dietpi_txt')
         files = dietpi_files(o, dietpi_txt)
+    elif o['os'] == 'alpine':
+        files = alpine_files(o)
+    elif o['os'] == 'ubuntu':
+        files = ubuntu_files(o)
     else:
         files = raspios_files(o)
-    files['caracal-firstboot.sh'] = (BOOT / 'caracal-firstboot.sh').read_text(encoding='utf-8')
-    files['caracal-firstboot.conf'] = firstboot_conf(o)
-    readme = README[o['os']].format(prefix=o['prefix'])
+    if o['os'] not in PC_OS:   # Raspberry Pi: the script and its settings on the boot partition
+        files['caracal-firstboot.sh'] = (BOOT / 'caracal-firstboot.sh').read_text(encoding='utf-8')
+        files['caracal-firstboot.conf'] = firstboot_conf(o)
+    readme = README[o['os']].format(prefix=o['prefix'], disk='the largest internal disk' if o['disk'] == 'auto'
+                                    else o['disk'], minutes_alpine='5-10 minutes', minutes_caracal='10-20 minutes')
     if o['download_source'] == 'fleet':
         readme = readme.replace('internet access needed', 'only access to the hub needed') + FLEET_NOTE
     files['CARACAL-README.txt'] = readme
@@ -377,9 +525,9 @@ async def sd_card(r: Request):
             info = zipfile.ZipInfo(name, time.localtime()[:6])
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = (0o755 if name.endswith('.sh') else 0o644) << 16
-            z.writestr(info, content.replace('\r\n', '\n'))
+            z.writestr(info, content if isinstance(content, bytes) else content.replace('\r\n', '\n'))
     audit(u, 'sdcard.create', o['os'], {'hub_url': o['hub_url'], 'prefix': o['prefix'], 'wifi': bool(o['wifi_ssid']),
                                         'docker_pool': o['docker_pool'], 'download_source': o['download_source'],
-                                        'static_ip': o['static_ip'], 'ntp': o['ntp']})
+                                        'static_ip': o['static_ip'], 'ntp': o['ntp'], 'template': o['template']})
     return Response(buf.getvalue(), media_type='application/zip', headers={
         'Content-Disposition': f'attachment; filename="caracal-sdcard-{o["os"]}.zip"'})

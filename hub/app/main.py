@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import console, images, monitor, notify, playlists, provisioning, proxy, releases, sdcard, system
+from . import console, images, monitor, notify, playlists, provisioning, proxy, releases, sdcard, system, templates
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -40,6 +40,7 @@ app.include_router(console.router)      # SSH web console (WebSocket)
 app.include_router(notify.router)       # notification API for other apps and its tokens
 app.include_router(proxy.router)        # Fleet as the download source of nodes without internet access
 app.include_router(monitor.router)      # metric history, events and alerts for administrators
+app.include_router(templates.router)    # node templates
 
 
 SECURITY_HEADERS = {
@@ -1068,6 +1069,7 @@ async def provision(r: Request):
     params['via_fleet'] = bool(d.get('via_fleet'))
     params['password'] = str(d.get('password') or '')  # keep exact password (no trimming)
     params['mode'] = 'node' if d.get('mode') == 'node' else 'agent'
+    params['template'] = templates.template_id(d.get('template'))   # applied once the node reports
     # optional: CARACAL's web administrator (created, or its password set on an existing node); kept in memory only
     params['admin'] = validate_admin({'username': d.get('admin_username'), 'password': d.get('admin_password')}) \
         if d.get('admin_username') or d.get('admin_password') else None
@@ -1126,7 +1128,8 @@ def get_job(jid: int, r: Request):
 
 @app.get('/api/bootstrap/{name}', response_class=PlainTextResponse)
 def bootstrap_file(name: str):
-    if name not in provisioning.AGENT_FILES + provisioning.NODE_FILES + ('caracal-firstboot.sh',):
+    if name not in provisioning.AGENT_FILES + provisioning.NODE_FILES + ('caracal-firstboot.sh', 'caracal-alpine.sh',
+                                                                         'caracal-install.sh'):
         raise HTTPException(404, 'not_found')
     return (BOOT / name).read_text(encoding='utf-8')
 
@@ -1142,6 +1145,12 @@ async def enroll(r: Request):
     did = 'CRCL-' + hashlib.sha256(fingerprint.encode()).hexdigest()[:8].upper()
     existing_token = str(d.get('device_token') or '')
     name = text(d.get('name'), 120) or did
+    # the node template chosen for the installation (zero-touch card, one-command installation); an unknown one
+    # (deleted meanwhile) does not stop the enrollment
+    try:
+        template = templates.template_id(d.get('template'))
+    except HTTPException:
+        template = None
     now = time.time()
     with db() as c:
         row = c.execute('SELECT * FROM devices WHERE id=?', (did,)).fetchone()
@@ -1160,7 +1169,10 @@ async def enroll(r: Request):
         else:
             c.execute('INSERT INTO devices(id, token_hash, name, ip, version, last_seen, status_json, created) '
                       'VALUES(?,?,?,?,?,?,?,?)', (did, token_hash(tok), name, '', '', now, '{}', now))
-    audit(None, 'device.enroll', did, {'name': name, 'new': not row, 'token_kept': tok == existing_token})
+        if template:
+            c.execute('UPDATE devices SET pending_template=? WHERE id=?', (template, did))
+    audit(None, 'device.enroll', did, {'name': name, 'new': not row, 'token_kept': tok == existing_token,
+                                       **({'template': template} if template else {})})
     return {'device_id': did, 'device_token': tok}
 
 
@@ -1184,6 +1196,7 @@ async def heartbeat(did: str, r: Request):
                   (text(d.get('ip'), 64) or _client_ip(r), text(d.get('version'), 32), time.time(),
                    json.dumps(d, ensure_ascii=False), did))
         monitor.record_metrics(c, did, d)
+        templates.apply_pending(c, did)
     return {'ok': True, 'agent_version': AGENT_VERSION, 'server_time': time.time()}
 
 

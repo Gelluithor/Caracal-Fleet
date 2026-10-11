@@ -179,6 +179,8 @@ def _provision(job_id, p, user):
         device_id = _device_from_log(job_id)
         if device_id:
             with db() as c:
+                if p.get('template'):   # the node template, applied after the node's next report
+                    c.execute('UPDATE devices SET pending_template=? WHERE id=?', (p['template'], device_id))
                 if p.get('group') or p.get('location'):
                     c.execute("UPDATE devices SET device_group=COALESCE(NULLIF(?, ''), device_group), "
                               "location=COALESCE(NULLIF(?, ''), location) WHERE id=?",

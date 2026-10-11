@@ -33,7 +33,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.11.0'
+VERSION = '4.12.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -52,7 +52,11 @@ INSTALL_TIMEOUT = 3000   # apt + pip on a Raspberry Pi can take a while
 APT_DIR = Path(os.getenv('CARACAL_APT_DIR', '/etc/apt'))
 APT_HOSTS = ('deb.debian.org', 'security.debian.org', 'ftp.debian.org', 'archive.raspberrypi.com',
              'archive.raspberrypi.org', 'raspbian.raspberrypi.com', 'raspbian.raspberrypi.org', 'download.docker.com',
-             'dietpi.com')
+             'dietpi.com', 'archive.ubuntu.com', 'security.ubuntu.com', 'ports.ubuntu.com')
+# Alpine Linux: /etc/apk/repositories points to <hub>/apt/<host>/... with the credentials in the address (apk has no
+# separate credentials file; the file is then readable by root only)
+APK_REPOSITORIES = Path(os.getenv('CARACAL_APK_REPOSITORIES', '/etc/apk/repositories'))
+APK_HOSTS = ('dl-cdn.alpinelinux.org',)
 
 DEFAULTS = {
     'local_api': 'http://127.0.0.1:8080',
@@ -415,7 +419,7 @@ class Agent:
             'capabilities': self.capabilities() if api_ok else {},
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
             'caracal_image': read_env().get('CARACAL_IMAGE', '') if is_docker() else '',
-            'download_source': self.download_source(), 'arch': machine_arch(),
+            'download_source': self.download_source(), 'arch': machine_arch(), 'os': os_name(),
         }
         r = self.hub('POST', '/heartbeat', json=data)
         try:   # a device without a time source (no internet, no clock battery) follows the hub's clock
@@ -529,7 +533,7 @@ class Agent:
         return f'{service} restarted'
 
     def do_reboot(self, p):
-        self.after = lambda: subprocess.Popen(['systemctl', 'reboot'])
+        self.after = reboot
         return 'reboot scheduled'
 
     # content ------------------------------------------------------
@@ -909,6 +913,11 @@ class Agent:
         old_compose = compose_file.read_text() if compose_file.is_file() else None
         new_compose = self.hub_compose()
         env.setdefault('CARACAL_AUDIO_GID', group_id('audio') or '29')
+        if env.get('CARACAL_RENDER_GID') and env.get('CARACAL_RENDER_GID') == env.get('CARACAL_VIDEO_GID'):
+            # Docker Compose 5 refuses the same group twice in group_add: a "render" group of its own
+            render = group_id('render') or create_group('render')
+            if render and render != env['CARACAL_VIDEO_GID']:
+                env['CARACAL_RENDER_GID'] = render
 
         def restore():
             write_env(previous)
@@ -1046,7 +1055,7 @@ class Agent:
             code, out = self.run_with_heartbeats(cmd, cwd=work)
             write_key_file(self.conf['device_token'])
             if code == 5:   # the graphics driver was enabled (e.g. DietPi); nothing was converted yet
-                self.after = lambda: subprocess.Popen(['systemctl', 'reboot'])
+                self.after = reboot
                 raise RuntimeError('The graphics driver was enabled and the node reboots now. Run "Convert to Docker" '
                                    f'again when it is back online.\n{out[-3000:]}')
             if code != 0:
@@ -1193,7 +1202,7 @@ class Agent:
                     next_hb = time.time() + self.conf['heartbeat_interval']
                 if self.reboot_pending:
                     self.reboot_pending = False
-                    subprocess.Popen(['systemctl', 'reboot'])
+                    reboot()
                 if self.run_commands():
                     next_hb = 0  # report the new state immediately after changes
             except requests.exceptions.SSLError as e:
@@ -1301,7 +1310,37 @@ def apt_use(hub=None, user='', password=''):
         tmp.replace(auth)
     else:
         auth.unlink(missing_ok=True)
+    if APK_REPOSITORIES.is_file():
+        old = APK_REPOSITORIES.read_text()
+        new = apk_rewrite(old, hub, user, password)
+        if new != old:
+            write_text_file(APK_REPOSITORIES, new)
+            changed.append(APK_REPOSITORIES.name)
+        os.chmod(APK_REPOSITORIES, 0o600 if hub else 0o644)
     return changed
+
+
+def apk_rewrite(text, hub=None, user='', password=''):
+    """Alpine repositories through the hub (https://user:password@hub/apt/<host>/...) or, with hub=None, directly."""
+    from urllib.parse import quote
+    hosts = '|'.join(re.escape(h) for h in APK_HOSTS)
+    text = re.sub(rf'https?://[^\s/]+(?:/[^\s]*?)?/apt/({hosts})(?=[/\s]|$)', r'https://\1', text)
+    if hub:
+        scheme, _, rest = hub.partition('://')
+        base = f'{scheme}://{quote(user, safe="")}:{quote(password, safe="")}@{rest}'
+        text = re.sub(rf'https?://({hosts})(?=[/\s]|$)', lambda m: f'{base}/apt/{m.group(1)}', text)
+    return text
+
+
+def create_group(name):
+    """Create a system group (shadow's groupadd or BusyBox's addgroup); its id as text, None on failure."""
+    cmd = ['groupadd', '-r', name] if shutil.which('groupadd') else ['addgroup', '-S', name]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        log('group', name, 'not created:', e)
+        return None
+    return group_id(name)
 
 
 def group_id(name):
@@ -1335,6 +1374,34 @@ def caracal_version():
         return (CARACAL_DIR / 'VERSION').read_text().strip()[:40]
     except OSError:
         return ''
+
+
+def has_systemd():
+    return os.path.isdir('/run/systemd/system') and bool(shutil.which('systemctl'))
+
+
+def reboot():
+    """Reboot the device: systemd, or OpenRC / BusyBox (Alpine Linux)."""
+    subprocess.Popen(['systemctl', 'reboot'] if has_systemd() else ['reboot'])
+
+
+def restart_agent_service():
+    """Restart a running agent service (it reads its configuration at start)."""
+    cmd = ['systemctl', 'try-restart', 'caracal-agent.service'] if has_systemd() else \
+        ['rc-service', '--ifstarted', 'caracal-agent', 'restart'] if shutil.which('rc-service') else None
+    if cmd:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def os_name():
+    """Name of the operating system (PRETTY_NAME of /etc/os-release), e.g. "Alpine Linux v3.22"."""
+    try:
+        for line in Path('/etc/os-release').read_text().splitlines():
+            if line.startswith('PRETTY_NAME='):
+                return line.split('=', 1)[1].strip().strip('"\'')[:80]
+    except OSError:
+        pass
+    return ''
 
 
 def systemd_active(name):
@@ -1446,7 +1513,8 @@ def write_key_file(token):
         os.chmod(path, mode)
 
 
-def enroll(hub, token, name, reenroll=False, local_api=None):
+def enroll(hub, token, name, reenroll=False, local_api=None, template=''):
+    """template: id of a node template in the hub, applied once the node reports (hubs from 4.14)."""
     hub = hub.rstrip('/')
     conf = read_json(CONFIG, {})
     keep = bool(conf.get('device_id') and conf.get('device_token')) and \
@@ -1454,18 +1522,21 @@ def enroll(hub, token, name, reenroll=False, local_api=None):
     if keep and enrollment_valid({**conf, 'hub': hub}) is False:
         log('stored device token was rejected by the hub, enrolling again')
         keep = False
-    if keep:
+    if keep and not (template and token):
         log('existing enrollment kept:', conf['device_id'])
     else:
+        # with a template an enrolled device enrolls again: the hub keeps its token and remembers the template
         if not token:
             raise SystemExit('Enrollment token is required for a new enrollment')
-        r = requests.post(hub + '/api/device/enroll', timeout=30, json={
-            'enroll_token': token, 'fingerprint': fingerprint(), 'name': name or socket.gethostname(),
-            'device_token': conf.get('device_token')})
+        body = {'enroll_token': token, 'fingerprint': fingerprint(), 'name': name or socket.gethostname(),
+                'device_token': conf.get('device_token')}
+        if template:
+            body['template'] = template
+        r = requests.post(hub + '/api/device/enroll', timeout=30, json=body)
         r.raise_for_status()
         x = r.json()
         conf.update(hub=hub, device_id=x['device_id'], device_token=x['device_token'])
-        log('enrolled as', x['device_id'])
+        log('enrolled as', x['device_id'], f'(template {template})' if template else '')
     if local_api:
         conf['local_api'] = local_api
     write_json(CONFIG, conf, 0o600)
@@ -1528,6 +1599,7 @@ def main(argv=None):
     e.add_argument('--name', default='')
     e.add_argument('--reenroll', action='store_true')
     e.add_argument('--local-api', default='')
+    e.add_argument('--template', default='', help='node template of the hub applied to this node')
     ds = sub.add_parser('download-source', help='where CARACAL and system packages are downloaded from')
     ds.add_argument('source', choices=('internet', 'fleet'))
     sub.add_parser('run')
@@ -1538,15 +1610,14 @@ def main(argv=None):
     sub.add_parser('version')
     a = ap.parse_args(argv)
     if a.cmd == 'enroll':
-        enroll(a.hub, a.token, a.name, a.reenroll, a.local_api or None)
+        enroll(a.hub, a.token, a.name, a.reenroll, a.local_api or None, a.template)
     elif a.cmd == 'download-source':
         conf = read_json(CONFIG, None)
         if not conf:
             raise SystemExit(f'{CONFIG} missing - run "agent.py enroll" first')
         print(Agent(conf).do_set_download_source({'source': a.source}))
         # a running agent reads its configuration at start
-        subprocess.run(['systemctl', 'try-restart', 'caracal-agent.service'], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+        restart_agent_service()
     elif a.cmd == 'set-admin':
         return set_admin_from_file(a.file, a.wait)
     elif a.cmd == 'check':

@@ -1,10 +1,15 @@
 #!/bin/bash
-# Turns a Raspberry Pi (Raspberry Pi OS Lite / DietPi, arm64) or a Debian/Ubuntu PC into a CARACAL node
-# running on Docker, and connects it to CARACAL Fleet.
+# Turns a Raspberry Pi (Raspberry Pi OS Lite / DietPi, arm64) or a PC with Debian, Ubuntu or Alpine Linux (x86_64,
+# arm64) into a CARACAL node running on Docker, and connects it to CARACAL Fleet.
 #
 #   sudo bash install-node.sh --hub https://fleet.example --token ENROLL_TOKEN \
 #        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME] [--docker-pool 10.200.0.0/16] \
-#        [--via-fleet [--fleet-auth-file FILE]] [--admin-file FILE]
+#        [--via-fleet [--fleet-auth-file FILE]] [--admin-file FILE] [--template ID]
+#
+# --template: a node template of the hub, applied by the hub once the new node reports (playlist, notifications...).
+#
+# Debian, Ubuntu, Raspberry Pi OS and DietPi use apt and systemd; Alpine Linux uses apk and OpenRC (the X display runs
+# on vt7 there, the console keeps tty1). Alpine needs bash for this script: apk add bash curl.
 #
 # --admin-file sets CARACAL's web administrator: a JSON file {"username", "password"} readable by root only (never
 # put passwords on the command line); created on a new node, a new name and password on a converted one. The file is
@@ -24,6 +29,7 @@
 set -euo pipefail
 
 HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''; DOCKER_POOL=''; VIA_FLEET=''; AUTH_FILE=''; ADMIN_FILE=''
+TEMPLATE=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -36,21 +42,39 @@ while [ $# -gt 0 ]; do
     --via-fleet) VIA_FLEET=1; shift;;
     --fleet-auth-file) AUTH_FILE=$2; shift 2;;
     --admin-file) ADMIN_FILE=$2; shift 2;;
+    --template) TEMPLATE=$2; shift 2;;
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
 done
 [ "$(id -u)" -eq 0 ] || { echo 'Run as root (sudo).' >&2; exit 1; }
 [ -n "$HUB" ] && [ -n "$IMAGE" ] || { echo '--hub and --image are required' >&2; exit 2; }
-command -v apt-get >/dev/null || { echo 'Only Debian based systems (Raspberry Pi OS, DietPi, Debian, Ubuntu) are supported.' >&2; exit 3; }
+# package manager and init system: apt + systemd (Debian family) or apk + OpenRC (Alpine Linux)
+if command -v apt-get >/dev/null; then PKG=apt
+elif command -v apk >/dev/null; then PKG=apk
+else echo 'Supported systems: Raspberry Pi OS, DietPi, Debian, Ubuntu and Alpine Linux.' >&2; exit 3; fi
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then INIT=systemd
+elif command -v rc-service >/dev/null; then INIT=openrc
+else echo 'systemd or OpenRC is required.' >&2; exit 3; fi
 SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 NODE_DIR=/opt/caracal-node
 export DEBIAN_FRONTEND=noninteractive
 
 step() { echo "==> $*"; }
+# services: systemd units or OpenRC scripts with the same names
+svc_enable() { if [ "$INIT" = systemd ]; then systemctl enable "$1.service" >/dev/null; else rc-update add "$1" default >/dev/null; fi; }
+svc_restart() { if [ "$INIT" = systemd ]; then systemctl restart "$1.service"; else rc-service "$1" restart; fi; }
+svc_reload() { if [ "$INIT" = systemd ]; then systemctl daemon-reload; fi; }
+arch() {   # Docker architecture of this device
+  if [ "$PKG" = apt ]; then dpkg --print-architecture; return; fi
+  case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; *) uname -m;; esac
+}
+add_to_group() {   # user, group (shadow's usermod or BusyBox's addgroup)
+  if command -v usermod >/dev/null; then usermod -a -G "$2" "$1"; else addgroup "$1" "$2" >/dev/null; fi
+}
 
 # --- download through the hub (keep APT_HOSTS in sync with the agent and the hub) ---
 APT_DIR=${CARACAL_APT_DIR:-/etc/apt}
-APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com dietpi.com'
+APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com dietpi.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com'
 apt_source_files() {
   local f
   for f in "$APT_DIR/sources.list" "$APT_DIR"/sources.list.d/*.list "$APT_DIR"/sources.list.d/*.sources; do
@@ -70,10 +94,19 @@ apt_via_fleet() {
   install -d -m 755 "$APT_DIR/auth.conf.d"
   ( umask 077; printf 'machine %s/apt login %s password %s\n' "$machine" "$user" "$password" > "$APT_DIR/auth.conf.d/caracal-fleet.conf" )
 }
+# Alpine Linux: repositories -> https://user:password@<hub>/apt/<host>/... (the file becomes readable by root only)
+APK_REPOSITORIES=${CARACAL_APK_REPOSITORIES:-/etc/apk/repositories}
+apk_via_fleet() {
+  local hub=$1 user=$2 password=$3 scheme rest
+  scheme=${hub%%://*}; rest=${hub#*://}
+  [ -f "$APK_REPOSITORIES" ] || return 0
+  sed -i -E "s#https?://[^[:space:]/]+(/[^[:space:]]*)?/apt/dl-cdn\.alpinelinux\.org(/|[[:space:]]|\$)#https://dl-cdn.alpinelinux.org\2#g; s#https?://dl-cdn\.alpinelinux\.org(/|[[:space:]]|\$)#$scheme://$user:$password@$rest/apt/dl-cdn.alpinelinux.org\1#g" "$APK_REPOSITORIES"
+  chmod 600 "$APK_REPOSITORIES"
+}
 # CARACAL image prepared by the hub (202 while it downloads it), checked and loaded
 image_from_fleet() {
   local arch tmp code i want got
-  arch=$(dpkg --print-architecture)
+  arch=$(arch)
   tmp=$(mktemp -p /var/tmp caracal-image-XXXXXX.tar)
   for i in $(seq 1 360); do
     code=$(curl -sS -u "$FLEET_USER:$FLEET_PASSWORD" -D "$tmp.headers" -o "$tmp" -w '%{http_code}' \
@@ -103,21 +136,36 @@ if [ -n "$VIA_FLEET" ]; then
     FLEET_USER=enroll; FLEET_PASSWORD=$TOKEN
   fi
   [ -n "$FLEET_PASSWORD" ] || { echo '--via-fleet needs --token or --fleet-auth-file' >&2; exit 2; }
-  step 'Downloads go through the hub (apt, Docker, CARACAL)'
-  apt_via_fleet "$HUB" "$FLEET_USER" "$FLEET_PASSWORD"
+  step 'Downloads go through the hub (apt/apk, Docker, CARACAL)'
+  if [ "$PKG" = apt ]; then apt_via_fleet "$HUB" "$FLEET_USER" "$FLEET_PASSWORD"; else apk_via_fleet "$HUB" "$FLEET_USER" "$FLEET_PASSWORD"; fi
 fi
 
 step '[1/7] System packages (X display, Openbox)'
-apt-get update -qq
-apt-get install -y -qq ca-certificates curl xserver-xorg xserver-xorg-legacy xinit openbox unclutter \
-  x11-xserver-utils dbus-x11 python3 python3-requests python3-psutil >/dev/null
-# small boards (Raspberry Pi 4 with 1-2 GB): compressed swap in memory (zram), unless there is one already
-MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
-if [ "${MEM_MB:-0}" -le 2048 ] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -q zram; then
-  if apt-get install -y -qq zram-tools >/dev/null 2>&1; then
-    printf 'ALGO=zstd\nPERCENT=50\nPRIORITY=100\n' > /etc/default/zramswap
-    systemctl enable zramswap.service >/dev/null 2>&1 || true
-    systemctl restart zramswap.service >/dev/null 2>&1 && echo "zram swap on (${MEM_MB} MB of memory)" || true
+if [ "$PKG" = apt ]; then
+  apt-get update -qq
+  apt-get install -y -qq ca-certificates curl xserver-xorg xserver-xorg-legacy xinit openbox unclutter \
+    x11-xserver-utils dbus-x11 python3 python3-requests python3-psutil >/dev/null
+  # small boards (Raspberry Pi 4 with 1-2 GB): compressed swap in memory (zram), unless there is one already
+  MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+  if [ "${MEM_MB:-0}" -le 2048 ] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -q zram; then
+    if apt-get install -y -qq zram-tools >/dev/null 2>&1; then
+      printf 'ALGO=zstd\nPERCENT=50\nPRIORITY=100\n' > /etc/default/zramswap
+      systemctl enable zramswap.service >/dev/null 2>&1 || true
+      systemctl restart zramswap.service >/dev/null 2>&1 && echo "zram swap on (${MEM_MB} MB of memory)" || true
+    fi
+  fi
+else
+  # Docker is in Alpine's community repository
+  sed -i -E 's@^#[[:space:]]*(.*/community)[[:space:]]*$@\1@' /etc/apk/repositories
+  apk update -q
+  # eudev: Xorg finds the graphics card and input devices through udev
+  apk add -q ca-certificates curl bash shadow eudev xorg-server xf86-input-libinput xinit openbox unclutter-xfixes \
+    xset xsetroot xrandr xhost dbus dbus-x11 mesa-dri-gallium mesa-egl font-dejavu python3 py3-requests py3-psutil \
+    >/dev/null
+  if command -v setup-devd >/dev/null; then setup-devd udev >/dev/null 2>&1 || true; fi
+  # firmware of the usual PC graphics (a full kernel; virtual machines use virtio/bochs without firmware)
+  if [ -d "/lib/modules/$(uname -r)/kernel/drivers/gpu/drm/i915" ]; then
+    apk add -q linux-firmware-i915 linux-firmware-amdgpu linux-firmware-radeon >/dev/null 2>&1 || true
   fi
 fi
 
@@ -151,7 +199,9 @@ print(f'Docker networks: bridge {bridge}, pool {pool_half}', file=sys.stderr)
 PY
   ) || exit 2
 fi
-if ! docker compose version >/dev/null 2>&1; then
+if [ "$PKG" = apk ]; then
+  docker compose version >/dev/null 2>&1 || apk add -q docker docker-cli-compose >/dev/null
+elif ! docker compose version >/dev/null 2>&1; then
   if [ -n "$VIA_FLEET" ]; then
     # Docker's own repository through the hub (what get.docker.com would set up)
     . /etc/os-release
@@ -169,17 +219,25 @@ if ! docker compose version >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com | sh || apt-get install -y -qq docker.io docker-compose
   fi
 fi
-systemctl enable --now docker >/dev/null
+svc_enable docker
+if [ "$INIT" = systemd ]; then systemctl start docker; else rc-service docker start >/dev/null 2>&1 || true; fi
 # a Docker that was already running reads daemon.json only when it starts
-[ -z "$DOCKER_CHANGED" ] || systemctl restart docker
+[ -z "$DOCKER_CHANGED" ] || svc_restart docker
+for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
 docker compose version
 
 step '[3/7] User and data folders'
 id caracal >/dev/null 2>&1 || useradd -m -s /bin/bash caracal
-for g in video audio input render; do getent group "$g" >/dev/null && usermod -a -G "$g" caracal; done
+for g in video audio input render; do getent group "$g" >/dev/null && add_to_group caracal "$g"; done
 install -d -o caracal -g caracal /var/lib/caracal /var/lib/caracal/media /var/lib/caracal/chromium /home/caracal \
   /home/caracal/.config /home/caracal/.config/openbox
 chown -R caracal:caracal /var/lib/caracal
+
+# a PC: graphics drivers are normally loaded at boot; load them now on a system that has just been installed
+if [ ! -e /dev/dri ] && command -v modprobe >/dev/null && ! grep -qi raspberry /proc/device-tree/model 2>/dev/null; then
+  for m in i915 amdgpu radeon nouveau virtio-gpu bochs vmwgfx; do modprobe -q "$m" 2>/dev/null || true; done
+  sleep 3
+fi
 
 # Raspberry Pi: the player and the overlay need the KMS graphics driver (/dev/dri, passed to the containers).
 # Raspberry Pi OS enables it by default, DietPi does not. The change needs a reboot; this is checked before anything
@@ -203,7 +261,7 @@ fi
 [ -e /dev/dri ] || { echo 'No graphics device (/dev/dri) found: the CARACAL player needs a KMS/DRM display driver.' >&2; exit 6; }
 
 step '[4/7] Converting an existing classic CARACAL installation (if any)'
-if [ -f /opt/caracal/app/main.py ]; then
+if [ -f /opt/caracal/app/main.py ] && [ "$INIT" = systemd ]; then
   for svc in caracal-player caracal-overlay caracal-boot-info caracal; do
     systemctl disable --now "$svc.service" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/$svc.service"
@@ -215,12 +273,14 @@ else
   echo 'No classic installation found.'
 fi
 
-step '[5/7] X display on tty1'
+step '[5/7] X display'
 install -d /etc/X11/xorg.conf.d
-cat > /etc/X11/Xwrapper.config <<'EOF'
+if [ "$PKG" = apt ]; then
+  cat > /etc/X11/Xwrapper.config <<'EOF'
 allowed_users=anybody
 needs_root_rights=yes
 EOF
+fi
 if [ -d /sys/module/vc4 ] || grep -qi raspberry /proc/device-tree/model 2>/dev/null; then
   cat > /etc/X11/xorg.conf.d/99-vc4.conf <<'EOF'
 Section "OutputClass"
@@ -231,7 +291,11 @@ Section "OutputClass"
 EndSection
 EOF
 fi
-cat > /home/caracal/.xinitrc <<'EOF'
+# systemd starts X as the user caracal (startx through Xwrapper); OpenRC starts it as root and the session (Openbox)
+# runs as caracal
+if [ "$INIT" = systemd ]; then SESSION='exec openbox-session'
+else SESSION="exec su -s /bin/sh caracal -c 'HOME=/home/caracal DISPLAY=:0 exec openbox-session'"; fi
+cat > /home/caracal/.xinitrc <<EOF
 #!/bin/sh
 export DISPLAY=:0
 export XAUTHORITY=/home/caracal/.Xauthority
@@ -244,7 +308,7 @@ xsetroot -solid black
 xhost +SI:localuser:caracal >/dev/null
 xrandr --auto
 unclutter -idle 1 -root &
-exec openbox-session
+$SESSION
 EOF
 cat > /home/caracal/.config/openbox/rc.xml <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -262,6 +326,35 @@ chmod 755 /home/caracal/.xinitrc
 rmdir /home/caracal/.Xauthority 2>/dev/null || true
 [ -f /home/caracal/.Xauthority ] || install -m 600 /dev/null /home/caracal/.Xauthority
 chown -R caracal:caracal /home/caracal
+if [ "$INIT" = openrc ]; then
+  cat > /etc/init.d/caracal-display <<'EOF'
+#!/sbin/openrc-run
+# CARACAL display: X on vt7 (the console stays on tty1) with Openbox, restarted when it stops
+description="CARACAL Display Server"
+supervisor=supervise-daemon
+command=/usr/bin/xinit
+command_args="/home/caracal/.xinitrc -- /usr/bin/Xorg :0 vt7 -nolisten tcp -nocursor"
+respawn_delay=5
+respawn_max=0
+output_log=/var/log/caracal-display.log
+error_log=/var/log/caracal-display.log
+
+depend() {
+  need localmount
+  use udev dbus
+  after docker
+}
+
+start_pre() {
+  rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
+}
+EOF
+  chmod 755 /etc/init.d/caracal-display
+  rc-update add dbus default >/dev/null 2>&1 || true
+  rc-service dbus start >/dev/null 2>&1 || true
+  svc_enable caracal-display
+  svc_restart caracal-display
+else
 cat > /etc/systemd/system/caracal-display.service <<'EOF'
 [Unit]
 Description=CARACAL Display Server
@@ -298,11 +391,19 @@ systemctl daemon-reload
 systemctl set-default graphical.target >/dev/null
 systemctl enable caracal-display.service >/dev/null
 systemctl restart caracal-display.service
+fi
 
 step '[6/7] CARACAL containers'
 install -d -m 755 "$NODE_DIR"
 install -m 644 "$SRC_DIR/caracal-compose.yml" "$NODE_DIR/compose.yml"
 gid_of() { getent group "$1" | cut -d: -f3 | grep .; }
+# the containers join "video" and "render" (Docker Compose 5 refuses the same group twice): a system without a
+# "render" group (Alpine) gets one; udev gives it the render nodes of the graphics card (/dev/dri/renderD*)
+if ! gid_of render >/dev/null; then
+  if command -v groupadd >/dev/null; then groupadd -r render; else addgroup -S render; fi
+  add_to_group caracal render
+  if command -v udevadm >/dev/null; then udevadm trigger --subsystem-match=drm >/dev/null 2>&1 || true; fi
+fi
 cat > "$NODE_DIR/.env" <<EOF
 CARACAL_IMAGE=$IMAGE
 CARACAL_VERSION=$VERSION
@@ -340,8 +441,11 @@ else
   [ -n "$VIA_FLEET" ] && ARGS+=(--download-source fleet)
   # the agent creates CARACAL's web administrator through the node's first-run setup
   [ -n "$ADMIN_FILE" ] && ARGS+=(--admin-file "$ADMIN_FILE")
+  # the node template of the hub (applied once the node reports)
+  [ -n "$TEMPLATE" ] && ARGS+=(--template "$TEMPLATE")
   bash "$SRC_DIR/install-agent.sh" "${ARGS[@]}"
 fi
 if [ -n "$ADMIN_FILE" ]; then rm -f "$ADMIN_FILE"; fi
-IP=$(hostname -I | awk '{print $1}')
+IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+[ -n "$IP" ] || IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo "==> Done. CARACAL admin: http://${IP}:8080"

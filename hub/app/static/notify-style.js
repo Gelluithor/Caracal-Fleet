@@ -83,7 +83,8 @@
 .nse select option{color:#111;background:#fff}
 .nse input[type=color]{width:34px;height:28px;padding:0;border:1px solid color-mix(in srgb,currentColor 22%,transparent);border-radius:7px;background:none;cursor:pointer}
 .nse input[type=color]::-webkit-color-swatch-wrapper{padding:2px}.nse input[type=color]::-webkit-color-swatch{border:0;border-radius:5px}
-.nse input[type=range]{width:130px;accent-color:var(--accent,#e85d3f)}
+.nse input[type=range]{width:130px;height:auto;padding:0;border:0;background:none;box-shadow:none;accent-color:var(--accent,#e85d3f)}
+.nse .nse-grid input[type=range]{width:100%;min-width:0}
 .nse input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent,#e85d3f)}
 .nse-tabs{display:flex;gap:2px;padding:3px;margin-bottom:14px;border-radius:10px;background:color-mix(in srgb,currentColor 8%,transparent);overflow-x:auto}
 .nse-tabs button{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;border:0;background:none;color:inherit;font:inherit;font-size:13px;font-weight:550;padding:6px 10px;border-radius:8px;cursor:pointer;opacity:.7;white-space:nowrap}
@@ -344,5 +345,17 @@
     };
   }
 
-  window.NotifyStyle = { DEFAULT: clone(DEFAULT), PRESETS, LEVELS, merge: d => merge(DEFAULT, d), editor };
+  // A still preview of one notification on a small screen (e.g. in a list of templates)
+  function preview(el, style, opts = {}) {
+    injectCss();
+    const T = opts.t || ((cs, en) => en);
+    el.innerHTML = `<div class="nse-tv"><div class="nse-stage"><div class="nse-fake" style="left:90px;top:90px;width:1100px;height:520px"><i></i></div><div class="nse-fake" style="left:1240px;top:90px;width:590px;height:520px"></div><div class="nse-fake" style="left:90px;top:650px;width:1740px;height:330px"></div>
+      ${toastHtml(merge(DEFAULT, style || {}), { position: opts.position, scale: opts.scale, level: opts.level || 'warning', title: T('Vysoké vytížení linky 3', 'High load on line 3'), message: T('Teplota motoru 78 °C, zkontrolujte chlazení.', 'Motor temperature 78 °C, check the cooling.'), source: 'Grafana', image: safeUrl(opts.image || '') })}</div></div>`;
+    const stage = el.querySelector('.nse-stage'), tv = el.querySelector('.nse-tv');
+    const fit = () => { stage.style.transform = `scale(${tv.clientWidth / 1920})`; };
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(tv);
+    fit();
+  }
+
+  window.NotifyStyle = { DEFAULT: clone(DEFAULT), PRESETS, LEVELS, merge: d => merge(DEFAULT, d), editor, preview };
 })();

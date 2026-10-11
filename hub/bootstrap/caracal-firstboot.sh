@@ -4,6 +4,8 @@
 # CARACAL Fleet generates the files for the boot partition of a freshly written Raspberry Pi OS Lite or DietPi
 # card: this script, caracal-firstboot.conf (hub address and enrollment token) and the hook of the OS
 # (cloud-init user-data or DietPi's Automation_Custom_Script.sh), which runs "caracal-firstboot.sh install".
+# The same "run" step installs PCs: Ubuntu's autoinstall (cloud-init), Alpine Linux (caracal-alpine.sh, OpenRC, no
+# systemd) and the one-command installation (caracal-install.sh).
 #
 #   install   copies the script and its configuration to the system (the token is removed from the boot
 #             partition) and starts caracal-firstboot.service in the background
@@ -30,7 +32,7 @@ STAGE=${CARACAL_DIETPI_STAGE:-/boot/dietpi/.install_stage}   # DietPi's install 
 
 # --- download through the hub (keep in sync with install-node.sh, the agent and the hub) ---
 APT_DIR=${CARACAL_APT_DIR:-/etc/apt}
-APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com dietpi.com'
+APT_HOSTS='deb.debian.org security.debian.org ftp.debian.org archive.raspberrypi.com archive.raspberrypi.org raspbian.raspberrypi.com raspbian.raspberrypi.org download.docker.com dietpi.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com'
 apt_source_files() {
   local f
   for f in "$APT_DIR/sources.list" "$APT_DIR"/sources.list.d/*.list "$APT_DIR"/sources.list.d/*.sources; do
@@ -50,6 +52,15 @@ apt_via_fleet() {
   install -d -m 755 "$APT_DIR/auth.conf.d"
   ( umask 077; printf 'machine %s/apt login %s password %s\n' "$machine" "$user" "$password" > "$APT_DIR/auth.conf.d/caracal-fleet.conf" )
 }
+# Alpine Linux: repositories -> https://user:password@<hub>/apt/<host>/... (the file becomes readable by root only)
+APK_REPOSITORIES=${CARACAL_APK_REPOSITORIES:-/etc/apk/repositories}
+apk_via_fleet() {
+  local hub=$1 user=$2 password=$3 scheme rest
+  scheme=${hub%%://*}; rest=${hub#*://}
+  [ -f "$APK_REPOSITORIES" ] || return 0
+  sed -i -E "s#https?://[^[:space:]/]+(/[^[:space:]]*)?/apt/dl-cdn\.alpinelinux\.org(/|[[:space:]]|\$)#https://dl-cdn.alpinelinux.org\2#g; s#https?://dl-cdn\.alpinelinux\.org(/|[[:space:]]|\$)#$scheme://$user:$password@$rest/apt/dl-cdn.alpinelinux.org\1#g" "$APK_REPOSITORIES"
+  chmod 600 "$APK_REPOSITORIES"
+}
 # --- end of download through the hub ---
 
 # Without a time source the clock of a Raspberry Pi is behind (last shutdown, or the date of the image) and HTTPS
@@ -57,6 +68,8 @@ apt_via_fleet() {
 # hub's Date header without checking the certificate (nothing else is taken from that answer).
 sync_clock_from_hub() {
   [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] && return 0
+  # without systemd (Alpine): a time server answering chrony is enough
+  command -v chronyc >/dev/null && chronyc -n tracking 2>/dev/null | grep -q 'Leap status *: Normal' && return 0
   local date hub_ts now diff
   date=$(curl -ksSI --max-time 15 "$HUB/api/health" 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: //p' | head -1)
   [ -n "$date" ] || return 1
@@ -126,7 +139,11 @@ wait_for_os_setup() {
 
 node_name() {
   local serial
-  serial=$(tr -d '\0' < /proc/device-tree/serial-number 2>/dev/null || true)
+  # a stable id of the device, also for the agent's fingerprint (Alpine has no machine id without D-Bus)
+  [ -s /etc/machine-id ] || [ -d /run/systemd/system ] || \
+    tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id 2>/dev/null || true
+  serial=''
+  [ -r /proc/device-tree/serial-number ] && serial=$(tr -d '\0' < /proc/device-tree/serial-number)
   [ -n "$serial" ] || serial=$(cat /etc/machine-id 2>/dev/null || hostname)
   echo "${NAME_PREFIX:-caracal}-$(echo "$serial" | tail -c 7 | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')"
 }
@@ -155,13 +172,13 @@ run_install() {
   done
   wait_for_os_setup
   # the OS setup may reboot (e.g. DietPi after a kernel update) while a previous attempt was installing packages
-  DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
+  if command -v dpkg >/dev/null; then DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true; fi
 
   local name
-  name=$(node_name)
+  name=${NODE_NAME:-$(node_name)}   # NODE_NAME: the one-command installation with --name
   if [ "$(hostname)" != "$name" ]; then
     echo "Hostname: $name"
-    hostnamectl set-hostname "$name" 2>/dev/null || echo "$name" > /etc/hostname
+    hostnamectl set-hostname "$name" 2>/dev/null || { echo "$name" > /etc/hostname; hostname "$name"; }
     grep -q "127.0.1.1" /etc/hosts && sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$name/" /etc/hosts \
       || echo -e "127.0.1.1\t$name" >> /etc/hosts
   fi
@@ -180,6 +197,7 @@ run_install() {
   local code=0 extra=()
   [ -n "${DOCKER_POOL:-}" ] && extra+=(--docker-pool "$DOCKER_POOL")
   [ "${DOWNLOAD_SOURCE:-}" = fleet ] && extra+=(--via-fleet)
+  [ -n "${TEMPLATE:-}" ] && extra+=(--template "$TEMPLATE")   # node template of the hub
   if [ -n "${ADMIN_USER:-}" ]; then   # CARACAL's web administrator, for the agent (the file is removed after use)
     ( umask 077; printf '{"username": %s, "password": %s}\n' "$(json_string "$ADMIN_USER")" \
         "$(json_string "${ADMIN_PASSWORD:-}")" > "$work/admin.json" )
@@ -191,14 +209,14 @@ run_install() {
   if [ "$code" -eq 0 ]; then
     date -Is > "$DONE"
     rm -f "$CONF"
-    systemctl disable caracal-firstboot.service >/dev/null 2>&1
+    if command -v systemctl >/dev/null; then systemctl disable caracal-firstboot.service >/dev/null 2>&1; fi
     echo '===== CARACAL node installed'
     return 0
   fi
   if [ "$code" -eq 5 ]; then
     # the graphics driver was enabled: the installation continues after the reboot (the service is still enabled)
     echo 'Rebooting to load the graphics driver, the installation continues afterwards.'
-    systemctl reboot
+    systemctl reboot 2>/dev/null || reboot
     return 0
   fi
   echo "Installation failed (exit $code), retrying in a minute."

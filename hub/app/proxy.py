@@ -6,9 +6,10 @@ A node with the download source "fleet" (chosen for the SD card, the SSH install
   from its registry, verifies every digest, packs it as a "docker load" archive and caches it. The agent (or
   install-node.sh during the installation) downloads it, checks its SHA-256 and loads it. While the hub is still
   preparing the image the answer is 202; the node asks again.
-- System packages: /apt/<host>/<path> - a read-only mirror of the allowed apt repositories (Debian, Raspberry Pi,
-  Docker). The node's apt sources point here. apt verifies the repository signatures itself, so the hub cannot
-  alter packages. Packages (pool/) are cached, repository indexes are passed through.
+- System packages: /apt/<host>/<path> - a read-only mirror of the allowed apt repositories (Debian, Ubuntu,
+  Raspberry Pi, Docker) and of Alpine's apk repository. The node's sources point here. apt and apk verify the
+  repository signatures themselves, so the hub cannot alter packages. Packages (pool/, *.apk) are cached, repository
+  indexes are passed through.
 
 Both need credentials (HTTP Basic): a device (device id and device token) or, during the installation before the
 device is enrolled, the enrollment token (user "enroll"). The cache is limited in size (CARACAL_HUB_PROXY_CACHE_GB).
@@ -41,7 +42,10 @@ APT_CACHE = CACHE / 'apt'
 IMAGE_CACHE = CACHE / 'images'
 DEFAULT_APT_HOSTS = ('deb.debian.org', 'security.debian.org', 'ftp.debian.org', 'archive.raspberrypi.com',
                      'archive.raspberrypi.org', 'raspbian.raspberrypi.com', 'raspbian.raspberrypi.org',
-                     'download.docker.com', 'dietpi.com')
+                     'download.docker.com', 'dietpi.com', 'archive.ubuntu.com', 'security.ubuntu.com',
+                     'ports.ubuntu.com')
+# Alpine Linux repositories (apk, credentials in the repository address); kept apart from the apt hosts of the nodes
+APK_HOSTS = ('dl-cdn.alpinelinux.org',)
 ARCHES = ('arm64', 'amd64')
 IMAGES_KEPT = 2                  # cached archives per image and architecture
 FAIL_WINDOW, FAIL_MAX = 300, 30
@@ -56,7 +60,7 @@ _trimmed = [0.0]
 
 def apt_hosts():
     extra = [h.strip().lower() for h in os.getenv('CARACAL_HUB_APT_HOSTS', '').split(',') if h.strip()]
-    return tuple(dict.fromkeys(DEFAULT_APT_HOSTS + tuple(extra)))
+    return tuple(dict.fromkeys(DEFAULT_APT_HOSTS + APK_HOSTS + tuple(extra)))
 
 
 def cache_limit():
@@ -106,8 +110,8 @@ def node_auth(r: Request):
 # ---------------------------------------------------------------- apt mirror
 
 def _immutable(path):
-    # packages never change under their name; repository indexes (dists/) do
-    return '/pool/' in '/' + path or path.endswith(('.deb', '.udeb'))
+    # packages never change under their name; repository indexes (dists/, APKINDEX.tar.gz) do
+    return '/pool/' in '/' + path or path.endswith(('.deb', '.udeb', '.apk'))
 
 
 def _cache_file(host, path):

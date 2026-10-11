@@ -147,21 +147,27 @@ async def playlist_from_device(r: Request):
             raise HTTPException(404, 'device_not_found')
         device = build(row, full=True)
         name = _text(d.get('name'), 120) or device['name']
-        now = time.time()
-        pid = c.execute('INSERT INTO global_playlists(name, description, created, updated, updated_by) '
-                        'VALUES(?,?,?,?,?)', (name, '', now, now, u['username'])).lastrowid
-        skipped = []
-        for pos, a in enumerate(device['assets']):
-            web = a['kind'] == 'web' and str(a.get('source', '')).lower().startswith(('http://', 'https://'))
-            if not web and a['kind'] != COLLECTION_KIND:
-                skipped.append(a['name'])
-                continue
-            c.execute('INSERT INTO global_playlist_items(playlist_id, position, kind, name, source, duration, scale) '
-                      'VALUES(?,?,?,?,?,?,?)', (pid, pos, a['kind'], a['name'], a['source'],
-                                                max(5, int(a.get('duration') or 30)),
-                                                min(3.0, max(0.5, float(a.get('scale') or 1)))))
+        pid, skipped = playlist_from_assets(c, name, device['assets'], u['username'])
     audit(u, 'global.create', str(pid), {'name': name, 'from_device': row['id']})
     return {'id': pid, 'skipped': skipped}
+
+
+def playlist_from_assets(c, name, assets, username):
+    """New global playlist with the web pages and Grafana collections of a node's playlist: (id, skipped names)."""
+    now = time.time()
+    pid = c.execute('INSERT INTO global_playlists(name, description, created, updated, updated_by) '
+                    'VALUES(?,?,?,?,?)', (name, '', now, now, username)).lastrowid
+    skipped = []
+    for pos, a in enumerate(assets):
+        web = a['kind'] == 'web' and str(a.get('source', '')).lower().startswith(('http://', 'https://'))
+        if not web and a['kind'] != COLLECTION_KIND:
+            skipped.append(a['name'])
+            continue
+        c.execute('INSERT INTO global_playlist_items(playlist_id, position, kind, name, source, duration, scale) '
+                  'VALUES(?,?,?,?,?,?,?)', (pid, pos, a['kind'], a['name'], a['source'],
+                                            max(5, int(a.get('duration') or 30)),
+                                            min(3.0, max(0.5, float(a.get('scale') or 1)))))
+    return pid, skipped
 
 
 @router.get('/api/global-playlists/{pid}')
@@ -272,6 +278,29 @@ async def reorder_items(pid: int, r: Request):
     return {'ok': True}
 
 
+def deploy_items(c, pid, missing_ok=False):
+    """Items of an import_playlist command with the global playlist's content (also used by node templates)."""
+    items = _items(c, pid)
+    if not items and not missing_ok:
+        raise HTTPException(400, 'nothing_to_copy')
+    payload_items = []
+    for it in items:
+        entry = {'type': 'asset', 'kind': it['kind'], 'name': it['name'], 'duration': it['duration'],
+                 'scale': it['scale']}
+        if it['kind'] == COLLECTION_KIND:
+            entry.update(type='collection', **grafana_config(it['source']))
+        elif it['kind'] == 'web':
+            entry['source'] = it['source']
+        else:
+            if not it['sha256']:
+                if missing_ok:
+                    continue
+                raise HTTPException(400, 'file_not_found')
+            entry.update(file_id=it['file_id'], sha256=it['sha256'], filename=it['file_name'])
+        payload_items.append(entry)
+    return payload_items
+
+
 @router.post('/api/global-playlists/{pid}/deploy')
 async def deploy(pid: int, r: Request):
     u = current_user(r, 'content')
@@ -285,21 +314,7 @@ async def deploy(pid: int, r: Request):
     with db() as c:
         p = _playlist(c, pid)
         items = _items(c, pid)
-        if not items:
-            raise HTTPException(400, 'nothing_to_copy')
-        payload_items = []
-        for it in items:
-            entry = {'type': 'asset', 'kind': it['kind'], 'name': it['name'], 'duration': it['duration'],
-                     'scale': it['scale']}
-            if it['kind'] == COLLECTION_KIND:
-                entry.update(type='collection', **grafana_config(it['source']))
-            elif it['kind'] == 'web':
-                entry['source'] = it['source']
-            else:
-                if not it['sha256']:
-                    raise HTTPException(400, 'file_not_found')
-                entry.update(file_id=it['file_id'], sha256=it['sha256'], filename=it['file_name'])
-            payload_items.append(entry)
+        payload_items = deploy_items(c, pid)
         has_media = any(it['kind'] in MEDIA_KINDS for it in items)
         has_tags = any(it['kind'] == COLLECTION_KIND for it in items)
         for t in targets:
