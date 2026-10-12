@@ -843,7 +843,7 @@ button.link { padding: 0; border: 0; background: none; color: var(--accent); cur
 .rollout-stages li.current { font-weight: 600; }
 .pilot-list { max-height: 180px; }
 .totp-qr { display: grid; place-items: center; padding: 8px; }
-.totp-qr svg { width: 220px; height: 220px; border-radius: 12px; }
+.totp-qr svg { display: block; width: 240px; height: 240px; border-radius: 12px; background: #fff; }
 .sso-btn { margin-top: 8px; }
 #schHead h2 .ic, .form h3 > .ic, .sched-row + .form-actions .ic { width: 18px; height: 18px; margin-right: 8px; vertical-align: -3px; }
 #schList td small .ic { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }

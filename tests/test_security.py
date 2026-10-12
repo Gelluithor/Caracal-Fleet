@@ -30,6 +30,7 @@ def test_two_factor_sign_in(client, admin_headers):
     uh = {'Authorization': 'Bearer ' + token}
     setup = client.post('/api/me/totp/setup', headers=uh).json()
     assert setup['uri'].startswith('otpauth://totp/') and '<svg' in setup['qr']
+    assert 'viewBox=' in setup['qr'] and 'width=' not in setup['qr'].split('>', 1)[0]   # scales without cropping
     assert client.post('/api/me/totp/enable', headers=uh, json={'code': '000000'}).json()['detail'] == 'invalid_totp'
     step = int(time.time() // 30)
     r = client.post('/api/me/totp/enable', headers=uh, json={'code': totp_code(setup['secret'], step)}).json()

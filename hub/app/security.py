@@ -82,9 +82,10 @@ def check_second_factor(c, u, code):
 
 
 def _qr_svg(uri):
+    # a viewBox instead of a fixed size, so the page can scale it; four modules of white border (quiet zone)
     out = io.BytesIO()
-    segno.make(uri, error='m').save(out, kind='svg', scale=5, border=2, dark='#111111', light='#ffffff', xmldecl=False,
-                                    svgns=True)
+    segno.make(uri, error='m').save(out, kind='svg', border=4, dark='#000000', light='#ffffff', xmldecl=False,
+                                    svgns=True, omitsize=True)
     return out.getvalue().decode()
 
 
