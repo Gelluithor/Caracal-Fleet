@@ -52,7 +52,8 @@ def logo_path():
 @router.get('/api/public')
 def public_info():
     logo = logo_path()
-    return {'setup_required': setup_required(), 'version': HUB_VERSION,
+    from .security import public_sso
+    return {'setup_required': setup_required(), 'version': HUB_VERSION, 'sso': public_sso(),
             'logo': f'/branding/logo?v={int(logo.stat().st_mtime)}' if logo else None}
 
 
@@ -242,3 +243,112 @@ async def restore_backup(r: Request):
                                     'backup_hub_version': manifest.get('hub_version')})
     threading.Thread(target=restart_process, daemon=True).start()
     return {'ok': True, 'restart': True}
+
+
+# ---------------------------------------------------------------- scheduled backups
+
+# Backups made by the hub itself, once a day at the chosen hour, kept in the data folder (the newest `keep` ones).
+# They are full backups like the downloaded ones; copying them off the server is up to the administrator.
+BACKUPS = DATA / 'backups'
+BACKUP_FILE = re.compile(r'^caracal-fleet-backup-\d{8}-\d{4}\.zip$')
+BACKUP_DEFAULTS = {'enabled': False, 'hour': 2, 'keep': 7}
+
+
+def backup_conf():
+    from .core import cfg
+    return {**BACKUP_DEFAULTS, **(cfg().get('backup_schedule') or {})}
+
+
+def make_scheduled_backup(now=None):
+    from .schedule import local_now
+    BACKUPS.mkdir(parents=True, exist_ok=True)
+    path = BACKUPS / local_now(now).strftime('caracal-fleet-backup-%Y%m%d-%H%M.zip')
+    tmp = path.with_suffix('.part')
+    _build_backup(tmp)
+    tmp.replace(path)
+    keep = backup_conf()['keep']
+    for old in sorted(p for p in BACKUPS.iterdir() if BACKUP_FILE.fullmatch(p.name))[:-keep]:
+        old.unlink(missing_ok=True)
+    return path
+
+
+def backup_tick(now=None):
+    """Called by the schedule loop: the daily backup at its hour."""
+    from .core import cfg, save_cfg
+    from .schedule import local_now
+    conf = backup_conf()
+    if not conf['enabled']:
+        return None
+    local = local_now(now)
+    today = local.strftime('%Y-%m-%d')
+    full = cfg()
+    if local.hour != conf['hour'] or full.get('backup_day') == today:
+        return None
+    full['backup_day'] = today
+    save_cfg(full)
+    path = make_scheduled_backup(now)
+    with db() as c:
+        c.execute('INSERT INTO audit(username, action, target, detail, created) VALUES(?,?,?,?,?)',
+                  ('schedule', 'system.backup', path.name, json.dumps({'size': path.stat().st_size, 'scheduled': True}), time.time()))
+    return path
+
+
+def _backup_list():
+    if not BACKUPS.is_dir():
+        return []
+    return [{'name': p.name, 'size': p.stat().st_size, 'created': p.stat().st_mtime}
+            for p in sorted(BACKUPS.iterdir(), reverse=True) if BACKUP_FILE.fullmatch(p.name)]
+
+
+@router.get('/api/backups')
+def list_backups(r: Request):
+    current_user(r, 'admin')
+    return {'settings': backup_conf(), 'backups': _backup_list(), 'folder': str(BACKUPS)}
+
+
+@router.put('/api/backups/settings')
+async def backup_settings(r: Request):
+    from .core import cfg, save_cfg
+    u = current_user(r, 'admin')
+    d = await _json(r)
+    try:
+        conf = {'enabled': bool(d.get('enabled')), 'hour': int(d.get('hour', 2)), 'keep': int(d.get('keep', 7))}
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'invalid_value')
+    if not 0 <= conf['hour'] <= 23 or not 1 <= conf['keep'] <= 90:
+        raise HTTPException(400, 'invalid_value')
+    full = cfg()
+    full['backup_schedule'] = conf
+    save_cfg(full)
+    audit(u, 'system.backup_schedule', '', conf)
+    return conf
+
+
+@router.post('/api/backups/run')
+async def run_backup(r: Request):
+    u = current_user(r, 'admin')
+    path = await run_in_threadpool(make_scheduled_backup)
+    audit(u, 'system.backup', path.name, {'size': path.stat().st_size, 'stored': True})
+    return {'name': path.name, 'size': path.stat().st_size}
+
+
+def _backup_path(name):
+    if not BACKUP_FILE.fullmatch(name) or not (BACKUPS / name).is_file():
+        raise HTTPException(404, 'not_found')
+    return BACKUPS / name
+
+
+@router.get('/api/backups/{name}')
+def download_backup(name: str, r: Request):
+    u = current_user(r, 'admin')
+    path = _backup_path(name)
+    audit(u, 'system.backup_download', name)
+    return FileResponse(path, media_type='application/zip', filename=name)
+
+
+@router.delete('/api/backups/{name}')
+def delete_backup(name: str, r: Request):
+    u = current_user(r, 'admin')
+    _backup_path(name).unlink()
+    audit(u, 'system.backup_delete', name)
+    return {'ok': True}

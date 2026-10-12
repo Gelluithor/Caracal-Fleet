@@ -810,3 +810,72 @@ button.link { padding: 0; border: 0; background: none; color: var(--accent); cur
 .diag { border-radius: var(--r-sm); background: var(--fill-2); margin-top: 6px; }
 .diag summary { padding: 7px 12px; font-weight: 600; font-size: 13.5px; cursor: pointer; }
 .diag pre { margin: 0; padding: 4px 12px 12px; max-height: 340px; overflow: auto; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; color: var(--ink-2); }
+.day-pick { display: flex; gap: 3px; flex-wrap: wrap; }
+.day-pick label { position: relative; cursor: pointer; }
+.day-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.day-pick span { display: inline-grid; place-items: center; min-width: 34px; height: 28px; padding: 0 6px; border-radius: 8px; background: var(--fill-2); color: var(--muted); font-size: 12.5px; font-weight: 600; transition: background-color .15s, color .15s; }
+.day-pick input:checked + span { background: var(--accent); color: var(--accent-ink); }
+.day-pick input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sched-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--fill-2); margin-bottom: 6px; }
+.sched-row:not(:has(select)) { grid-template-columns: auto auto 1fr; }
+.sched-row [data-del-row] { justify-self: end; }
+@media (max-width: 860px) { .sched-row, .sched-row:not(:has(select)) { display: flex; flex-wrap: wrap; } }
+.sched-row select { width: 100%; min-width: 0; }
+.sched-times { display: inline-flex; align-items: center; gap: 6px; }
+.sched-times input { width: 132px; }
+.sched-targets .target-org { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 6px 0; }
+.sched-enabled { align-self: end; padding-bottom: 8px; }
+.screen-wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.wall-tile { display: grid; gap: 8px; padding: 10px; border-radius: var(--r-lg); background: var(--panel); box-shadow: var(--lift); color: var(--ink); transition: transform .2s var(--ease-out); }
+.wall-tile:hover { transform: translateY(-2px); }
+.wall-tile.off .wall-shot img { filter: grayscale(1) brightness(.6); }
+.wall-shot { position: relative; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #0b0d12; display: grid; place-items: center; color: #8e8e93; font-size: 12.5px; text-align: center; }
+.wall-shot img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.wall-shot em { position: absolute; left: 8px; top: 8px; padding: 2px 8px; border-radius: 99px; background: rgb(0 0 0 / .65); color: #fff; font-style: normal; font-size: 11.5px; font-weight: 600; }
+.wall-meta { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 4px; }
+.wall-meta b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wall-meta small { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#rollouts { padding: 0 20px 18px; display: grid; gap: 12px; }
+.rollout { border-radius: var(--r); background: var(--fill-2); padding: 12px 14px; display: grid; gap: 8px; }
+.rollout-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rollout-actions { margin-left: auto; display: flex; gap: 6px; }
+.rollout-stages { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.rollout-stages li.current { font-weight: 600; }
+.pilot-list { max-height: 180px; }
+.totp-qr { display: grid; place-items: center; padding: 8px; }
+.totp-qr svg { width: 220px; height: 220px; border-radius: 12px; }
+.sso-btn { margin-top: 8px; }
+#schHead h2 .ic, .form h3 > .ic, .sched-row + .form-actions .ic { width: 18px; height: 18px; margin-right: 8px; vertical-align: -3px; }
+#schList td small .ic { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
+.sched-kinds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.sched-kind { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; align-items: start; }
+.sched-kind h2 { margin-bottom: 4px; }
+.kind-ic { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); }
+.kind-ic .ic { width: 22px; height: 22px; }
+.kind-points { margin: 8px 0 4px; padding-left: 18px; color: var(--ink-2); font-size: 13.5px; display: grid; gap: 2px; }
+.sched-clock { margin: 12px 0 0 4px; font-size: 13px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sched-clock .ic { width: 15px; height: 15px; }
+.sched-section { font-size: 17px; margin: 4px 0 -8px; }
+#schList { display: grid; gap: 16px; }
+.regime.disabled { opacity: .6; }
+.regime .card-head { align-items: flex-start; }
+.regime-now { margin: 0 0 12px; font-size: 14px; }
+.timeline { display: grid; gap: 4px; }
+.tl-row, .tl-axis { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 8px; }
+.tl-day { font-size: 12px; font-weight: 600; color: var(--muted); }
+.tl-day.today { color: var(--accent); }
+.tl-bar { position: relative; display: flex; height: 16px; border-radius: 5px; overflow: hidden; background: var(--fill-2); }
+.tl-bar i { display: block; height: 100%; background: var(--c, var(--fill)); }
+.tl-bar i.keep { background: var(--fill-2); }
+.tl-bar i.off { background: repeating-linear-gradient(135deg, var(--line-strong) 0 3px, var(--fill-2) 3px 7px); }
+.tl-now { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); border-radius: 2px; box-shadow: 0 0 0 2px var(--panel); }
+.tl-axis div { position: relative; height: 14px; }
+.tl-axis small { position: absolute; transform: translateX(-50%); font-size: 11px; color: var(--muted); }
+.tl-axis small:first-child { transform: none; }
+.tl-axis small:last-child { transform: translateX(-100%); }
+.tl-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12.5px; color: var(--ink-2); }
+.tl-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.tl-legend i { width: 14px; height: 10px; border-radius: 3px; background: var(--c, var(--fill-2)); }
+.tl-legend i.off { background: repeating-linear-gradient(135deg, var(--line-strong) 0 2px, var(--fill-2) 2px 5px); }
+#schedPreview { padding: 12px; border-radius: var(--r); background: var(--panel-2, var(--fill-2)); }
+@media (max-width: 860px) { .sched-kinds { grid-template-columns: minmax(0, 1fr); } }

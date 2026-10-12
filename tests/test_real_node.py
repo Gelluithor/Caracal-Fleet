@@ -770,3 +770,36 @@ def test_dark_websites_from_fleet(env):
         if a['name'] in ('Forced', 'Follows', 'Dark dashboards'):
             run(env, 'delete_asset', {'id': a['id']})
     run(env, 'player_settings', {'web_dark': 'off'})
+
+
+def test_black_screen_watch(env):
+    """The overlay reports a black screen; a website that stays black gets the player restarted; Fleet sees it."""
+    node = env['mod']
+    url = env['node'] + '/api/display/health'
+    assert requests.post(url, json={'black': True}).status_code == 403          # only the overlay of the device
+    assert env['local'].post(url, json={'black': False}).json()['ok']
+    beat(env)
+    assert device(env)['black_since'] is None
+    env['local'].post(url, json={'black': True})
+    beat(env)
+    since = device(env)['black_since']
+    assert since and 'screen_black' not in [a['code'] for a in device(env)['attention']]   # not yet 3 minutes
+    web = next((a for a in node_assets(env) if a['kind'] == 'web'), None)
+    if web is None:
+        run(env, 'add_web', {'name': 'Black page', 'source': 'https://example.com/black', 'duration': 20})
+        web = next(a for a in node_assets(env) if a['kind'] == 'web')
+    restarts = []
+    real_restart, node.request_player_restart = node.request_player_restart, lambda: restarts.append(1)
+    try:
+        node._display.update(black_since=time.time() - 400, restarted=0)
+        beat(env, current_id=web['id'], current_name=web['name'])
+        env['local'].post(url, json={'black': True})
+        env['local'].post(url, json={'black': True})   # not again within 30 minutes
+    finally:
+        node.request_player_restart = real_restart
+    assert restarts == [1]
+    beat(env, current_id=web['id'], current_name=web['name'])
+    assert 'screen_black' in [a['code'] for a in device(env)['attention']]
+    env['local'].post(url, json={'black': False})
+    beat(env)
+    assert device(env)['black_since'] is None

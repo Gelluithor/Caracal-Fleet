@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -33,7 +34,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.13.0'
+VERSION = '4.14.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -42,6 +43,12 @@ CARACAL_DIR = Path(os.getenv('CARACAL_DIR', '/opt/caracal'))
 # start order used by CARACAL's install.sh: API, X display, then everything that draws on the display
 CARACAL_SERVICES = ('caracal.service', 'caracal-display.service', 'caracal-overlay.service', 'caracal-player.service')
 X_SOCKET = Path('/tmp/.X11-unix/X0')
+X_ENV = {'DISPLAY': ':0', 'XAUTHORITY': '/home/caracal/.Xauthority'}
+# Display watch: the X display of CARACAL (installed by install-node.sh / install.sh) must answer; when it does not for
+# DISPLAY_GRACE seconds, its service is restarted (at most DISPLAY_RESTARTS times, DISPLAY_RESTART_EVERY apart)
+DISPLAY_UNITS = (Path('/etc/systemd/system/caracal-display.service'), Path('/lib/systemd/system/caracal-display.service'),
+                 Path('/etc/init.d/caracal-display'))
+DISPLAY_CHECK_EVERY, DISPLAY_GRACE, DISPLAY_RESTART_EVERY, DISPLAY_RESTARTS = 60, 120, 600, 3
 # CARACAL on Docker (installed by install-node.sh): compose project in NODE_DIR, data in DATA_DIR
 NODE_DIR = Path(os.getenv('CARACAL_NODE_DIR', '/opt/caracal-node'))
 DATA_DIR = Path(os.getenv('CARACAL_DATA_DIR', '/var/lib/caracal'))
@@ -193,6 +200,8 @@ class Agent:
         self._caps, self._caps_at = None, 0
         self.maintenance = ''      # e.g. 'caracal_update' while CARACAL is being updated
         self.reboot_pending = False
+        self.display = None        # {'state': 'ok'|'down', 'since', 'restarts'} of the display watch
+        self.display_bad_since, self.display_restart_at, self.display_restarts, self.display_checked = None, 0, 0, 0
 
     # ------------------------------------------------------------ transport
 
@@ -418,6 +427,9 @@ class Agent:
             'profiles': self.profiles_of(snap), 'notifications': self.notifications_of(snap),
             'admin': self.admin_of(snap), 'overlay': snap.get('overlay') if isinstance(snap.get('overlay'), dict) else None,
             'player_settings': snap.get('player_settings') if isinstance(snap.get('player_settings'), dict) else None,
+            # the screen: switched on or off (DPMS), whether the X display answers, and the node's black screen watch
+            'screen': screen_state(), 'display': self.display,
+            'screen_watch': snap.get('display') if isinstance(snap.get('display'), dict) else None,
             'frozen_until': self.state.get('unfreeze_at'), 'last_error': self.last_error,
             'capabilities': self.capabilities() if api_ok else {},
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
@@ -675,6 +687,48 @@ class Agent:
 
     def do_delete_notify_token(self, p):
         return self.body(self.local('notify_token_delete', {'id': p['id']}))
+
+    def do_screen(self, p):
+        """Switch the screen off or on: the X display's power saving (DPMS stops the picture, TVs go to standby) and,
+        where the device has HDMI-CEC (/dev/cec*, cec-ctl), the TV itself."""
+        state = p.get('state')
+        if state not in ('on', 'off'):
+            raise RuntimeError('state must be on or off')
+        if not X_SOCKET.exists():
+            raise RuntimeError('The X display is not running')
+        steps = [('+dpms',), ('dpms', 'force', 'on'), ('-dpms',), ('s', 'off'), ('s', 'noblank')] if state == 'on' \
+            else [('+dpms',), ('dpms', '0', '0', '0'), ('dpms', 'force', 'off')]
+        for args in steps:
+            code, out = xset(*args)
+            if code:
+                raise RuntimeError(f'xset {" ".join(args)} failed: {out[-300:]}')
+        return {'screen': screen_state() or state, 'cec': cec_power(state == 'on')}
+
+    def check_display(self):
+        """Display watch (once a minute): restart the X display when it stopped answering."""
+        now = time.time()
+        if now - self.display_checked < DISPLAY_CHECK_EVERY:
+            return
+        self.display_checked = now
+        # without xset the agent cannot tell whether the display answers: no watch rather than needless restarts
+        if self.maintenance or not shutil.which('xset') or not any(p.exists() for p in DISPLAY_UNITS):
+            self.display = None
+            return
+        if screen_state() is not None:
+            if self.display and self.display.get('state') == 'down':
+                log('the X display answers again')
+            self.display_bad_since = None
+            if now - self.display_restart_at > 3600:
+                self.display_restarts = 0
+            self.display = {'state': 'ok', 'restarts': self.display_restarts}
+            return
+        self.display_bad_since = self.display_bad_since or now
+        if now - self.display_bad_since >= DISPLAY_GRACE and now - self.display_restart_at >= DISPLAY_RESTART_EVERY \
+                and self.display_restarts < DISPLAY_RESTARTS:
+            log('the X display does not answer, restarting caracal-display')
+            restart_display()
+            self.display_restart_at, self.display_restarts = now, self.display_restarts + 1
+        self.display = {'state': 'down', 'since': self.display_bad_since, 'restarts': self.display_restarts}
 
     def do_player_settings(self, p):
         return self.body(self.local('player_settings', json={k: p[k] for k in ('web_dark',) if k in p}))
@@ -1262,6 +1316,7 @@ class Agent:
         while True:
             try:
                 self.auto_unfreeze()
+                self.check_display()
                 if time.time() >= next_hb:
                     self.heartbeat()
                     next_hb = time.time() + self.conf['heartbeat_interval']
@@ -1287,6 +1342,57 @@ class Agent:
 
 def is_docker():
     return (NODE_DIR / 'compose.yml').is_file()
+
+
+def xset(*args):
+    """xset on CARACAL's X display: (exit code, output). On Alpine X runs as root and lets in the user caracal."""
+    if not shutil.which('xset'):
+        return 1, 'xset is not installed'
+    try:
+        r = subprocess.run(['xset', *args], env={**os.environ, **X_ENV}, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, text=True, timeout=10)
+        if r.returncode == 0 or not shutil.which('su'):
+            return r.returncode, r.stdout
+        r = subprocess.run(['su', '-s', '/bin/sh', 'caracal', '-c', 'DISPLAY=:0 xset ' + shlex.join(args)],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=10)
+        return r.returncode, r.stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+
+
+def screen_state():
+    """'on' / 'off' (DPMS) when the X display answers, None when it does not run or does not answer."""
+    if not X_SOCKET.exists():
+        return None
+    code, out = xset('q')
+    if code:
+        return None
+    return 'off' if re.search(r'Monitor is (Off|in Standby|in Suspend)', out) else 'on'
+
+
+def cec_power(on):
+    """Switch a TV connected over HDMI-CEC on or to standby; False when the device has no CEC."""
+    dev = next(iter(sorted(Path('/dev').glob('cec[0-9]*'))), None)
+    if not dev or not shutil.which('cec-ctl'):
+        return False
+    try:
+        subprocess.run(['cec-ctl', '-d', str(dev), '--playback'], capture_output=True, timeout=15)
+        r = subprocess.run(['cec-ctl', '-d', str(dev), '--to', '0', '--image-view-on' if on else '--standby'],
+                           capture_output=True, timeout=15)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def restart_display():
+    if shutil.which('systemctl') and Path('/run/systemd/system').is_dir():
+        systemctl('reset-failed', 'caracal-display.service')
+        systemctl('restart', 'caracal-display.service')
+    elif shutil.which('rc-service'):
+        try:
+            subprocess.run(['rc-service', 'caracal-display', 'restart'], check=False, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def runtime():

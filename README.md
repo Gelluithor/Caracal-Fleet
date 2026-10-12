@@ -35,13 +35,23 @@ zero-touch USB stick](docs/fleet.gif)
 - **Diagnostics and reinstallation:** a report of a node whose screen stays black (disk, memory, power, display
   outputs, the X server, containers and system log, with the usual causes pointed out), and *Reinstall CARACAL*
   from scratch – optionally as a factory reset with a new administrator and a template
+- **Schedules:** global playlists by time of day and day of the week, screen hours (screens off outside them through
+  HDMI power saving and HDMI-CEC) and actions at a given time (restarts, screens off/on, a playlist, a template, a
+  notification, updates), in the hub's time zone
+- **Screen wall:** what every screen shows right now, refreshed while the page is open
+- **Display watch:** the agent restarts an X display that stopped answering, the node restarts a player whose website
+  stays black; both show up as problems and alerts
+- **Staged updates:** a new CARACAL version goes to pilot nodes first, then in batches after a healthy wait; a failure
+  stops the rollout; optionally automatic every day
 - **Websites in dark mode:** per node or per website and Grafana collection – the sites' own dark look or forced
   dark for every page
 - **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
 - **Nodes without internet access:** Fleet can be the only download source of a node (system packages, Docker and
   CARACAL go through the hub), chosen for the SD card, the SSH installation or per device
 - **Administration:** users with the roles admin, manager, operator and viewer; command history, audit log,
-  Czech and English UI, custom logo, full backup and restore for server migrations
+  Czech and English UI, custom logo, full backup and restore for server migrations, daily backups on the hub;
+  two-factor sign-in (TOTP with recovery codes) and single sign-on through OpenID Connect (Microsoft Entra ID,
+  Google, Keycloak, Authentik…)
 
 ## Quick start
 

@@ -118,7 +118,7 @@ def fake_screen(node, local, item, left, duration, frozen):
 
 def simulated_player(node, key_file):
     """What the CARACAL player does for the overlay and Fleet: plays the playlist, reports it every second and
-    follows the commands of the node's admin UI (v2) and of CARACAL Fleet (v6): next, show, freeze, unfreeze."""
+    follows the commands of the node's admin UI and of CARACAL Fleet (v6): next, show, freeze, unfreeze."""
     index, left, frozen, seen = 0, None, False, {}
     local = requests.Session()   # the node's local endpoints want the key from its data directory, as the player
     while True:
@@ -126,7 +126,7 @@ def simulated_player(node, key_file):
             local.headers['X-Caracal-Local'] = key_file.read_text().strip()
             items = local.get(node + '/api/player/playlist-expanded', timeout=5).json() or []
             ids = [x['id'] for x in items]
-            for path, target in (('/api/v2/player/command', 'asset_id'), ('/api/v6/player/command', 'item_id')):
+            for path, target in (('/api/v6/player/command', 'item_id'),):
                 cmd = local.get(node + path, timeout=5).json()
                 if path not in seen:
                     seen[path] = cmd['command_id']
@@ -200,7 +200,7 @@ def start_real_node(hub, agent_mod, with_overlay):
     s.post(node + '/api/login', data={'username': 'admin', 'password': password})
     if not s.get(node + '/api/assets').json():
         for name, url, duration in (('Uvítání', 'https://example.com', 20), ('Výroba – Grafana', 'https://grafana.com', 30), ('Jídelníček', 'https://example.org', 15)):
-            s.post(node + '/api/assets/url', data={'name': name, 'source': url, 'duration': duration})
+            s.post(node + '/api/v9/assets/web', json={'name': name, 'source': url, 'duration': duration})
         s.post(node + '/api/assets/grafana-tag', data={'name': 'Výroba', 'grafana_url': 'https://grafana.example', 'tag': 'vyroba', 'duration': 20})
     threading.Thread(target=simulated_player, args=(node, data / 'local.key'), daemon=True).start()
     agent = agent_mod.Agent({'hub': hub, 'local_api': node, **enrolled})

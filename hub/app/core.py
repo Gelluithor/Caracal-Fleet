@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.15.0'
+HUB_VERSION = '4.16.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -73,6 +73,8 @@ ACTIONS = {
     'diagnostics': ('manage', 600),
     # agents from 4.13 with CARACAL 2026.10.12 and newer: websites in dark mode
     'player_settings': ('content', None),
+    # agents from 4.14: switch the screen off / on (DPMS, HDMI-CEC)
+    'screen': ('control', 600),
     # on-screen notifications of the nodes
     'notify': ('control', 600),
     'notify_clear': ('control', 600),
@@ -208,6 +210,14 @@ CREATE INDEX IF NOT EXISTS idx_events_device ON events(device_id, ts);
 -- node templates: parts of a node's setup applied to many nodes (hub/app/templates.py)
 CREATE TABLE IF NOT EXISTS node_templates(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT DEFAULT '',
   data_json TEXT DEFAULT '{}', image_file_id TEXT DEFAULT '', created REAL, updated REAL, updated_by TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS node_schedules(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER DEFAULT 1,
+  data_json TEXT DEFAULT '{}', created REAL, updated REAL, updated_by TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS rollouts(id INTEGER PRIMARY KEY AUTOINCREMENT, version TEXT, image TEXT, state TEXT,
+  stages_json TEXT DEFAULT '[]', current INTEGER DEFAULT 0, wait INTEGER DEFAULT 30, auto INTEGER DEFAULT 0, username TEXT,
+  created REAL, updated REAL, log_json TEXT DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS scheduled_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER DEFAULT 1,
+  data_json TEXT DEFAULT '{}', last_run REAL, last_day TEXT DEFAULT '', last_result TEXT DEFAULT '', created REAL,
+  updated REAL, updated_by TEXT DEFAULT '');
 """
 
 # Columns added after the first releases; existing databases are migrated in place.
@@ -226,6 +236,13 @@ COLUMNS = [
     ('jobs', 'result_json', "TEXT DEFAULT ''"),
     ('devices', 'pending_template', 'INTEGER'),   # template of a new node, applied after its first report
     ('global_playlist_items', 'dark', "TEXT DEFAULT ''"),   # dark mode of a website: '' = as the node, off, dark, force
+    ('devices', 'schedule_key', "TEXT DEFAULT ''"),
+    # two-factor sign-in (TOTP) and single sign-on
+    ('users', 'totp_secret', "TEXT DEFAULT ''"),
+    ('users', 'totp_pending', "TEXT DEFAULT ''"),
+    ('users', 'totp_recovery', "TEXT DEFAULT ''"),
+    ('users', 'totp_last', 'INTEGER DEFAULT 0'),
+    ('users', 'sso_subject', "TEXT DEFAULT ''"),   # '<schedule id>:<playlist id>' deployed by a schedule
 ]
 
 
@@ -434,8 +451,10 @@ def user_from_token(raw, perm='view'):
 
 
 def public_user(u):
-    return {'id': u['id'], 'username': u['username'], 'role': u['role'], 'language': u['language'] or 'cs',
-            'permissions': sorted(p for p, roles in PERMS.items() if u['role'] in roles)}
+    x = dict(u)
+    return {'id': x['id'], 'username': x['username'], 'role': x['role'], 'language': x['language'] or 'cs',
+            'permissions': sorted(p for p, roles in PERMS.items() if x['role'] in roles),
+            'totp': bool(x.get('totp_secret')), 'sso': str(x.get('password_hash') or '').startswith('sso$')}
 
 
 def audit(u, action, target='', detail=''):

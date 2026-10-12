@@ -29,7 +29,9 @@
         <p class="muted" data-i="loginSub"></p>
         <label><span data-i="username"></span><input id="loginUser" autocomplete="username" required></label>
         <label><span data-i="password"></span><input id="loginPass" type="password" autocomplete="current-password" required></label>
+        <label id="loginCodeRow" hidden><span data-i="totpCode"></span><input id="loginCode" inputmode="numeric" autocomplete="one-time-code" spellcheck="false"></label>
         <button class="btn primary block" data-i="signIn"></button>
+        <a id="ssoBtn" class="btn block sso-btn" href="/api/sso/login" hidden></a>
         <div id="loginError" class="form-error"></div>
       </form>
       <form id="setupForm" class="login-card" hidden>

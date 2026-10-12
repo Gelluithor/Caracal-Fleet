@@ -15,7 +15,7 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 
 | Operation | Method and path | Body / response |
 |---|---|---|
-| State | `GET /snapshot` | `{api_version: 2, runtime, version, assets, profiles, player, requests}` |
+| State | `GET /snapshot` | `{api_version: 2, runtime, version, assets, profiles, player, requests}`; newer nodes add `notifications, admin, overlay, collections, screenshot, player_settings` and `display: {black_since, checked, restarted}` (the black screen watch, CARACAL 2026.10.12.1) |
 | Control | `POST /control` | `{action: show\|freeze, item_id}`, `{action: show_collection\|freeze_collection, collection_id}`, `{action: next\|unfreeze}` |
 | Web page | `POST /assets/web` | `{name, source, duration, scale, auth_profile_id}` → `{id}` |
 | Grafana collection | `POST /assets/grafana-tag` | `{name, grafana_url, tag, kiosk, duration, scale}` → `{id}` |

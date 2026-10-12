@@ -3,6 +3,8 @@ website, global playlists and templates)."""
 import json
 import os
 
+import pytest
+
 from conftest import load_agent
 
 CAPS = {'notify': True, 'notify_settings': True, 'overlay': True, 'upload': True, 'add_grafana_tag': True,
@@ -178,3 +180,49 @@ def test_installer_reinstall_options():
     # the containers and images go first, the data only when asked
     assert src.index('docker compose down --remove-orphans --rmi all') < src.index("step '[3/7] User and data folders'")
     assert 'find /var/lib/caracal -mindepth 1 -maxdepth 1 -exec rm -rf {} +' in src
+
+
+def test_agent_screen_and_display_watch(tmp_path, monkeypatch):
+    mod = load_agent()
+    agent = mod.Agent({'hub': 'http://127.0.0.1:9', 'local_api': 'http://127.0.0.1:9', 'device_id': 'CRCL-S', 'device_token': 't'})
+    sock = tmp_path / 'X0'
+    sock.write_text('')
+    mod.X_SOCKET = sock
+    calls, monitor = [], {'off': False}
+
+    def xset(*args):
+        calls.append(args)
+        if args == ('dpms', 'force', 'off'):
+            monitor['off'] = True
+        if args == ('dpms', 'force', 'on'):
+            monitor['off'] = False
+        return 0, f"DPMS is Enabled\n  Monitor is {'Off' if monitor['off'] else 'On'}\n" if args == ('q',) else ''
+    mod.xset = xset
+    mod.cec_power = lambda on: False
+    assert agent.do_screen({'state': 'off'}) == {'screen': 'off', 'cec': False}
+    assert ('+dpms',) in calls and mod.screen_state() == 'off'
+    assert agent.do_screen({'state': 'on'})['screen'] == 'on' and ('s', 'noblank') in calls
+    with pytest.raises(RuntimeError):
+        agent.do_screen({'state': 'dim'})
+
+    # display watch: only where CARACAL's display service is installed; restarts after the grace time, limited
+    monkeypatch.setattr(mod.shutil, 'which', lambda name, real=mod.shutil.which: '/usr/bin/xset' if name == 'xset' else real(name))
+    unit = tmp_path / 'caracal-display.service'
+    mod.DISPLAY_UNITS = (unit,)
+    agent.check_display()
+    assert agent.display is None
+    unit.write_text('[Unit]')
+    restarts = []
+    mod.restart_display = lambda: restarts.append(1)
+    mod.xset = lambda *a: (1, 'unable to open display')
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, 'time', lambda: clock[0])   # restored after the test
+    for step in range(12):
+        agent.display_checked = 0
+        agent.check_display()
+        clock[0] += 61
+    assert agent.display['state'] == 'down' and 1 <= len(restarts) <= mod.DISPLAY_RESTARTS
+    mod.xset = xset
+    agent.display_checked = 0
+    agent.check_display()
+    assert agent.display['state'] == 'ok'

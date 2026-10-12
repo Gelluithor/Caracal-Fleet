@@ -154,6 +154,8 @@ if [ "$PKG" = apt ]; then
   # a reinstallation also replaces the files of packages that are already installed (a broken X server)
   apt-get install -y -qq ${REINSTALL:+--reinstall xserver-xorg-core} ca-certificates curl xserver-xorg \
     xserver-xorg-legacy xinit openbox unclutter x11-xserver-utils dbus-x11 python3 python3-requests python3-psutil >/dev/null
+  # cec-ctl: the agent switches a TV on and to standby over HDMI-CEC (screen schedules)
+  apt-get install -y -qq v4l-utils >/dev/null 2>&1 || true
   # small boards (Raspberry Pi 4 with 1-2 GB): compressed swap in memory (zram), unless there is one already
   MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   if [ "${MEM_MB:-0}" -le 2048 ] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -q zram; then
@@ -171,6 +173,7 @@ else
   apk add -q ca-certificates curl bash shadow eudev xorg-server xf86-input-libinput xinit openbox unclutter-xfixes \
     xset xsetroot xrandr xhost dbus dbus-x11 mesa-dri-gallium mesa-egl font-dejavu python3 py3-requests py3-psutil \
     >/dev/null
+  apk add -q v4l-utils >/dev/null 2>&1 || true   # cec-ctl for HDMI-CEC
   [ -z "$REINSTALL" ] || apk fix -q xorg-server xinit openbox mesa-dri-gallium >/dev/null 2>&1 || true
   if command -v setup-devd >/dev/null; then setup-devd udev >/dev/null 2>&1 || true; fi
   # firmware of the usual PC graphics (a full kernel; virtual machines use virtio/bochs without firmware)

@@ -92,6 +92,8 @@ const ICONS = {
   playlists: 'M4 6h12M4 12h12M4 18h8M18 15v6l4-3z',
   global: 'M3 7h18v13H3zM6 4h12M9 11h6M9 15h4',
   templates: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM16.5 13v7M13 16.5h7',
+  wall: 'M3 4h8v6H3zM13 4h8v6h-8zM3 14h8v6H3zM13 14h8v6h-8z',
+  schedule: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
   updates: 'M12 3v12M7 10l5 5 5-5M5 21h14',
   upload: 'M12 21V9M7 14l5-5 5 5M5 3h14',
   download: 'M12 3v12M7 10l5 5 5-5M5 21h14',
@@ -209,10 +211,14 @@ async function doLogin(e) {
   e.preventDefault();
   $('#loginError').textContent = '';
   try {
+    const code = $('#loginCodeRow').hidden ? undefined : $('#loginCode').value.trim();
     const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: $('#loginUser').value.trim(), password: $('#loginPass').value }) });
+      body: JSON.stringify({ username: $('#loginUser').value.trim(), password: $('#loginPass').value, code }) });
     const d = await r.json().catch(() => ({}));
+    if (d.detail === 'totp_required' || d.detail === 'invalid_totp') { $('#loginCodeRow').hidden = false; $('#loginCode').value = ''; $('#loginCode').focus(); }
     if (!r.ok) throw new Error(d.detail || r.statusText);
+    $('#loginCodeRow').hidden = true;
+    $('#loginCode').value = '';
     S.token = d.token;
     store.set('caracalToken', S.token);
     if (!store.get('caracalLang')) S.lang = d.user.language;
@@ -246,7 +252,11 @@ function logout() {
   $('#login').hidden = false;
   $('#loginForm').hidden = !!PUBLIC.setup_required;
   $('#setupForm').hidden = !PUBLIC.setup_required;
+  $('#loginCodeRow').hidden = true;
   applyStatic();
+  const sso = PUBLIC.sso || {};
+  $('#ssoBtn').hidden = !sso.enabled;
+  $('#ssoBtn').textContent = t('ssoSignIn', { name: sso.label || 'SSO' });
 }
 
 async function doSetup(e) {
@@ -308,8 +318,8 @@ async function refresh() {
 // ------------------------------------------------------------------ navigation
 
 const NAV = [
-  ['overview', 'view'], ['devices', 'view'], ['attention', 'view'], ['playlists', 'view'], ['global', 'view'],
-  ['templates', 'view'], ['organization', 'view'],
+  ['overview', 'view'], ['devices', 'view'], ['wall', 'view'], ['attention', 'view'], ['playlists', 'view'], ['global', 'view'],
+  ['templates', 'view'], ['schedule', 'view'], ['organization', 'view'],
   ['operations', 'view'], ['updates', 'manage'], ['audit', 'manage'], ['users', 'admin'], ['settings', 'view'],
 ];
 
@@ -574,6 +584,7 @@ function deviceActions(d = null) {
   const webDark = has('player_settings');
   // reinstallation and diagnostics are done by the agent itself (4.13 and newer)
   const agent = sel.some(agentFeatures), agentWhy = agent ? t('offline') : t('err_agent_update_required');
+  const screen = sel.some(x => verGte(x.version, '4.14.0')), screenWhy = screen ? t('offline') : t('needAgent414');
   const ctl = can('control'), content = can('content'), manage = can('manage');
   const A = (todo, ic, label, o = {}) => ({ todo, ic, label, ...o, why: o.disabled ? o.why || t('offline') : '' });
   const cmd = d ? 'cmd' : 'bulk';
@@ -610,6 +621,8 @@ function deviceActions(d = null) {
       [manage && d && A('diagnostics', 'audit', t('diagnostics'), { disabled: off || !agent, why: agentWhy })],
       [manage && d && A('provision', 'ssh', t('sshInstall'), { data: { host: d.ip || '', name: d.name } }),
         manage && d && A('', 'console', t('console'), { href: '#/console/' + encodeURIComponent(d.id) })],
+      [ctl && (!d || d.screen !== 'off') && A('screenSet', 'moon', t('screenSwitchOff'), { data: { state: 'off' }, disabled: off || !screen, why: screenWhy }),
+        ctl && (!d || d.screen === 'off') && A('screenSet', 'sun', t('screenSwitchOn'), { data: { state: 'on' }, disabled: off || !screen, why: screenWhy })],
       [manage && A('bulkSetHub', 'upload', t('act_set_hub')),
         ctl && A(cmd, 'power', t('act_reboot'), { act: 'reboot', cls: 'danger', disabled: off })],
     ] },
@@ -1074,6 +1087,7 @@ function deviceOverview(d) {
         <dt>${t('hostname')}</dt><dd>${esc(d.hostname || '—')}</dd><dt>${t('model')}</dt><dd>${esc(d.model || '—')}</dd>
         <dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>${t('uptime')}</dt><dd>${d.online ? dur(d.uptime) : '—'}</dd>
         <dt>${t('lastSeen')}</dt><dd>${dt(d.last_seen)}</dd><dt>${t('agent')}</dt><dd>${esc(d.version || '—')} (${t('latest')} ${esc(S.agentVersion)})</dd>
+        ${d.screen ? `<dt>${t('act_screen')}</dt><dd>${t(d.screen === 'on' ? 'screenOn' : 'screenOff')}</dd>` : ''}
         <dt>${t('localApi')}</dt><dd>${d.api_ok === false ? `<span class="tag critical">${t('unavailable')}</span>` : d.api_ok ? `<span class="tag ok">OK</span>` : '—'}</dd>
         <dt>${t('downloadSource')}</dt><dd>${d.download_source ? t('downloadSource_' + d.download_source) : '—'}${can('manage') && d.download_source ? ` <button class="btn sm ghost" data-do="downloadSource" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
         <dt>${t('pendingCommands')}</dt><dd>${d.pending_commands}</dd>${d.notes ? `<dt>${t('notes')}</dt><dd>${esc(d.notes)}</dd>` : ''}</dl></section>
@@ -2085,8 +2099,8 @@ VIEWS.users = {
     S.users = users;
     patch($('#uTable', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('username')}</th><th>${t('role')}</th><th>${t('language')}</th><th>${t('state')}</th><th>${t('created')}</th><th></th></tr></thead>
       <tbody>${users.map(u => `<tr><td><b>${esc(u.username)}</b>${u.username === S.me.username ? ` <span class="tag">${t('you')}</span>` : ''}</td><td><span class="badge role">${t('role_' + u.role)}</span></td>
-      <td>${u.language === 'en' ? 'English' : 'Čeština'}</td><td>${u.enabled ? `<span class="tag ok">${t('active')}</span>` : `<span class="tag">${t('disabled')}</span>`}</td><td class="nowrap">${dt(u.created)}</td>
-      <td class="actions-cell"><button class="icon-btn" data-do="userEdit" data-uid="${u.id}" title="${t('edit')}">${icon('edit')}</button>
+      <td>${u.language === 'en' ? 'English' : 'Čeština'}</td><td>${u.enabled ? `<span class="tag ok">${t('active')}</span>` : `<span class="tag">${t('disabled')}</span>`}${u.totp ? ` <span class="tag info">2FA</span>` : ''}${u.sso ? ` <span class="tag">SSO</span>` : ''}</td><td class="nowrap">${dt(u.created)}</td>
+      <td class="actions-cell">${u.totp ? `<button class="btn sm ghost" data-do="totpReset" data-uid="${u.id}" data-name="${esc(u.username)}">${t('totpReset')}</button>` : ''}<button class="icon-btn" data-do="userEdit" data-uid="${u.id}" title="${t('edit')}">${icon('edit')}</button>
       ${u.username !== S.me.username ? `<button class="icon-btn danger" data-do="userDelete" data-uid="${u.id}" data-name="${esc(u.username)}" title="${t('delete')}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`);
   },
 };
@@ -2096,7 +2110,7 @@ VIEWS.users = {
 // Settings are split into sections with their own navigation (#/settings/<section>).
 const SETTINGS = [
   ['account', 'view', 'users'], ['alerts', 'admin', 'bell'], ['install', 'admin', 'plus'], ['notifyapi', 'manage', 'web'],
-  ['proxy', 'manage', 'download'], ['branding', 'admin', 'image'], ['backup', 'admin', 'upload'],
+  ['proxy', 'manage', 'download'], ['sso', 'admin', 'lock'], ['branding', 'admin', 'image'], ['backup', 'admin', 'upload'],
 ];
 
 VIEWS.settings = {
@@ -2110,7 +2124,71 @@ VIEWS.settings = {
   },
 };
 
+// Backups the hub makes itself every day, kept in its data folder.
+async function backupScheduleCard(el) {
+  const b = await api('/api/backups').catch(() => null);
+  if (!b || !el.isConnected) return;
+  const s = b.settings;
+  el.innerHTML = `<h2>${t('backupScheduled')}</h2><p class="muted">${t('backupScheduledHint', { folder: esc(b.folder) })}</p>
+    <form class="form" id="bkForm"><label class="check"><input type="checkbox" class="switch" name="enabled" ${s.enabled ? 'checked' : ''}>${t('backupDaily')}</label>
+    <div class="row2"><label>${t('autoUpdateHour')}<input name="hour" type="number" min="0" max="23" value="${s.hour}"></label><label>${t('backupKeep')}<input name="keep" type="number" min="1" max="90" value="${s.keep}"></label></div>
+    <div class="form-actions start"><button class="btn primary">${t('save')}</button><button type="button" class="btn" id="bkNow">${icon('upload')}${t('backupNow')}</button></div></form>
+    <div class="table-wrap"><table class="table"><thead><tr><th>${t('file')}</th><th>${t('created')}</th><th></th></tr></thead><tbody>
+    ${b.backups.map(x => `<tr><td><b>${esc(x.name)}</b><br><small class="muted">${fmtSize(x.size)}</small></td><td class="nowrap">${dt(x.created)}</td>
+      <td class="actions-cell"><button class="btn sm" data-bk-get="${esc(x.name)}">${icon('download')}${t('download')}</button><button class="icon-btn danger" data-bk-del="${esc(x.name)}" title="${t('delete')}">${icon('trash')}</button></td></tr>`).join('')
+      || `<tr><td colspan="3" class="empty">${t('backupNone')}</td></tr>`}</tbody></table></div>`;
+  $('#bkForm', el).onsubmit = async e => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    try { await api('/api/backups/settings', { method: 'PUT', json: { enabled: !!f.enabled, hour: Number(f.hour), keep: Number(f.keep) } }); toast(t('saved')); } catch (err) { toast(errText(err), 'err'); }
+  };
+  $('#bkNow', el).onclick = async () => {
+    try { await api('/api/backups/run', { method: 'POST' }); toast(t('saved')); backupScheduleCard(el); } catch (err) { toast(errText(err), 'err'); }
+  };
+  $$('[data-bk-get]', el).forEach(btn => { btn.onclick = async () => {
+    const r = await fetch('/api/backups/' + encodeURIComponent(btn.dataset.bkGet), { headers: { Authorization: 'Bearer ' + S.token } });
+    if (!r.ok) return toast(t('err_not_found'), 'err');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = btn.dataset.bkGet;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }; });
+  $$('[data-bk-del]', el).forEach(btn => { btn.onclick = async () => {
+    if (!await confirmBox(t('confirmBackupDelete', { name: esc(btn.dataset.bkDel) }))) return;
+    await api('/api/backups/' + encodeURIComponent(btn.dataset.bkDel), { method: 'DELETE' });
+    backupScheduleCard(el);
+  }; });
+}
+
 const SETTINGS_VIEW = {
+  async sso(root) {
+    root.innerHTML = `<section class="card"><div class="empty">…</div></section>`;
+    const o = await api('/api/sso/settings').catch(() => null);
+    if (!o || !root.isConnected) return;
+    root.innerHTML = `<section class="card"><h2>${t('ssoTitle')}</h2><p class="muted">${t('ssoHint')}</p>
+      <form id="ssoForm" class="form"><label class="check"><input type="checkbox" class="switch" name="enabled" ${o.enabled ? 'checked' : ''}>${t('ssoEnable')}</label>
+      <label>${t('ssoIssuer')}<input name="issuer" type="url" value="${esc(o.issuer)}" placeholder="https://login.example.com/realms/firma" spellcheck="false"><small class="muted">${t('ssoIssuerHint')}</small></label>
+      <div class="row2"><label>Client ID<input name="client_id" value="${esc(o.client_id)}" spellcheck="false"></label><label>Client secret<input name="client_secret" type="password" value="${esc(o.client_secret)}" autocomplete="off"></label></div>
+      <label>${t('ssoRedirect')}<input value="${esc(o.redirect_uri)}" readonly><small class="muted">${t('ssoRedirectHint')}</small></label>
+      <div class="row2"><label>${t('ssoClaim')}<select name="username_claim">${['preferred_username', 'email', 'upn', 'name', 'sub'].map(c => `<option ${c === o.username_claim ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
+      <label>${t('ssoLabel')}<input name="label" value="${esc(o.label)}" placeholder="Microsoft, Google, Keycloak…"></label></div>
+      <label>${t('ssoDomains')}<input name="allowed_domains" value="${esc(o.allowed_domains)}" placeholder="firma.cz, firma.com"><small class="muted">${t('ssoDomainsHint')}</small></label>
+      <label class="check"><input type="checkbox" class="switch" name="auto_create" ${o.auto_create ? 'checked' : ''}>${t('ssoAutoCreate')}</label>
+      <label>${t('ssoRole')}<select name="default_role">${['admin', 'manager', 'operator', 'viewer'].map(r => `<option value="${r}" ${r === o.default_role ? 'selected' : ''}>${t('role_' + r)}</option>`).join('')}</select></label>
+      <details><summary>${t('advanced')}</summary><label>${t('ssoScopes')}<input name="scopes" value="${esc(o.scopes)}"></label>
+        <label>${t('ssoPublicUrl')}<input name="public_url" type="url" value="${esc(o.public_url)}" placeholder="${esc(location.origin)}"><small class="muted">${t('ssoPublicUrlHint')}</small></label></details>
+      <div class="form-actions"><button class="btn primary">${t('save')}</button></div></form></section>`;
+    $('#ssoForm', root).onsubmit = async e => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      try {
+        await api('/api/sso/settings', { method: 'PUT', json: { ...f, enabled: !!f.enabled, auto_create: !!f.auto_create } });
+        toast(t('saved'));
+        PUBLIC = await loadPublic();
+      } catch (err) { toast(errText(err), 'err'); }
+    };
+  },
   account(root) {
     root.innerHTML = `<section class="card"><h2>${t('myAccount')}</h2>
       <dl class="kv"><dt>${t('username')}</dt><dd>${esc(S.me.username)}</dd><dt>${t('role')}</dt><dd>${t('role_' + S.me.role)}</dd></dl>
@@ -2118,6 +2196,9 @@ const SETTINGS_VIEW = {
         <label>${t('currentPassword')}<input type="password" name="current_password" autocomplete="current-password" required></label>
         <label>${t('newPassword')}<input type="password" name="new_password" minlength="10" autocomplete="new-password" required></label>
         <div class="form-actions"><button class="btn primary">${t('changePassword')}</button></div></form></section>
+      ${S.me.sso ? `<section class="card"><h2>${t('totpTitle')}</h2><p class="muted">${t('totpSso')}</p></section>`
+        : `<section class="card"><div class="card-head"><h2>${t('totpTitle')}</h2><span class="tag ${S.me.totp ? 'ok' : ''}">${t(S.me.totp ? 'totpOn' : 'totpOff')}</span></div>
+        <p class="muted">${t('totpHint')}</p><div class="form-actions start">${S.me.totp ? `<button class="btn danger" data-do="totpDisable">${t('totpDisable')}</button>` : `<button class="btn primary" data-do="totpSetup">${icon('lock')}${t('totpEnable')}</button>`}</div></section>`}
       <section class="card"><h2>${t('system')}</h2><dl class="kv"><dt>${t('hubVersion')}</dt><dd>${esc(S.me.hub_version)}</dd><dt>${t('agentVersion')}</dt><dd>${esc(S.me.agent_version)}</dd></dl></section>
       <section class="card"><h2>${t('shortcuts')}</h2>${shortcutsHtml()}</section>`;
   },
@@ -2153,11 +2234,13 @@ const SETTINGS_VIEW = {
   backup(root) {
     root.innerHTML = `<section class="card"><h2>${t('backupTitle')}</h2><p class="muted">${t('backupHint')}</p>
         <div class="form-actions start"><button class="btn primary" id="backupDownload">${icon('download')}${t('backupDownload')}</button></div></section>
+      <section class="card" id="backupSchedule"><div class="empty">…</div></section>
       <section class="card"><h2>${t('restoreTitle')}</h2><p class="muted">${t('restoreHint')}</p>
         <div class="form"><label>${t('backupFile')}<input type="file" id="restoreFile" accept=".zip,application/zip"></label>
         <div class="form-actions"><button class="btn danger" id="restoreRun">${icon('upload')}${t('restoreRun')}</button></div></div></section>
       <section class="card"><h2>${t('migrateTitle')}</h2><ol class="steps">${t('migrateSteps')}</ol></section>`;
     this.handlers(root);
+    backupScheduleCard($('#backupSchedule', root));
   },
   // logo and backup buttons (each wires only what its section shows)
   handlers(root) {
@@ -2334,6 +2417,8 @@ VIEWS.updates = {
       <section class="card flush"><div class="toolbar"><h2 class="grow">${t('nodeVersions')}</h2>
         <button class="btn" data-do="convertNodes">${icon('upload')}${t('convertToDocker')}</button>
         <button class="btn primary" data-do="caracalUpdate" data-outdated="1">${icon('updates')}${t('updateOutdated')}</button></div><div id="relNodes"></div></section>
+      <section class="card flush"><div class="toolbar"><h2 class="grow">${t('rollouts')}</h2>${can('manage') ? `<button class="btn" data-do="rolloutAuto">${icon('settings')}${t('autoUpdate')}</button>
+        <button class="btn primary" data-do="rolloutNew">${icon('updates')}${t('rolloutNew')}</button>` : ''}</div><p class="muted card-intro">${t('rolloutsHint')}</p><div id="rollouts"></div></section>
       <details class="card legacy"><summary><b>${t('classicNodes')}</b> <span class="muted">${t('classicNodesHint')}</span></summary>
         <div class="grid two legacy-body"><section><h3>${t('releaseUpload')}</h3><p class="muted">${t('releaseUploadHint')}</p>
           <form id="relForm" class="form"><label>${t('releaseFile')}<input type="file" name="file" accept=".zip,.tar.gz,.tgz,application/zip,application/gzip" required></label>
@@ -2377,8 +2462,9 @@ VIEWS.updates = {
     };
   },
   async update(root) {
-    const [img, rels] = await Promise.all([api('/api/node-image').catch(() => null), api('/api/node-releases').catch(() => null)]);
+    const [img, rels, ro] = await Promise.all([api('/api/node-image').catch(() => null), api('/api/node-releases').catch(() => null), api('/api/rollouts').catch(() => null)]);
     if (!$('#relNodes', root)) return;
+    if (ro) { S.rollouts = ro; patch($('#rollouts', root), rolloutsHtml(ro)); }
     if (img) {
       S.image = img;
       const input = $('#imgForm input[name=image]', root);
@@ -2410,6 +2496,62 @@ VIEWS.updates = {
       }).join('') || `<tr><td colspan="7" class="empty">${t('noDevicesHint')}</td></tr>`}</tbody></table></div>`);
   },
 };
+
+// Staged updates: pilots first, then batches after a healthy wait; a failure stops the rollout.
+const ROLLOUT_STAGE = { waiting: '', updating: 'info', checking: 'info', done: 'ok', failed: 'critical' };
+function rolloutsHtml(ro) {
+  const edit = can('manage'), a = ro.auto;
+  const auto = `<div class="note ${a.enabled ? 'info' : ''}">${a.enabled ? t('autoUpdateOn', { hour: a.hour, group: esc(a.pilot_group || t('autoPilotFirst', { n: a.pilot_count })), batch: a.batch, wait: a.wait }) : t('autoUpdateOff')}</div>`;
+  const names = ids => ids.map(id => esc(dev(id)?.name || id)).join(', ');
+  return auto + (ro.rollouts.map(r => {
+    const done = r.stages.filter(s => s.state === 'done').length;
+    const problems = r.stages.flatMap(s => Object.entries({ ...(s.failed || {}), ...(s.unhealthy || {}), ...(s.skipped || {}) }));
+    return `<div class="rollout"><div class="rollout-head"><b>CARACAL ${esc(r.version)}</b><span class="badge st-${r.state === 'stopped' ? 'failed' : r.state === 'done' ? 'completed' : r.state === 'running' ? 'running' : 'queued'}">${t('rollout_' + r.state)}</span>
+      <small class="muted">${r.auto ? t('autoUpdate') : esc(r.username)} · ${dt(r.created)} · ${t('rolloutProgress', { done, n: r.stages.length })} · ${t('rolloutWait', { n: r.wait })}</small>
+      ${edit && ['running', 'paused', 'stopped'].includes(r.state) ? `<span class="rollout-actions">${r.state === 'running' ? `<button class="btn sm" data-do="rolloutCtl" data-act="pause" data-id="${r.id}">${icon('pause')}${t('pause')}</button>`
+        : `<button class="btn sm" data-do="rolloutCtl" data-act="resume" data-id="${r.id}">${icon('play')}${t('resume')}</button>`}<button class="btn sm danger" data-do="rolloutCtl" data-act="cancel" data-id="${r.id}">${icon('x')}${t('cancel')}</button></span>` : ''}</div>
+      <ol class="rollout-stages">${r.stages.map((s, i) => `<li class="${i === r.current && ['running', 'paused', 'stopped'].includes(r.state) ? 'current' : ''}"><span class="tag ${ROLLOUT_STAGE[s.state] || ''}">${t(i === 0 && r.stages.length > 1 && s.devices.length <= 3 ? 'rolloutPilot' : 'rolloutStage', { n: i + 1 })} · ${t('stage_' + s.state)}</span> <small>${names(s.devices)}</small></li>`).join('')}</ol>
+      ${problems.length ? `<div class="note warn"><div>${problems.map(([id, why]) => `<b>${esc(dev(id)?.name || id)}</b>: ${esc(errText(new Error(String(why))).slice(0, 200))}`).join('<br>')}</div></div>` : ''}</div>`;
+  }).join('') || `<div class="empty">${t('noRollouts')}</div>`);
+}
+async function rolloutDialog() {
+  const img = await imageInfo();
+  if (!img) return;
+  const latest = latestOf(img.versions);
+  const pre = S.devices.filter(d => d.runtime === 'docker' && d.caracal_version !== latest).map(d => d.id);
+  modal({
+    title: t('rolloutNew'), submit: t('rolloutStart'), wide: true,
+    body: `<div class="form"><p class="muted">${t('rolloutsHint')}</p>${versionField(img)}
+      <label>${t('targetDevices')}</label>${targetPicker(null, pre, d => d.runtime === 'docker')}
+      <details open><summary>${t('rolloutPilots')}</summary><p class="muted">${t('rolloutPilotsHint')}</p><div class="target-list pilot-list">${S.devices.filter(d => d.runtime === 'docker').map(d => `<label class="check"><input type="checkbox" name="p:${esc(d.id)}">${dot(d)}<span>${esc(d.name)}</span></label>`).join('') || `<div class="muted">${t('noOtherDevices')}</div>`}</div></details>
+      <div class="row2"><label>${t('rolloutBatch')}<input name="batch" type="number" min="1" max="500" value="5" required></label><label>${t('rolloutWaitMin')}<input name="wait" type="number" min="0" max="1440" value="30" required></label></div></div>`,
+    onOpen: bindTargetPicker,
+    onSubmit: async data => {
+      const ids = pickedTargets(data);
+      if (!ids.length) throw new Error('no_devices');
+      const pilots = Object.keys(data).filter(k => k.startsWith('p:')).map(k => k.slice(2));
+      await api('/api/rollouts', { method: 'POST', json: { version: data.version.trim(), device_ids: ids, pilot_ids: pilots, batch: Number(data.batch), wait: Number(data.wait) } });
+      toast(t('rolloutStarted'));
+      render();
+    },
+  });
+}
+function rolloutAutoDialog() {
+  const a = S.rollouts?.auto || { enabled: false, hour: 3, pilot_group: '', pilot_count: 1, batch: 5, wait: 30 };
+  modal({
+    title: t('autoUpdate'),
+    body: `<div class="form"><p class="muted">${t('autoUpdateHint')}</p><label class="check"><input type="checkbox" class="switch" name="enabled" ${a.enabled ? 'checked' : ''}>${t('autoUpdateEnable')}</label>
+      <div class="row2"><label>${t('autoUpdateHour')}<input name="hour" type="number" min="0" max="23" value="${a.hour}"></label>
+      <label>${t('autoPilotGroup')}<select name="pilot_group">${options(orgNames('groups'), a.pilot_group, t('autoPilotNone'))}</select></label></div>
+      <div class="row2"><label>${t('autoPilotCount')}<input name="pilot_count" type="number" min="0" max="50" value="${a.pilot_count}"></label><label>${t('rolloutBatch')}<input name="batch" type="number" min="1" max="500" value="${a.batch}"></label></div>
+      <label>${t('rolloutWaitMin')}<input name="wait" type="number" min="0" max="1440" value="${a.wait}"></label></div>`,
+    onSubmit: async data => {
+      await api('/api/rollouts/auto', { method: 'PUT', json: { enabled: !!data.enabled, hour: Number(data.hour), pilot_group: data.pilot_group, pilot_count: Number(data.pilot_count), batch: Number(data.batch), wait: Number(data.wait) } });
+      toast(t('saved'));
+      render();
+    },
+  });
+}
 
 async function imageInfo() {
   const img = await api('/api/node-image').catch(() => null);
@@ -3791,5 +3933,398 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyStati
 
 $('#setupForm').addEventListener('submit', doSetup);
 applyStatic();
-loadPublic().then(() => { if (S.token && !PUBLIC.setup_required) start(); else logout(); });
+// single sign-on comes back with the session (or an error) in the address
+let ssoError = '';
+if (location.hash.startsWith('#sso=')) {
+  S.token = decodeURIComponent(location.hash.slice(5));
+  store.set('caracalToken', S.token);
+  history.replaceState(null, '', location.pathname);
+} else if (location.hash.startsWith('#sso_error=')) {
+  ssoError = decodeURIComponent(location.hash.slice(11));
+  history.replaceState(null, '', location.pathname);
+}
+loadPublic().then(() => {
+  if (S.token && !PUBLIC.setup_required) start(); else logout();
+  if (ssoError) $('#loginError').textContent = errText(new Error(ssoError));
+});
 setInterval(tick, 5000);
+
+// ---------- schedules: playlists by time, screen hours and actions at a given time
+
+const DAYS = [0, 1, 2, 3, 4, 5, 6];
+const daysText = days => (days.length === 7 ? t('everyDay') : days.join() === '0,1,2,3,4' ? t('workdays') : days.join() === '5,6' ? t('weekend') : days.map(x => t('day_' + x)).join(' '));
+const windowText = w => `${daysText(w.days)} ${w.start}–${w.end}`;
+const targetsText = tg => [...(tg.groups || []).map(g => `${icon('group')}${esc(g)}`), ...(tg.locations || []).map(l => `${icon('location')}${esc(l)}`),
+  ...(tg.devices || []).map(id => `${icon('devices')}${esc(dev(id)?.name || id)}`)].map(x => `<span>${x}</span>`).join('');
+const daysPick = (days = [0, 1, 2, 3, 4]) => `<div class="day-pick">${DAYS.map(x => `<label><input type="checkbox" data-day="${x}" ${days.includes(x) ? 'checked' : ''}><span>${t('day_' + x)}</span></label>`).join('')}</div>`;
+const readDays = el => $$('[data-day]', el).filter(i => i.checked).map(i => Number(i.dataset.day));
+const playlistOptions = (sel, empty = '') => (empty ? `<option value="">${empty}</option>` : '') + (S.globalLists || []).map(p => `<option value="${p.id}" ${String(p.id) === String(sel) ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+const playlistName = id => (S.globalLists || []).find(p => p.id === id)?.name || (id ? '#' + id : '—');
+
+function targetsField(tg = {}) {
+  const pick = (kind, prefix, names, sel) => names.map(n => `<label class="check"><input type="checkbox" name="${prefix}${esc(n)}" ${(sel || []).includes(n) ? 'checked' : ''}>${icon(kind === 'groups' ? 'group' : 'location')}<span>${esc(n)}</span></label>`).join('');
+  return `<div class="sched-targets"><label>${t('schedTargets')}</label><small class="muted">${t('schedTargetsHint')}</small>
+    ${orgNames('groups').length || orgNames('locations').length ? `<div class="target-org">${pick('groups', 'g:', orgNames('groups'), tg.groups)}${pick('locations', 'l:', orgNames('locations'), tg.locations)}</div>` : ''}
+    <details ${(tg.devices || []).length || !(orgNames('groups').length || orgNames('locations').length) ? 'open' : ''}><summary>${t('schedDevices')}</summary>${targetPicker(null, tg.devices || [])}</details></div>`;
+}
+const readTargets = data => ({
+  devices: pickedTargets(data),
+  groups: Object.keys(data).filter(k => k.startsWith('g:')).map(k => k.slice(2)),
+  locations: Object.keys(data).filter(k => k.startsWith('l:')).map(k => k.slice(2)),
+});
+async function loadScheduleData() {
+  const [d, lists] = await Promise.all([api('/api/schedules'), api('/api/global-playlists').catch(() => []), loadTemplates()]);
+  S.globalLists = lists;
+  S.sched = d;
+  return d;
+}
+
+// A schedule as a week: one bar per day, coloured by the playlist on screen, hatched where the screens are off.
+const TL_COLORS = ['#ff7a45', '#4c8bf5', '#34c759', '#af52de', '#f5b400', '#00b8d9', '#ff5e8a', '#8e8e93'];
+const toMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+const fromMin = m => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+function coversAt(w, day, min) {
+  const s = toMin(w.start), e = toMin(w.end);
+  if (s < e) return w.days.includes(day) && min >= s && min < e;
+  return (w.days.includes(day) && min >= s) || (w.days.includes((day + 6) % 7) && min < e);
+}
+const playlistColor = id => TL_COLORS[Math.max(0, (S.globalLists || []).findIndex(p => p.id === id)) % TL_COLORS.length];
+function scheduleAt(s, day, min) {
+  const slot = s.slots.find(w => coversAt(w, day, min));
+  return { pid: slot ? slot.playlist_id : s.default_playlist_id, on: !s.screen.length || s.screen.some(w => coversAt(w, day, min)) };
+}
+function weekTimeline(s, nowDay, nowMin) {
+  const STEP = 15;
+  const rows = DAYS.map(day => {
+    const segs = [];
+    for (let m = 0; m < 1440; m += STEP) {
+      const v = scheduleAt(s, day, m), last = segs[segs.length - 1];
+      if (last && last.pid === v.pid && last.on === v.on) last.to = m + STEP;
+      else segs.push({ ...v, from: m, to: m + STEP });
+    }
+    return `<div class="tl-row"><span class="tl-day ${day === nowDay ? 'today' : ''}">${t('day_' + day)}</span><div class="tl-bar">
+      ${segs.map(g => `<i class="${g.on ? '' : 'off'} ${g.pid ? '' : 'keep'}" style="width:${(g.to - g.from) / 14.4}%;${g.pid ? `--c:${playlistColor(g.pid)}` : ''}" title="${fromMin(g.from)}–${fromMin(g.to)} · ${esc(g.pid ? playlistName(g.pid) : t('schedKeep'))}${g.on ? '' : ' · ' + t('screenOff')}"></i>`).join('')}
+      ${day === nowDay ? `<b class="tl-now" style="left:${nowMin / 14.4}%"></b>` : ''}</div></div>`;
+  }).join('');
+  const used = [...new Set([...s.slots.map(w => w.playlist_id), s.default_playlist_id].filter(Boolean))];
+  return `<div class="timeline">${rows}<div class="tl-axis"><span></span><div>${[0, 6, 12, 18, 24].map(h => `<small style="left:${h / 24 * 100}%">${h}:00</small>`).join('')}</div></div>
+    <div class="tl-legend">${used.map(id => `<span><i style="--c:${playlistColor(id)}"></i>${esc(playlistName(id))}</span>`).join('')}
+    ${s.screen.length ? `<span><i class="off"></i>${t('screenOff')}</span>` : ''}${s.slots.length && !s.default_playlist_id ? `<span><i class="keep"></i>${t('schedKeep')}</span>` : ''}</div></div>`;
+}
+
+// What a scheduled action does, as a sentence: "Every day at 03:00 restarts the player on 2 devices."
+function targetCount(tg) {
+  const ids = new Set(tg.devices || []);
+  S.devices.forEach(d => { if ((tg.groups || []).includes(d.group) || (tg.locations || []).includes(d.location)) ids.add(d.id); });
+  return ids.size;
+}
+function taskSentence(x) {
+  const when = x.date ? t('taskOn', { date: esc(x.date), time: esc(x.time) }) : t('taskEvery', { days: daysText(x.days), time: esc(x.time) });
+  return `${when} ${t('taskDoes_' + x.action)}${taskDetail(x, true)} ${t('taskOnN', { n: targetCount(x.targets) })}`;
+}
+
+VIEWS.schedule = {
+  mount(root) {
+    setTitle(t('nav_schedule'));
+    root.innerHTML = '<div id="schHead"></div><div id="schList"></div><div id="schTasks"></div>';
+  },
+  async update(root) {
+    const d = await loadScheduleData();
+    if (!$('#schHead', root)) return;
+    const edit = can('manage'), mine = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    const nowMin = toMin(d.now.slice(11, 16));
+    patch($('#schHead', root), `<div class="sched-kinds">
+      <section class="card sched-kind"><div class="kind-ic">${icon('schedule')}</div><div><h2>${t('regimeTitle')}</h2><p class="muted">${t('regimeWhat')}</p>
+        <ul class="kind-points"><li>${t('regimePoint1')}</li><li>${t('regimePoint2')}</li></ul>
+        ${edit ? `<div class="form-actions start"><button class="btn primary" data-do="schedEdit">${icon('plus')}${t('schedNew')}</button><button class="btn" data-do="schedEdit" data-preset="office">${t('presetOffice')}</button></div>` : ''}</div></section>
+      <section class="card sched-kind"><div class="kind-ic">${icon('play')}</div><div><h2>${t('tasksTitle')}</h2><p class="muted">${t('tasksWhat')}</p>
+        <ul class="kind-points"><li>${t('tasksPoint1')}</li><li>${t('tasksPoint2')}</li></ul>
+        ${edit ? `<div class="form-actions start"><button class="btn primary" data-do="taskEdit">${icon('plus')}${t('taskNew')}</button><button class="btn" data-do="taskEdit" data-preset="restart">${t('presetRestart')}</button></div>` : ''}</div></section></div>
+      <p class="muted sched-clock">${icon('schedule')}${t('schedClock', { now: esc(d.now), tz: esc(d.timezone) })}${edit ? ` · <button class="link" data-do="schedTz" data-tz="${esc(d.timezone)}">${t('schedTimezoneChange')}</button>` : ''}</p>
+      ${edit && mine && mine !== d.timezone ? `<div class="note warn"><div>${t('schedTzOther', { tz: esc(mine) })} <button class="btn sm" data-do="schedTz" data-tz="${esc(mine)}" data-direct="1">${t('schedTzUse', { tz: esc(mine) })}</button></div></div>` : ''}`);
+    patch($('#schList', root), d.schedules.length ? `<h2 class="sched-section">${t('regimeTitle')}</h2>` + d.schedules.map(s => `<section class="card regime ${s.enabled ? '' : 'disabled'}">
+      <div class="card-head"><div><h2>${esc(s.name)}${s.enabled ? '' : ` <span class="tag">${t('disabled')}</span>`}</h2><div class="chips">${targetsText(s.targets)}<span>${t('nDevices', { n: s.devices.length })}</span></div></div>
+        ${edit ? `<div class="tpl-actions"><button class="btn sm" data-do="schedEdit" data-id="${s.id}">${icon('edit')}${t('edit')}</button><button class="icon-btn danger" title="${t('delete')}" data-do="schedDelete" data-id="${s.id}">${icon('trash')}</button></div>` : ''}</div>
+      ${s.enabled ? `<p class="regime-now"><b>${t('schedNowCol')}:</b> ${s.now.playlist_id ? esc(playlistName(s.now.playlist_id)) : t('schedKeep')}${s.now.screen ? ` · <span class="tag ${s.now.screen === 'on' ? 'ok' : ''}">${t(s.now.screen === 'on' ? 'screenOn' : 'screenOff')}</span>` : ''}</p>` : ''}
+      ${weekTimeline(s, d.weekday, nowMin)}</section>`).join('') : '');
+    const result = r => (r ? `${t('nQueued', { n: r.queued.length })}${r.skipped.length ? ` · <span title="${esc(r.skipped.map(s => (dev(s.device_id)?.name || s.device_id) + ': ' + errText(new Error(s.reason))).join('\n'))}">${t('nSkipped', { n: r.skipped.length })}</span>` : ''}` : '');
+    patch($('#schTasks', root), d.tasks.length ? `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('tasksTitle')}</h2></div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('taskWhatHappens')}</th><th>${t('lastRun')}</th><th></th></tr></thead>
+      <tbody>${d.tasks.map(x => `<tr><td><b>${esc(x.name)}</b>${x.enabled ? '' : ` <span class="tag">${t('disabled')}</span>`}<div class="chips">${targetsText(x.targets)}</div></td>
+      <td>${taskSentence(x)}</td>
+      <td>${x.last_run ? `${dt(x.last_run)}<br><small class="muted">${result(x.last_result)}</small>` : `<span class="muted">${t('never')}</span>`}</td>
+      <td class="actions-cell">${edit ? `<button class="btn sm" data-do="taskRun" data-id="${x.id}">${icon('play')}${t('runNow')}</button><button class="btn sm" data-do="taskEdit" data-id="${x.id}">${icon('edit')}${t('edit')}</button><button class="icon-btn danger" title="${t('delete')}" data-do="taskDelete" data-id="${x.id}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div></section>` : '');
+  },
+};
+function taskDetail(x, inline = false) {
+  const p = x.payload || {}, wrap = v => (inline ? ` <b>${v}</b>` : `<br><small class="muted">${v}</small>`);
+  if (x.action === 'deploy_playlist') return wrap(`${esc(playlistName(p.playlist_id))}`);
+  if (x.action === 'apply_template') return wrap(esc((S.templates || []).find(tp => tp.id === p.template_id)?.name || '#' + p.template_id));
+  if (x.action === 'notify') return wrap(`„${esc(p.title || p.message || '')}“`);
+  return '';
+}
+
+const windowRow = (w = {}, withPlaylist = false) => `<div class="sched-row" data-row>${daysPick(w.days)}
+  <span class="sched-times"><input type="time" data-f="start" value="${esc(w.start || '08:00')}" required><span>–</span><input type="time" data-f="end" value="${esc(w.end || '17:00')}" required></span>
+  ${withPlaylist ? `<select data-f="playlist" required>${playlistOptions(w.playlist_id, t('choosePlaylist'))}</select>` : ''}
+  <button type="button" class="icon-btn danger" data-del-row title="${t('delete')}">${icon('x')}</button></div>`;
+function readRows(box, withPlaylist) {
+  return $$('[data-row]', box).map(r => {
+    const w = { days: readDays(r), start: $('[data-f=start]', r).value, end: $('[data-f=end]', r).value };
+    if (!w.days.length) throw new Error('invalid_days');
+    if (withPlaylist) { w.playlist_id = Number($('[data-f=playlist]', r).value) || null; if (!w.playlist_id) throw new Error('playlist_not_found'); }
+    return w;
+  });
+}
+
+const SCHEDULE_PRESETS = {
+  office: () => ({ name: t('presetOffice'), enabled: true, targets: {}, default_playlist_id: (S.globalLists || [])[0]?.id || null, slots: [],
+    screen: [{ days: [0, 1, 2, 3, 4], start: '07:00', end: '18:00' }] }),
+};
+async function scheduleDialog(id = null, preset = '') {
+  if (!S.sched) await loadScheduleData();
+  const s = id ? S.sched.schedules.find(x => String(x.id) === String(id))
+    : (SCHEDULE_PRESETS[preset] || (() => ({ name: '', enabled: true, targets: {}, slots: [], screen: [], default_playlist_id: null })))();
+  if (!s) return;
+  modal({
+    title: id ? t('schedEdit') : t('schedNew'), wide: true, submit: id ? t('save') : t('add'),
+    body: `<div class="form"><p class="muted">${t('regimeWhat')}</p>
+      <div class="row2"><label>${t('name')}<input name="name" value="${esc(s.name)}" required placeholder="${esc(t('schedNamePlaceholder'))}"></label>
+      <label class="check sched-enabled"><input type="checkbox" class="switch" name="enabled" ${s.enabled ? 'checked' : ''}>${t('enabled')}</label></div>
+      ${targetsField(s.targets)}
+      <h3>${icon('playlists')}${t('schedSlots')}</h3><p class="muted">${t('schedSlotsHint')}</p>
+      <label>${t('schedDefault')}<select name="default_playlist_id">${playlistOptions(s.default_playlist_id, t('schedNoDefault'))}</select><small class="muted">${t('schedDefaultHint')}</small></label>
+      <div id="slotRows">${s.slots.map(w => windowRow(w, true)).join('')}</div>
+      <div class="form-actions start"><button type="button" class="btn sm" data-add-row="slot">${icon('plus')}${t('schedAddSlot')}</button></div>
+      <h3>${icon('power')}${t('schedScreen')}</h3><p class="muted">${t('schedScreenHint')}</p>
+      <div id="screenRows">${s.screen.map(w => windowRow(w)).join('')}</div>
+      <div class="form-actions start"><button type="button" class="btn sm" data-add-row="screen">${icon('plus')}${t('schedAddScreen')}</button></div>
+      <h3>${t('schedPreview')}</h3><div id="schedPreview"></div>
+      ${(S.globalLists || []).length ? '' : `<div class="note">${t('noGlobalPlaylists')} <a href="#/global">${t('nav_global')}</a></div>`}</div>`,
+    onOpen: form => {
+      bindTargetPicker(form);
+      // the week below the form follows every change
+      const preview = () => {
+        let rows;
+        try { rows = { slots: readRows($('#slotRows', form), true), screen: readRows($('#screenRows', form), false) }; } catch { return; }
+        $('#schedPreview', form).innerHTML = weekTimeline({ ...rows, default_playlist_id: Number(form.default_playlist_id.value) || null }, -1, 0);
+      };
+      form.addEventListener('click', e => {
+        const add = e.target.closest('[data-add-row]'), del = e.target.closest('[data-del-row]');
+        if (add) $(add.dataset.addRow === 'slot' ? '#slotRows' : '#screenRows', form).insertAdjacentHTML('beforeend', windowRow({}, add.dataset.addRow === 'slot'));
+        if (del) del.closest('[data-row]').remove();
+        if (add || del || e.target.closest('.day-pick')) setTimeout(preview);
+      });
+      form.addEventListener('change', preview);
+      preview();
+    },
+    onSubmit: async (data, form) => {
+      const body = { name: data.name.trim(), enabled: !!data.enabled, targets: readTargets(data), slots: readRows($('#slotRows', form), true),
+        screen: readRows($('#screenRows', form), false), default_playlist_id: data.default_playlist_id ? Number(data.default_playlist_id) : null };
+      await api(id ? `/api/schedules/${id}` : '/api/schedules', { method: id ? 'PATCH' : 'POST', json: body });
+      toast(t('saved'));
+      render();
+    },
+  });
+}
+
+const TASK_ACTIONS = ['restart_player', 'reboot', 'notify', 'deploy_playlist', 'apply_template', 'screen_off', 'screen_on', 'update_agent', 'update_caracal'];
+function taskPayloadFields(action, p = {}) {
+  if (action === 'deploy_playlist') return `<label>${t('globalPlaylist')}<select name="playlist_id" required>${playlistOptions(p.playlist_id, t('choosePlaylist'))}</select></label>
+    <div class="radios"><label class="check"><input type="radio" name="mode" value="replace" ${p.mode !== 'append' ? 'checked' : ''}>${t('mode_replace')}</label><label class="check"><input type="radio" name="mode" value="append" ${p.mode === 'append' ? 'checked' : ''}>${t('mode_append')}</label></div>`;
+  if (action === 'apply_template') return `<label>${t('nodeTemplate')}<select name="template_id" required>${(S.templates || []).map(x => `<option value="${x.id}" ${x.id === p.template_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>`;
+  if (action === 'notify') return `<label>${t('notifyTitle')}<input name="title" value="${esc(p.title || '')}" maxlength="200"></label><label>${t('notifyMessage')}<textarea name="message" rows="2" maxlength="2000">${esc(p.message || '')}</textarea></label>
+    <label>${t('notifyLevel')}<select name="level">${NOTIFY_LEVELS.map(l => `<option value="${l}" ${l === (p.level || 'info') ? 'selected' : ''}>${t('notifyLevel_' + l)}</option>`).join('')}</select></label>`;
+  if (action === 'update_caracal') return `<small class="muted">${t('taskUpdateHint')}</small>`;
+  if (action.startsWith('screen_')) return `<small class="muted">${t('taskScreenHint')}</small>`;
+  return '';
+}
+
+const TASK_PRESETS = { restart: () => ({ name: t('presetRestart'), enabled: true, targets: {}, days: DAYS, time: '03:00', date: '', action: 'restart_player', payload: {} }) };
+async function taskDialog(id = null, preset = '') {
+  if (!S.sched) await loadScheduleData();
+  const x = id ? S.sched.tasks.find(v => String(v.id) === String(id))
+    : (TASK_PRESETS[preset] || (() => ({ name: '', enabled: true, targets: {}, days: DAYS, time: '03:00', date: '', action: 'restart_player', payload: {} })))();
+  if (!x) return;
+  modal({
+    title: id ? t('taskEdit') : t('taskNew'), wide: true, submit: id ? t('save') : t('add'),
+    body: `<div class="form"><p class="muted">${t('tasksWhat')}</p>
+      <h3>1 · ${t('taskStepWhat')}</h3>
+      <label>${t('action')}<select name="action">${TASK_ACTIONS.map(a => `<option value="${a}" ${a === x.action ? 'selected' : ''}>${t('task_' + a)}</option>`).join('')}</select></label>
+      <div id="taskPayload">${taskPayloadFields(x.action, x.payload)}</div>
+      <h3>2 · ${t('taskStepWhen')}</h3>
+      <div class="radios"><label class="check"><input type="radio" name="when" value="days" ${x.date ? '' : 'checked'}>${t('taskRepeat')}</label><label class="check"><input type="radio" name="when" value="date" ${x.date ? 'checked' : ''}>${t('taskOnce')}</label></div>
+      <div class="row2"><div id="taskDays">${daysPick(x.days.length ? x.days : DAYS)}</div><label id="taskDate">${t('date')}<input type="date" name="date" value="${esc(x.date)}"></label>
+      <label>${t('time')}<input type="time" name="time" value="${esc(x.time)}" required></label></div>
+      <h3>3 · ${t('taskStepWho')}</h3>
+      ${targetsField(x.targets)}
+      <div class="row2"><label>${t('name')}<input name="name" value="${esc(x.name)}" required placeholder="${esc(t('taskNamePlaceholder'))}"></label>
+      <label class="check sched-enabled"><input type="checkbox" class="switch" name="enabled" ${x.enabled ? 'checked' : ''}>${t('enabled')}</label></div>
+      <div class="note info" id="taskSummary"></div></div>`,
+    onOpen: form => {
+      bindTargetPicker(form);
+      const summary = () => {
+        const data = Object.fromEntries(new FormData(form)), once = form.when.value === 'date';
+        const draft = { action: form.action.value, time: form.time.value || '--:--', date: once ? (form.date.value || '…') : '', days: once ? [] : readDays($('#taskDays', form)),
+          targets: readTargets(data), payload: { title: data.title, playlist_id: Number(data.playlist_id), template_id: Number(data.template_id) } };
+        $('#taskSummary', form).innerHTML = taskSentence(draft);
+      };
+      const sync = () => { const once = form.when.value === 'date'; $('#taskDays', form).hidden = once; $('#taskDate', form).hidden = !once; form.date.required = once; summary(); };
+      $$('input[name=when]', form).forEach(i => { i.onchange = sync; });
+      form.action.onchange = () => {
+        $('#taskPayload', form).innerHTML = taskPayloadFields(form.action.value);
+        if (!form.name.dataset.touched) form.name.value = t('task_' + form.action.value);
+        summary();
+      };
+      form.name.oninput = () => { form.name.dataset.touched = '1'; };
+      if (x.name) form.name.dataset.touched = '1';
+      else form.name.value = t('task_' + x.action);
+      form.addEventListener('change', summary);
+      form.addEventListener('input', summary);
+      form.addEventListener('click', e => { if (e.target.closest('.day-pick, [data-tsel]')) setTimeout(summary); });
+      sync();
+    },
+    onSubmit: async (data, form) => {
+      const action = data.action, payload = {};
+      if (action === 'deploy_playlist') Object.assign(payload, { playlist_id: Number(data.playlist_id) || null, mode: data.mode });
+      if (action === 'apply_template') payload.template_id = Number(data.template_id) || null;
+      if (action === 'notify') Object.assign(payload, { title: data.title.trim(), message: data.message.trim(), level: data.level });
+      const once = data.when === 'date';
+      const body = { name: data.name.trim(), enabled: !!data.enabled, action, payload, time: data.time, targets: readTargets(data),
+        date: once ? data.date : '', days: once ? [] : readDays($('#taskDays', form)) };
+      await api(id ? `/api/scheduled-tasks/${id}` : '/api/scheduled-tasks', { method: id ? 'PATCH' : 'POST', json: body });
+      toast(t('saved'));
+      render();
+    },
+  });
+}
+
+Object.assign(ACTIONS_UI, {
+  schedEdit(b) { scheduleDialog(b.dataset.id || null, b.dataset.preset || ''); },
+  async totpSetup() {
+    const s = await api('/api/me/totp/setup', { method: 'POST' });
+    modal({
+      title: t('totpEnable'), submit: t('totpConfirm'),
+      body: `<div class="form"><p class="muted">${t('totpScan')}</p><div class="totp-qr">${s.qr}</div>
+        <details><summary>${t('totpManual')}</summary><code class="secret">${esc(s.secret.match(/.{1,4}/g).join(' '))}</code></details>
+        <label>${t('totpCode')}<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label></div>`,
+      onSubmit: async data => {
+        const r = await api('/api/me/totp/enable', { method: 'POST', json: { code: data.code } });
+        S.me.totp = true;
+        modal({ title: t('totpRecovery'), body: `<div class="form"><p class="muted">${t('totpRecoveryHint')}</p><pre class="code" id="recCodes">${r.recovery_codes.join('\n')}</pre>
+          <div class="form-actions start"><button type="button" class="btn sm" data-copy="recCodes">${icon('copy')}${t('copy')}</button></div></div>`,
+          onOpen: form => { $('[data-copy]', form).onclick = () => navigator.clipboard.writeText($('#recCodes', form).textContent).then(() => toast(t('copied'))); } });
+        render(true);
+        return false;
+      },
+    });
+  },
+  totpDisable() {
+    modal({
+      title: t('totpDisable'), danger: true, submit: t('totpDisable'),
+      body: `<div class="form"><p class="muted">${t('totpDisableHint')}</p><label>${t('currentPassword')}<input type="password" name="password" autocomplete="current-password" required></label></div>`,
+      onSubmit: async data => { await api('/api/me/totp/disable', { method: 'POST', json: { password: data.password } }); S.me.totp = false; toast(t('saved')); render(true); },
+    });
+  },
+  async totpReset(b) {
+    if (!await confirmBox(t('confirmTotpReset', { name: esc(b.dataset.name) }))) return;
+    await api(`/api/users/${b.dataset.uid}/totp/reset`, { method: 'POST' });
+    toast(t('saved'));
+    render();
+  },
+  rolloutNew() { rolloutDialog(); },
+  rolloutAuto() { rolloutAutoDialog(); },
+  async rolloutCtl(b) {
+    if (b.dataset.act === 'cancel' && !await confirmBox(t('confirmRolloutCancel'))) return;
+    await api(`/api/rollouts/${b.dataset.id}/${b.dataset.act}`, { method: 'POST' });
+    render();
+  },
+  screenSet(b) {
+    const ids = b.dataset.id ? [b.dataset.id] : [...S.selected], payload = { state: b.dataset.state };
+    return ids.length === 1 ? sendCommand(ids[0], 'screen', payload) : sendBulk(ids, 'screen', payload);
+  },
+  async schedDelete(b) {
+    const s = S.sched.schedules.find(x => String(x.id) === b.dataset.id);
+    if (!s || !await confirmBox(t('confirmDeleteSchedule', { name: esc(s.name) }))) return;
+    await api('/api/schedules/' + s.id, { method: 'DELETE' });
+    render();
+  },
+  taskEdit(b) { taskDialog(b.dataset.id || null, b.dataset.preset || ''); },
+  async taskDelete(b) {
+    const x = S.sched.tasks.find(v => String(v.id) === b.dataset.id);
+    if (!x || !await confirmBox(t('confirmDeleteTask', { name: esc(x.name) }))) return;
+    await api('/api/scheduled-tasks/' + x.id, { method: 'DELETE' });
+    render();
+  },
+  async taskRun(b) {
+    const x = S.sched.tasks.find(v => String(v.id) === b.dataset.id);
+    if (!x || !await confirmBox(t('confirmRunTask', { name: esc(x.name), action: t('task_' + x.action) }), x.action === 'reboot')) return;
+    const r = await api(`/api/scheduled-tasks/${x.id}/run`, { method: 'POST' });
+    reportQueued({ command_ids: r.queued, skipped: r.skipped }, t('task_' + x.action));
+    render();
+  },
+  schedTz(b) {
+    const save = async tz => { await api('/api/schedules/settings', { method: 'PUT', json: { timezone: tz } }); toast(t('saved')); render(); };
+    if (b.dataset.direct) return save(b.dataset.tz);
+    modal({
+      title: t('schedTimezone'), body: `<div class="form"><label>${t('timezone')}<input name="timezone" value="${esc(b.dataset.tz)}" required placeholder="Europe/Prague" spellcheck="false"></label><small class="muted">${t('schedTimezoneHint')}</small></div>`,
+      onSubmit: data => save(data.timezone.trim()),
+    });
+  },
+});
+
+// ---------- screen wall: what every screen shows, refreshed while the page is open
+
+let wallTimer = null, wallRound = 0;
+const WALL_EVERY = [30, 60, 120, 0];
+function wallDevices() {
+  const g = store.get('caracalWallGroup', ''), l = store.get('caracalWallLocation', '');
+  return S.devices.filter(d => (screenSupport(d) || d.screenshot_at) && (!g || d.group === g) && (!l || d.location === l));
+}
+function wallCapture() {
+  if (S.route.view !== 'wall' || document.visibilityState !== 'visible') return;
+  wallRound = Date.now();
+  // fire and forget: the picture is loaded when the device list reports its new time
+  wallDevices().filter(d => d.online && screenSupport(d)).slice(0, 60).forEach(d => {
+    api(`/api/devices/${encodeURIComponent(d.id)}/commands`, { method: 'POST', json: { action: 'screenshot', payload: {} } }).catch(() => {});
+  });
+}
+function wallSchedule() {
+  clearInterval(wallTimer);
+  const every = Number(store.get('caracalWallEvery', '60'));
+  if (every) wallTimer = setInterval(() => (S.route.view === 'wall' ? wallCapture() : clearInterval(wallTimer)), every * 1000);
+}
+VIEWS.wall = {
+  mount(root) {
+    setTitle(t('nav_wall'));
+    const every = store.get('caracalWallEvery', '60');
+    root.innerHTML = `<section class="card wall-head"><div class="toolbar"><h2 class="grow">${t('nav_wall')}</h2>
+      <select id="wGroup">${options(orgNames('groups'), store.get('caracalWallGroup', ''), t('allGroups'))}</select>
+      <select id="wLoc">${options(orgNames('locations'), store.get('caracalWallLocation', ''), t('allLocations'))}</select>
+      <select id="wEvery">${WALL_EVERY.map(s => `<option value="${s}" ${String(s) === every ? 'selected' : ''}>${s ? t('wallEvery', { s }) : t('wallManual')}</option>`).join('')}</select>
+      <button class="btn" id="wNow">${icon('refresh')}${t('refresh')}</button></div><p class="muted card-intro">${t('wallHint')}</p></section><div class="screen-wall" id="wall"></div>`;
+    const upd = () => this.update(root);
+    $('#wGroup', root).onchange = e => { store.set('caracalWallGroup', e.target.value || null); upd(); };
+    $('#wLoc', root).onchange = e => { store.set('caracalWallLocation', e.target.value || null); upd(); };
+    $('#wEvery', root).onchange = e => { store.set('caracalWallEvery', e.target.value); wallSchedule(); };
+    $('#wNow', root).onclick = wallCapture;
+    wallSchedule();
+    wallCapture();
+  },
+  update(root) {
+    const box = $('#wall', root);
+    if (!box) return;
+    const list = wallDevices();
+    for (const d of list) {
+      const shot = S.shots[d.id];
+      if (d.screenshot_at && (!shot || (shot.at !== d.screenshot_at && !shot.loading))) setTimeout(() => loadShot(d.id, d.screenshot_at));
+    }
+    patch(box, list.map(d => {
+      const shot = S.shots[d.id];
+      const state = !d.online ? t('offline') : d.screen === 'off' ? t('screenOff') : '';
+      return `<a class="wall-tile ${d.online ? '' : 'off'}" href="#/device/${encodeURIComponent(d.id)}">
+        <div class="wall-shot">${shot && shot.url ? `<img src="${shot.url}" alt="">` : `<span>${screenSupport(d) ? t('capturing') : t('needNewerCaracal')}</span>`}${state ? `<em>${state}</em>` : ''}</div>
+        <div class="wall-meta">${dot(d)}<b>${esc(d.name)}</b><small class="muted">${esc(d.current_name || '')}${d.screenshot_at ? ` · ${ago(d.screenshot_at)}` : ''}</small></div></a>`;
+    }).join('') || `<div class="card">${emptyState('wall', t('wallEmpty'), t('wallHint'))}</div>`);
+  },
+};

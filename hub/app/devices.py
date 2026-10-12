@@ -139,6 +139,17 @@ def player_settings_of(status):
     return {'web_dark': s.get('web_dark') if s.get('web_dark') in ('off', 'dark', 'force') else 'off'}
 
 
+def screen_of(status):
+    """{'screen': 'on'|'off'|None, 'display_down_since': ts|None, 'black_since': ts|None}"""
+    disp = status.get('display') if isinstance(status.get('display'), dict) else {}
+    watch = status.get('screen_watch') if isinstance(status.get('screen_watch'), dict) else {}
+    num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return {'screen': status.get('screen') if status.get('screen') in ('on', 'off') else None,
+            'display_down_since': num(disp.get('since')) if disp.get('state') == 'down' else None,
+            'display_restarts': int(num(disp.get('restarts')) or 0),
+            'black_since': num(watch.get('black_since'))}
+
+
 def player_of(status):
     """Agent 4 sends a nested player object, agent 3 sent flat keys."""
     p = status.get('player')
@@ -179,6 +190,11 @@ def attention(d, failed_commands=0):
         add('ram', 'warning', d['ram'])
     if (d.get('cpu') or 0) >= 95:
         add('cpu', 'warning', d['cpu'])
+    now = time.time()
+    if d.get('display_down_since') and now - d['display_down_since'] >= 120:
+        add('display_down', 'critical', d.get('display_restarts') or 0)
+    elif d.get('black_since') and now - d['black_since'] >= 180 and d.get('screen') != 'off':
+        add('screen_black', 'warning', int((now - d['black_since']) // 60))
     if d.get('admin') and not d['admin']['configured']:
         # anyone who opens the node's web administration first could create the administrator
         add('admin_missing', 'warning')
@@ -227,6 +243,8 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'screenshot_at': screenshot_time(row['id']),
         'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in dicts(status.get('assets'))),
         'admin': admin_of(status), 'overlay': overlay_of(status), 'player_settings': player_settings_of(status),
+        # agents from 4.14: the screen (on / off), the display watch and the node's black screen watch
+        **screen_of(status),
     }
     d['current_asset_id'] = None
     if d['current_id'] is not None:

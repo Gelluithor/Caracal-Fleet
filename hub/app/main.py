@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import console, images, monitor, notify, playlists, provisioning, proxy, releases, sdcard, system, templates
+from . import console, images, monitor, notify, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, templates
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -24,6 +24,7 @@ from .devices import COLLECTION_KIND, MEDIA_KINDS, SCREENSHOTS, build, collectio
 @asynccontextmanager
 async def lifespan(_app):
     monitor.start()          # the background check of the fleet (events and alerts)
+    schedule.start()         # schedules and scheduled actions
     yield
 
 
@@ -41,6 +42,9 @@ app.include_router(notify.router)       # notification API for other apps and it
 app.include_router(proxy.router)        # Fleet as the download source of nodes without internet access
 app.include_router(monitor.router)      # metric history, events and alerts for administrators
 app.include_router(templates.router)    # node templates
+app.include_router(schedule.router)     # schedules and scheduled actions
+app.include_router(rollout.router)      # staged updates of Docker nodes
+app.include_router(security.router)     # two-factor sign-in and single sign-on
 
 
 SECURITY_HEADERS = {
@@ -113,9 +117,22 @@ def failed_counts(c):
 
 # ---------------------------------------------------------------- pages and session
 
+def static_version():
+    """The hub version plus a fingerprint of the UI files: browsers fetch changed scripts and styles even when the
+    version stayed the same (a fix between releases)."""
+    h = hashlib.sha256()
+    for name in ('app.js', 'i18n.js', 'style.css', 'notify-style.js'):
+        try:
+            h.update((STATIC / name).read_bytes())
+        except OSError:
+            pass
+    return f'{HUB_VERSION}-{h.hexdigest()[:8]}'
+
+
 @app.get('/', response_class=HTMLResponse)
 def home():
-    return (STATIC / 'index.html').read_text(encoding='utf-8').replace('{{VERSION}}', HUB_VERSION)
+    html = (STATIC / 'index.html').read_text(encoding='utf-8').replace('{{VERSION}}', static_version())
+    return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
 
 
 @app.get('/api/health')
@@ -142,6 +159,17 @@ async def login(r: Request):
         _login_failures[user_key] = user_fails + [time.time()]
         audit(None, 'user.login_failed', username, {'ip': ip_key[0]})
         raise HTTPException(401, 'invalid_credentials')
+    if u['totp_secret']:
+        # the second factor: an authenticator code or a recovery code (wrong codes count as failed attempts)
+        if not str(d.get('code') or '').strip():
+            raise HTTPException(401, 'totp_required')
+        with db() as c:
+            ok = security.check_second_factor(c, u, d.get('code'))
+        if not ok:
+            _login_failures[ip_key] = ip_fails + [time.time()]
+            _login_failures[user_key] = user_fails + [time.time()]
+            audit(dict(u), 'user.login_failed', username, {'ip': ip_key[0], 'totp': True})
+            raise HTTPException(401, 'invalid_totp')
     _login_failures.pop(ip_key, None)
     _login_failures.pop(user_key, None)
     u = dict(u)
@@ -431,6 +459,10 @@ def validate_command(c, row, action, payload):
         payload = {'web_dark': payload['web_dark']}
     if action == 'diagnostics':
         payload = {}
+    if action == 'screen':
+        if payload.get('state') not in ('on', 'off'):
+            raise HTTPException(400, 'invalid_value')
+        payload = {'state': payload['state']}
     if action in ('notify_remove', 'update_notify_token', 'delete_notify_token'):
         try:
             payload['id'] = int(payload.get('id'))
@@ -546,7 +578,8 @@ SOUND_MAX = 5 * 1024 ** 2
 # command -> local endpoint of the node, for commands that old agents do not know at all
 NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot', 'player_settings': 'player_settings'}
 # what only newer agents can do (they report their version in every heartbeat)
-AGENT_FEATURES = {'reinstall_node': (4, 13, 0), 'diagnostics': (4, 13, 0), 'player_settings': (4, 13, 0)}
+AGENT_FEATURES = {'reinstall_node': (4, 13, 0), 'diagnostics': (4, 13, 0), 'player_settings': (4, 13, 0),
+                  'screen': (4, 14, 0)}
 IMAGE_MAX = 5 * 1024 ** 2
 NOTIFY_IMAGE_PLACES = ('none', 'left', 'right', 'top', 'bottom', 'background')
 SCREENSHOT_MAX = 8 * 1024 ** 2
@@ -1008,7 +1041,8 @@ def list_users(r: Request):
     current_user(r, 'admin')
     with db() as c:
         return [dict(x) for x in c.execute(
-            'SELECT id, username, role, language, enabled, created FROM users ORDER BY username COLLATE NOCASE')]
+            "SELECT id, username, role, language, enabled, created, totp_secret != '' AS totp, "
+            "password_hash LIKE 'sso$%' AS sso FROM users ORDER BY username COLLATE NOCASE")]
 
 
 @app.post('/api/users')
