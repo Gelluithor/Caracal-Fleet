@@ -8,7 +8,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
-from .core import audit, current_user, db, new_batch, queue_command, refresh_pin
+from .core import DARK_MODES, audit, current_user, db, new_batch, queue_command, refresh_pin
 from .devices import COLLECTION_KIND, MEDIA_KINDS, build, grafana_config
 
 router = APIRouter()
@@ -54,7 +54,7 @@ def _validate_item(c, d, kind):
     """Normalized item fields following the CARACAL rules (>= 5 s, videos loop; scale 0.5 to 3.0)."""
     if kind not in ITEM_KINDS:
         raise HTTPException(400, 'unsupported_file')
-    item = {'name': _text(d.get('name'), 200), 'source': '', 'file_id': '', 'scale': 1.0}
+    item = {'name': _text(d.get('name'), 200), 'source': '', 'file_id': '', 'scale': 1.0, 'dark': ''}
     try:
         item['duration'] = int(float(d.get('duration', 60 if kind == COLLECTION_KIND else 30 if kind == 'web' else 15)))
         item['scale'] = float(str(d.get('scale') or 1).replace(',', '.'))
@@ -64,6 +64,9 @@ def _validate_item(c, d, kind):
         raise HTTPException(400, 'invalid_duration')
     if not 0.5 <= item['scale'] <= 3:
         raise HTTPException(400, 'invalid_scale')
+    if kind in ('web', COLLECTION_KIND):   # dark mode: '' = as the node
+        from .main import validate_dark   # main imports this module
+        item['dark'] = validate_dark(d.get('dark'))
     if kind == COLLECTION_KIND:
         # stored like on the node: {"grafana_url", "tag", "kiosk"} as JSON in 'source'
         cfg = {**grafana_config(d.get('source')), **{k: d[k] for k in ('grafana_url', 'tag', 'kiosk') if k in d}}
@@ -163,10 +166,11 @@ def playlist_from_assets(c, name, assets, username):
         if not web and a['kind'] != COLLECTION_KIND:
             skipped.append(a['name'])
             continue
-        c.execute('INSERT INTO global_playlist_items(playlist_id, position, kind, name, source, duration, scale) '
-                  'VALUES(?,?,?,?,?,?,?)', (pid, pos, a['kind'], a['name'], a['source'],
-                                            max(5, int(a.get('duration') or 30)),
-                                            min(3.0, max(0.5, float(a.get('scale') or 1)))))
+        c.execute('INSERT INTO global_playlist_items(playlist_id, position, kind, name, source, duration, scale, dark) '
+                  'VALUES(?,?,?,?,?,?,?,?)', (pid, pos, a['kind'], a['name'], a['source'],
+                                              max(5, int(a.get('duration') or 30)),
+                                              min(3.0, max(0.5, float(a.get('scale') or 1))),
+                                              a.get('dark') if a.get('dark') in DARK_MODES else ''))
     return pid, skipped
 
 
@@ -222,9 +226,9 @@ async def add_item(pid: int, r: Request):
         pos = c.execute('SELECT COALESCE(MAX(position), -1) + 1 FROM global_playlist_items WHERE playlist_id=?',
                         (pid,)).fetchone()[0]
         iid = c.execute('INSERT INTO global_playlist_items(playlist_id, position, kind, name, source, duration, scale, '
-                        'file_id) VALUES(?,?,?,?,?,?,?,?)', (pid, pos, d['kind'], item['name'], item['source'],
-                                                             item['duration'], item['scale'],
-                                                             item['file_id'])).lastrowid
+                        'file_id, dark) VALUES(?,?,?,?,?,?,?,?,?)', (pid, pos, d['kind'], item['name'], item['source'],
+                                                                     item['duration'], item['scale'],
+                                                                     item['file_id'], item['dark'])).lastrowid
         _touch(c, pid, u)
     audit(u, 'global.item_add', str(pid), {'name': item['name'], 'kind': d['kind']})
     return {'id': iid}
@@ -239,10 +243,10 @@ async def edit_item(pid: int, iid: int, r: Request):
         if not row:
             raise HTTPException(404, 'not_found')
         merged = {**dict(row), **{k: d[k] for k in ('name', 'source', 'duration', 'scale', 'grafana_url', 'tag',
-                                                    'kiosk') if k in d}}
+                                                    'kiosk', 'dark') if k in d}}
         item = _validate_item(c, merged, row['kind'])
-        c.execute('UPDATE global_playlist_items SET name=?, source=?, duration=?, scale=? WHERE id=?',
-                  (item['name'], item['source'], item['duration'], item['scale'], iid))
+        c.execute('UPDATE global_playlist_items SET name=?, source=?, duration=?, scale=?, dark=? WHERE id=?',
+                  (item['name'], item['source'], item['duration'], item['scale'], item['dark'], iid))
         _touch(c, pid, u)
     audit(u, 'global.item_edit', str(pid), {'item': iid, 'name': item['name']})
     return {'ok': True}
@@ -287,6 +291,8 @@ def deploy_items(c, pid, missing_ok=False):
     for it in items:
         entry = {'type': 'asset', 'kind': it['kind'], 'name': it['name'], 'duration': it['duration'],
                  'scale': it['scale']}
+        if it.get('dark'):   # only a choice of its own: nodes before CARACAL 2026.10.12 do not know it
+            entry['dark'] = it['dark']
         if it['kind'] == COLLECTION_KIND:
             entry.update(type='collection', **grafana_config(it['source']))
         elif it['kind'] == 'web':

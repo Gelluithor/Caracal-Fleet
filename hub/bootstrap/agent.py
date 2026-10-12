@@ -33,7 +33,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.12.0'
+VERSION = '4.13.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -105,10 +105,12 @@ ENDPOINTS = {
     'notify_image': ('POST', '/api/fleet/v1/notify/image'),
     'notify_image_delete': ('DELETE', '/api/fleet/v1/notify/image'),
     'screenshot': ('POST', '/api/fleet/v1/screenshot'),
+    # settings of the player: websites in dark mode (CARACAL 2026.10.12 and newer)
+    'player_settings': ('PUT', '/api/fleet/v1/player/settings'),
 }
 # the node's own first-run setup, for CARACAL versions without the Fleet admin endpoint
 SETUP_STATUS, SETUP = '/api/setup-status', '/api/setup'
-GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale')
+GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale', 'dark')
 # Login profiles of web pages: the credentials are stored encrypted on the node and only travel to it.
 # auth_type: 'form' (log-in form on the page) or 'http' (HTTP Basic/Digest, the browser's pop-up)
 PROFILE_FIELDS = ('name', 'login_url', 'target_url', 'username', 'password', 'user_selector', 'pass_selector',
@@ -415,6 +417,7 @@ class Agent:
             'assets': self.assets_of(snap), 'collections': snap.get('collections') or [],
             'profiles': self.profiles_of(snap), 'notifications': self.notifications_of(snap),
             'admin': self.admin_of(snap), 'overlay': snap.get('overlay') if isinstance(snap.get('overlay'), dict) else None,
+            'player_settings': snap.get('player_settings') if isinstance(snap.get('player_settings'), dict) else None,
             'frozen_until': self.state.get('unfreeze_at'), 'last_error': self.last_error,
             'capabilities': self.capabilities() if api_ok else {},
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
@@ -672,6 +675,9 @@ class Agent:
 
     def do_delete_notify_token(self, p):
         return self.body(self.local('notify_token_delete', {'id': p['id']}))
+
+    def do_player_settings(self, p):
+        return self.body(self.local('player_settings', json={k: p[k] for k in ('web_dark',) if k in p}))
 
     def do_overlay_settings(self, p):
         return self.body(self.local('overlay', json={k: p[k] for k in ('enabled', 'size') if k in p}))
@@ -1037,6 +1043,15 @@ class Agent:
     def do_convert_to_docker(self, p):
         """Convert a classic CARACAL node (or a bare system) to CARACAL on Docker with install-node.sh.
         Data in /var/lib/caracal are kept. The agent itself stays installed and enrolled."""
+        return self.install_node(p, [], 'Convert to Docker')
+
+    def do_reinstall_node(self, p):
+        """Install CARACAL again from scratch: containers and images are removed and downloaded again, the X display,
+        its configuration and the browser profile are set up anew. With wipe_data also CARACAL's data (playlist,
+        media, logins, notifications, settings) are removed, as on a new node. The agent stays enrolled."""
+        return self.install_node(p, ['--reinstall'] + (['--wipe-data'] if p.get('wipe_data') else []), 'Reinstall')
+
+    def install_node(self, p, extra, label):
         work = Path(tempfile.mkdtemp(prefix='caracal-node-', dir=self.tmp_dir()))
         try:
             for name in ('install-node.sh', 'caracal-compose.yml'):
@@ -1045,7 +1060,7 @@ class Agent:
                 (work / name).write_bytes(r.content)
             self.maintenance = 'caracal_update'
             cmd = [shutil.which('bash') or 'bash', 'install-node.sh', '--hub', self.hub_url, '--skip-agent',
-                   '--image', str(p['image']), '--version', str(p.get('version') or 'latest')]
+                   '--image', str(p['image']), '--version', str(p.get('version') or 'latest'), *extra]
             if self.download_source() == 'fleet':
                 # the device's credentials in a file, not on the command line (visible in the process list)
                 auth = work / 'fleet-auth'
@@ -1056,7 +1071,7 @@ class Agent:
             write_key_file(self.conf['device_token'])
             if code == 5:   # the graphics driver was enabled (e.g. DietPi); nothing was converted yet
                 self.after = reboot
-                raise RuntimeError('The graphics driver was enabled and the node reboots now. Run "Convert to Docker" '
+                raise RuntimeError(f'The graphics driver was enabled and the node reboots now. Run "{label}" '
                                    f'again when it is back online.\n{out[-3000:]}')
             if code != 0:
                 raise RuntimeError(f'install-node.sh failed (exit {code}):\n{out[-6000:]}')
@@ -1070,6 +1085,56 @@ class Agent:
         finally:
             self.maintenance = ''
             shutil.rmtree(work, ignore_errors=True)
+
+    def do_diagnostics(self, p):
+        """What the node's own screen cannot show when it stays black: disk, memory, power, the display and its
+        outputs, the CARACAL services and containers and the errors of the system log."""
+        x_env = {'DISPLAY': ':0', 'XAUTHORITY': '/home/caracal/.Xauthority'}
+        docker = is_docker()
+        checks = [
+            ('System', ['uname', '-a']),
+            ('Uptime', ['uptime']),
+            ('Disk', ['df', '-h', '-x', 'tmpfs', '-x', 'devtmpfs']),
+            ('Memory', ['free', '-m']),
+            ('Power and temperature (Raspberry Pi)', ['vcgencmd', 'get_throttled']),
+            ('Display outputs', ['sh', '-c', 'for o in /sys/class/drm/card*-*; do [ -e "$o/status" ] && '
+                                 'echo "${o##*/}: $(cat "$o/status"), $(cat "$o/enabled" 2>/dev/null), '
+                                 'modes: $(head -3 "$o/modes" 2>/dev/null | tr "\\n" " ")"; done']),
+            ('X display (xrandr)', ['xrandr', '--query'], x_env),
+            ('Display service', ['systemctl', 'status', 'caracal-display', '--no-pager', '-l', '-n', '0']
+             if shutil.which('systemctl') else ['rc-service', 'caracal-display', 'status']),
+            ('Display log', ['journalctl', '-u', 'caracal-display', '-b', '--no-pager', '-n', '60']
+             if shutil.which('journalctl') else ['tail', '-n', '60', '/var/log/caracal-display.log']),
+            ('Xorg errors', ['sh', '-c', 'for f in /home/caracal/.local/share/xorg/Xorg.0.log /var/log/Xorg.0.log; do '
+                             '[ -f "$f" ] && { echo "$f"; grep -E "\\((EE|WW)\\)" "$f" | tail -n 30; }; done']),
+        ]
+        if docker:
+            checks += [('Containers', ['docker', 'compose', '--project-directory', str(NODE_DIR), 'ps', '-a']),
+                       *[(f'Container log: {s}', ['docker', 'compose', '--project-directory', str(NODE_DIR), 'logs',
+                                                  '--no-color', '--tail', '40', s]) for s in ('player', 'overlay', 'app')]]
+        else:
+            checks += [(f'Service {s}', ['systemctl', 'status', s, '--no-pager', '-l', '-n', '20'])
+                       for s in CARACAL_SERVICES if s != 'caracal-display.service']
+        checks += [
+            ('Kernel warnings', ['sh', '-c', 'journalctl -k -b -p warning --no-pager -n 60 2>/dev/null || '
+                                 'dmesg | tail -n 60']),
+            ('Out of memory', ['sh', '-c', 'journalctl -k -b --no-pager 2>/dev/null | grep -iE "out of memory|oom-kill" '
+                               '| tail -n 10 || dmesg | grep -iE "out of memory|oom-kill" | tail -n 10']),
+            ('Errors of the previous boot', ['journalctl', '-b', '-1', '-p', 'err', '--no-pager', '-n', '40']),
+        ]
+        sections = []
+        for title, cmd, *env in checks:
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace',
+                                   timeout=20, env={**os.environ, **(env[0] if env else {})})
+                out = r.stdout.strip()
+            except (OSError, subprocess.SubprocessError) as e:
+                out = f'({e})'
+            sections.append({'title': title, 'output': out[-6000:] or '(empty)'})
+        return {'version': VERSION, 'caracal_version': caracal_version(), 'runtime': runtime(), 'os': os_name(),
+                'model': self.model(), 'taken': time.time(), 'sections': sections}
 
     def update_classic(self, p):
         """Install a CARACAL release with its own install.sh; roll back to the previous version on failure.

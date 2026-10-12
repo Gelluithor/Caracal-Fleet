@@ -32,6 +32,11 @@ zero-touch USB stick](docs/fleet.gif)
   (create, new name and password), the countdown bar on the TV, the notification queue, history and audit log, the
   node's own app tokens, trying a watcher or a Grafana tag before saving
 - **SSH console:** a terminal on any node right in the browser (the hub connects over SSH, nothing to install)
+- **Diagnostics and reinstallation:** a report of a node whose screen stays black (disk, memory, power, display
+  outputs, the X server, containers and system log, with the usual causes pointed out), and *Reinstall CARACAL*
+  from scratch – optionally as a factory reset with a new administrator and a template
+- **Websites in dark mode:** per node or per website and Grafana collection – the sites' own dark look or forced
+  dark for every page
 - **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
 - **Nodes without internet access:** Fleet can be the only download source of a node (system packages, Docker and
   CARACAL go through the hub), chosen for the SD card, the SSH installation or per device

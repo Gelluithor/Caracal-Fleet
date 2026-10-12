@@ -131,6 +131,14 @@ def overlay_of(status):
     return {'enabled': bool(o.get('enabled', True)), 'size': _int(o.get('size')) or 16} if isinstance(o, dict) else None
 
 
+def player_settings_of(status):
+    """Settings of the node's player: {'web_dark'}; None when the node does not report them."""
+    s = status.get('player_settings')
+    if not isinstance(s, dict):
+        return None
+    return {'web_dark': s.get('web_dark') if s.get('web_dark') in ('off', 'dark', 'force') else 'off'}
+
+
 def player_of(status):
     """Agent 4 sends a nested player object, agent 3 sent flat keys."""
     p = status.get('player')
@@ -218,7 +226,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'download_source': status.get('download_source') or '', 'arch': status.get('arch') or '',
         'screenshot_at': screenshot_time(row['id']),
         'supports_enabled': any('enabled' in a or 'is_enabled' in a for a in dicts(status.get('assets'))),
-        'admin': admin_of(status), 'overlay': overlay_of(status),
+        'admin': admin_of(status), 'overlay': overlay_of(status), 'player_settings': player_settings_of(status),
     }
     d['current_asset_id'] = None
     if d['current_id'] is not None:

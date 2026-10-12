@@ -18,7 +18,7 @@ from . import console, images, monitor, notify, playlists, provisioning, proxy, 
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
-                   sweep_commands, token_hash, validate_admin)
+                   sweep_commands, token_hash, validate_admin, version_tuple, DARK_MODES)
 from .devices import COLLECTION_KIND, MEDIA_KINDS, SCREENSHOTS, build, collections_of, dashboards_of, grafana_config, notifications_of
 
 @asynccontextmanager
@@ -316,6 +316,10 @@ def validate_command(c, row, action, payload):
         payload['name'] = text(payload.get('name'), 200) or src
     if action in ('add_web', 'add_media', 'update_asset', 'add_collection', 'update_collection'):
         payload.update(validate_timing(payload))
+    if action in ('add_web', 'update_asset', 'add_collection', 'update_collection') and 'dark' in payload:
+        payload['dark'] = validate_dark(payload['dark'])
+    if action in AGENT_FEATURES and version_tuple(row['version']) < AGENT_FEATURES[action]:
+        raise HTTPException(409, 'agent_update_required')
     known_profiles = [str(p.get('id')) for p in status.get('profiles') or []] if 'profiles' in status else None
     if action in ('add_web', 'update_asset') and 'auth_profile_id' in payload:
         payload['auth_profile_id'] = validate_profile_ref(payload['auth_profile_id'], known_profiles)
@@ -367,6 +371,28 @@ def validate_command(c, row, action, payload):
             raise HTTPException(409, 'already_docker')
         admin = validate_admin(payload) if action == 'convert_to_docker' and payload.get('username') else {}
         payload = {'version': version, 'image': images.node_image(), **admin}
+    elif action == 'reinstall_node':
+        # CARACAL installed again (any runtime; a classic node becomes a Docker node), optionally without its data:
+        # then optionally with a new web administrator and a template applied once the node is back
+        version = text(payload.get('version'), 64)
+        if not images.VERSION_RE.fullmatch(version):
+            raise HTTPException(400, 'version_required')
+        if not images.node_image():
+            raise HTTPException(400, 'node_image_missing')
+        if not online:
+            raise HTTPException(409, 'device_offline')
+        wipe = flag(payload.get('wipe_data'))
+        admin = validate_admin(payload) if wipe and payload.get('username') else {}
+        template = None
+        if payload.get('template') not in (None, '', 0, '0'):
+            try:
+                template = int(payload['template'])
+            except (TypeError, ValueError):
+                raise HTTPException(400, 'template_not_found')
+            if not c.execute('SELECT 1 FROM node_templates WHERE id=?', (template,)).fetchone():
+                raise HTTPException(400, 'template_not_found')
+        payload = {'version': version, 'image': images.node_image(), 'wipe_data': wipe, **admin,
+                   **({'template': template} if template else {})}
     if action in NOTIFY_CAPABILITY and (status.get('capabilities') or {}).get(NOTIFY_CAPABILITY[action]) is False:
         raise HTTPException(409, 'notifications_unsupported')
     # newer than the agent or the node: only when the agent reports that the node has the endpoint
@@ -399,6 +425,12 @@ def validate_command(c, row, action, payload):
         payload = validate_admin(payload)
     if action == 'overlay_settings':
         payload = validate_overlay(payload)
+    if action == 'player_settings':
+        if payload.get('web_dark') not in DARK_MODES:
+            raise HTTPException(400, 'invalid_value')
+        payload = {'web_dark': payload['web_dark']}
+    if action == 'diagnostics':
+        payload = {}
     if action in ('notify_remove', 'update_notify_token', 'delete_notify_token'):
         try:
             payload['id'] = int(payload.get('id'))
@@ -512,7 +544,9 @@ NOTIFY_CAPABILITY = {'notify': 'notify', 'notify_clear': 'notify_clear', 'notify
                      'delete_notify_token': 'notify_token_delete', 'preview_watcher': 'preview_watcher'}
 SOUND_MAX = 5 * 1024 ** 2
 # command -> local endpoint of the node, for commands that old agents do not know at all
-NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot'}
+NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot', 'player_settings': 'player_settings'}
+# what only newer agents can do (they report their version in every heartbeat)
+AGENT_FEATURES = {'reinstall_node': (4, 13, 0), 'diagnostics': (4, 13, 0), 'player_settings': (4, 13, 0)}
 IMAGE_MAX = 5 * 1024 ** 2
 NOTIFY_IMAGE_PLACES = ('none', 'left', 'right', 'top', 'bottom', 'background')
 SCREENSHOT_MAX = 8 * 1024 ** 2
@@ -520,6 +554,14 @@ SCREENSHOT_MAX = 8 * 1024 ** 2
 
 def flag(v):
     return v not in (False, 0, '0', 'false', 'off', 'no', '', None)
+
+
+def validate_dark(v):
+    """Dark mode of a website or Grafana collection: '' follows the node's setting."""
+    v = '' if v is None else str(v).strip().lower()
+    if v and v not in DARK_MODES:
+        raise HTTPException(400, 'invalid_value')
+    return v
 
 
 def validate_overlay(d):
@@ -1230,8 +1272,16 @@ async def command_result(did: str, cid: int, r: Request):
         # a late result after a timeout is still taken (long installations)
         if row['state'] not in ('delivered', 'timeout'):
             return {'ok': True, 'ignored': True}
+        # a diagnostics report is longer than other results (it is JSON, so it must not be cut)
+        limit = 200000 if row['action'] == 'diagnostics' else 16000
         c.execute('UPDATE commands SET state=?, result=?, updated=? WHERE id=?',
-                  ('completed' if ok else 'failed', result[-16000:], time.time(), cid))
+                  ('completed' if ok else 'failed', result[-limit:], time.time(), cid))
+        if ok and row['action'] == 'reinstall_node':
+            # the template chosen for a reinstalled node: applied once the node reports again (not earlier, when
+            # the old installation was still running)
+            template = json.loads(row['payload_json'] or '{}').get('template')
+            if template:
+                c.execute('UPDATE devices SET pending_template=? WHERE id=?', (template, did))
         if ok and row['followup_json']:
             _run_followup(c, row, json.loads(row['followup_json']), result)
     return {'ok': True}

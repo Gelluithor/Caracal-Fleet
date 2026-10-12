@@ -38,6 +38,7 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Default sound | `DELETE /notify/sounds/{level}` | the generated chime again |
 | Web administrator | `POST /admin` | `{username, password}` (password 10 to 200 characters): creates the administrator of the node's web administration, or sets a new name and password of the existing one (its sessions end) → `{created}` |
 | Countdown on the TV | `PUT /player/overlay` | `{enabled, size}` (bar height 4 to 200 px) |
+| Player settings | `PUT /player/settings` | `{web_dark}`: websites in dark mode, `off`, `dark` (the sites' own dark look) or `force` (also pages without one); CARACAL 2026.10.12 and newer. Web pages and Grafana collections take `dark` as well (`off`, `dark`, `force`, empty = as the node) |
 | Skip notification | `POST /notify/skip` | ends the notification on screen |
 | Remove notification | `DELETE /notify/queue/{id}` | removes a waiting notification |
 | Notification log | `GET /notify/log?limit=` | `{history, history_count, audit, audit_count}`, at most 200 entries each |

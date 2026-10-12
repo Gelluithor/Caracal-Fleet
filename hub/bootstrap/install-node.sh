@@ -4,9 +4,14 @@
 #
 #   sudo bash install-node.sh --hub https://fleet.example --token ENROLL_TOKEN \
 #        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME] [--docker-pool 10.200.0.0/16] \
-#        [--via-fleet [--fleet-auth-file FILE]] [--admin-file FILE] [--template ID]
+#        [--via-fleet [--fleet-auth-file FILE]] [--admin-file FILE] [--template ID] [--reinstall [--wipe-data]]
 #
 # --template: a node template of the hub, applied by the hub once the new node reports (playlist, notifications...).
+#
+# --reinstall installs CARACAL again from scratch (CARACAL Fleet: device -> Manage -> Reinstall CARACAL): the CARACAL
+# containers and images are removed and downloaded again, the X display packages are reinstalled and the browser
+# profile is created anew. --wipe-data also removes CARACAL's data in /var/lib/caracal (playlist, media, logins,
+# notifications, settings), as on a new node.
 #
 # Debian, Ubuntu, Raspberry Pi OS and DietPi use apt and systemd; Alpine Linux uses apk and OpenRC (the X display runs
 # on vt7 there, the console keeps tty1). Alpine needs bash for this script: apk add bash curl.
@@ -29,7 +34,7 @@
 set -euo pipefail
 
 HUB=''; TOKEN=''; NAME=''; IMAGE=''; VERSION='latest'; SKIP_AGENT=''; DOCKER_POOL=''; VIA_FLEET=''; AUTH_FILE=''; ADMIN_FILE=''
-TEMPLATE=''
+TEMPLATE=''; REINSTALL=''; WIPE_DATA=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2;;
@@ -43,11 +48,14 @@ while [ $# -gt 0 ]; do
     --fleet-auth-file) AUTH_FILE=$2; shift 2;;
     --admin-file) ADMIN_FILE=$2; shift 2;;
     --template) TEMPLATE=$2; shift 2;;
+    --reinstall) REINSTALL=1; shift;;
+    --wipe-data) WIPE_DATA=1; shift;;
     *) echo "Unknown argument: $1" >&2; exit 2;;
   esac
 done
 [ "$(id -u)" -eq 0 ] || { echo 'Run as root (sudo).' >&2; exit 1; }
 [ -n "$HUB" ] && [ -n "$IMAGE" ] || { echo '--hub and --image are required' >&2; exit 2; }
+[ -z "$WIPE_DATA" ] || [ -n "$REINSTALL" ] || { echo '--wipe-data needs --reinstall' >&2; exit 2; }
 # package manager and init system: apt + systemd (Debian family) or apk + OpenRC (Alpine Linux)
 if command -v apt-get >/dev/null; then PKG=apt
 elif command -v apk >/dev/null; then PKG=apk
@@ -143,8 +151,9 @@ fi
 step '[1/7] System packages (X display, Openbox)'
 if [ "$PKG" = apt ]; then
   apt-get update -qq
-  apt-get install -y -qq ca-certificates curl xserver-xorg xserver-xorg-legacy xinit openbox unclutter \
-    x11-xserver-utils dbus-x11 python3 python3-requests python3-psutil >/dev/null
+  # a reinstallation also replaces the files of packages that are already installed (a broken X server)
+  apt-get install -y -qq ${REINSTALL:+--reinstall xserver-xorg-core} ca-certificates curl xserver-xorg \
+    xserver-xorg-legacy xinit openbox unclutter x11-xserver-utils dbus-x11 python3 python3-requests python3-psutil >/dev/null
   # small boards (Raspberry Pi 4 with 1-2 GB): compressed swap in memory (zram), unless there is one already
   MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   if [ "${MEM_MB:-0}" -le 2048 ] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -q zram; then
@@ -162,6 +171,7 @@ else
   apk add -q ca-certificates curl bash shadow eudev xorg-server xf86-input-libinput xinit openbox unclutter-xfixes \
     xset xsetroot xrandr xhost dbus dbus-x11 mesa-dri-gallium mesa-egl font-dejavu python3 py3-requests py3-psutil \
     >/dev/null
+  [ -z "$REINSTALL" ] || apk fix -q xorg-server xinit openbox mesa-dri-gallium >/dev/null 2>&1 || true
   if command -v setup-devd >/dev/null; then setup-devd udev >/dev/null 2>&1 || true; fi
   # firmware of the usual PC graphics (a full kernel; virtual machines use virtio/bochs without firmware)
   if [ -d "/lib/modules/$(uname -r)/kernel/drivers/gpu/drm/i915" ]; then
@@ -225,6 +235,20 @@ if [ "$INIT" = systemd ]; then systemctl start docker; else rc-service docker st
 [ -z "$DOCKER_CHANGED" ] || svc_restart docker
 for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
 docker compose version
+
+if [ -n "$REINSTALL" ]; then
+  step 'Reinstallation: removing the CARACAL containers and images'
+  if [ -f "$NODE_DIR/compose.yml" ]; then
+    (cd "$NODE_DIR" && docker compose down --remove-orphans --rmi all) || true
+  fi
+  rm -f "$NODE_DIR/compose.yml" "$NODE_DIR/.env"
+  # the browser profile (cache, cookies); the logins of websites are kept in CARACAL's database
+  rm -rf /var/lib/caracal/chromium
+  if [ -n "$WIPE_DATA" ] && [ -d /var/lib/caracal ]; then
+    find /var/lib/caracal -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    echo 'CARACAL data removed (playlist, media, logins, notifications, settings).'
+  fi
+fi
 
 step '[3/7] User and data folders'
 id caracal >/dev/null 2>&1 || useradd -m -s /bin/bash caracal

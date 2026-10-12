@@ -5,6 +5,7 @@ A template holds any of these parts (a part that is not set is left alone on the
 - playlist: a global playlist and the mode (append / replace)
 - notifications: the settings and the look of on-screen notifications, and the picture of the look
 - overlay: the countdown bar of the current page
+- player: websites in dark mode
 - group and location in Fleet
 
 Applying a template queues the commands of its parts for each node (the same commands the device page sends); a part
@@ -18,8 +19,8 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from .core import FILES, audit, current_user, db, new_batch, queue_command
-from .devices import build, notifications_of, overlay_of
+from .core import DARK_MODES, FILES, audit, current_user, db, new_batch, queue_command
+from .devices import build, notifications_of, overlay_of, player_settings_of
 
 router = APIRouter()
 NOTIFY_KEYS = ('enabled', 'position', 'duration', 'scale', 'max_queue', 'sound', 'volume', 'history_max',
@@ -96,6 +97,13 @@ def _clean_parts(c, d, current):
             out['overlay'] = validate_overlay(d['overlay'])
         else:
             raise HTTPException(400, 'invalid_value')
+    if 'player' in d:
+        if not d['player']:
+            out.pop('player', None)
+        elif isinstance(d['player'], dict) and d['player'].get('web_dark') in DARK_MODES:
+            out['player'] = {'web_dark': d['player']['web_dark']}
+        else:
+            raise HTTPException(400, 'invalid_value')
     for key in ('group', 'location'):
         if key in d:
             value = _text(d[key], 120)
@@ -124,6 +132,8 @@ def commands_of(c, tpl):
         out.append(('notify_settings', data['notify']))
     if data.get('overlay'):
         out.append(('overlay_settings', data['overlay']))
+    if data.get('player'):
+        out.append(('player_settings', data['player']))
     if data.get('playlist_id'):
         from .playlists import deploy_items
         items = deploy_items(c, data['playlist_id'], missing_ok=True)
@@ -242,6 +252,9 @@ async def template_from_device(r: Request):
         overlay = overlay_of(status)
         if overlay:
             data['overlay'] = overlay
+        player = player_settings_of(status)
+        if player:
+            data['player'] = player
         for key, col in (('group', 'device_group'), ('location', 'location')):
             if row[col]:
                 data[key] = row[col]

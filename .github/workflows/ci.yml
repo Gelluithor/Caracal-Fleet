@@ -62,8 +62,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # A tag v* also creates the GitHub Release (Releases tab) with notes generated from the commits since the
-  # previous tag. Runs after the image was published; skipped when the release exists already (re-run).
+  # A tag v* also creates the GitHub Release (Releases tab): the message of an annotated tag is its notes, a plain tag
+  # gets notes generated from the commits since the previous tag. Runs after the image was published; skipped when the release exists already (re-run).
   release:
     needs: image
     if: startsWith(github.ref, 'refs/tags/v')
@@ -79,6 +79,15 @@ jobs:
           TAG="$GITHUB_REF_NAME"
           V="${TAG#v}"
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/caracal-fleet"
+          TITLE="CARACAL Fleet"
           if gh release view "$TAG" >/dev/null 2>&1; then echo "Release $TAG exists"; exit 0; fi
+          # an annotated tag carries the release notes; a plain tag gets notes generated from the commits
+          NOTES=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq 'select(.object.type == "tag") | .object.url' \
+            | xargs -r -I{} gh api {} --jq .message)
+          if [ -n "$NOTES" ]; then
+            printf '%s\n\nDocker image: `%s:%s` (also `:latest`)\n' "$NOTES" "$IMAGE" "$V" > notes.md
+            gh release create "$TAG" --verify-tag --title "$TITLE $V" --notes-file notes.md
+            exit 0
+          fi
           gh release create "$TAG" --verify-tag --title "CARACAL Fleet $V" --generate-notes \
             --notes "Docker image: \`$IMAGE:$V\` (also \`:latest\`)"

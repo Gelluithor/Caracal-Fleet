@@ -737,3 +737,36 @@ def test_screenshot_from_fleet(env):
     # and the hub takes a picture only from a device carrying out a screenshot command
     assert requests.post(f"{hub}/api/device/{env['id']}/screenshot", data=b'\xff\xd8\xff',
                          headers={'X-Device-Token': env['key']}).status_code == 403
+
+
+def test_dark_websites_from_fleet(env):
+    """Websites in dark mode: the node's setting, a choice per website or collection and what the player gets."""
+    assert device(env)['capabilities']['player_settings'] is True
+    assert device(env)['player_settings'] == {'web_dark': 'off'}
+    run(env, 'player_settings', {'web_dark': 'dark'})
+    assert device(env)['player_settings'] == {'web_dark': 'dark'}
+    run(env, 'add_web', {'name': 'Forced', 'source': 'https://example.com/forced', 'duration': 20, 'dark': 'force'})
+    run(env, 'add_web', {'name': 'Follows', 'source': 'https://example.com/follows', 'duration': 20})
+    run(env, 'add_collection', {'name': 'Dark dashboards', 'grafana_url': 'https://grafana.example', 'tag': 'tv',
+                                'dark': 'off'})
+    by_name = {a['name']: a for a in node_assets(env)}
+    assert by_name['Forced']['dark'] == 'force' and by_name['Follows']['dark'] is None
+    assert by_name['Dark dashboards']['dark'] == 'off'
+    playlist = {x['name']: x for x in env['local'].get(env['node'] + '/api/player/playlist-expanded').json()}
+    assert playlist['Forced']['dark'] == 'force' and playlist['Follows']['dark'] == 'dark'
+    dash = next(x for name, x in playlist.items() if name.startswith('Dark dashboards'))
+    assert dash['dark'] == 'off' and 'theme=dark' not in dash['source']
+    # the collection follows the node again: Grafana gets its dark theme
+    col = by_name['Dark dashboards']['id']
+    run(env, 'update_collection', {'id': col, 'dark': ''})
+    dash = next(x for x in env['local'].get(env['node'] + '/api/player/playlist-expanded').json() if x.get('parent_id') == col)
+    assert dash['dark'] == 'dark' and dash['source'].endswith('kiosk=1&theme=dark')
+    run(env, 'update_asset', {'id': by_name['Forced']['id'], 'name': 'Forced', 'dark': 'off'})
+    assert {a['name']: a for a in node_assets(env)}['Forced']['dark'] == 'off'
+    bad = requests.put(env['node'] + '/api/fleet/v1/player/settings', headers={'X-Caracal-Fleet-Key': env['key']},
+                       json={'web_dark': 'dim'})
+    assert bad.status_code in (400, 401)
+    for a in node_assets(env):
+        if a['name'] in ('Forced', 'Follows', 'Dark dashboards'):
+            run(env, 'delete_asset', {'id': a['id']})
+    run(env, 'player_settings', {'web_dark': 'off'})

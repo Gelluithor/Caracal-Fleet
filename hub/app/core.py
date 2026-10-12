@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.14.0'
+HUB_VERSION = '4.15.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -68,6 +68,11 @@ ACTIONS = {
     'set_hub': ('manage', None),
     'update_caracal': ('manage', 600),
     'convert_to_docker': ('manage', 600),
+    # agents from 4.13: install CARACAL again (optionally without its data) and a report of the node's state
+    'reinstall_node': ('manage', 600),
+    'diagnostics': ('manage', 600),
+    # agents from 4.13 with CARACAL 2026.10.12 and newer: websites in dark mode
+    'player_settings': ('content', None),
     # on-screen notifications of the nodes
     'notify': ('control', 600),
     'notify_clear': ('control', 600),
@@ -99,7 +104,10 @@ ACTIONS = {
 # only to the node.
 SECRET_KEYS = ('username', 'password', 'secret', 'client_secret', 'refresh_token')
 SECRET_ACTIONS = ('add_profile', 'update_profile', 'add_watcher', 'update_watcher', 'preview_watcher', 'set_admin',
-                  'convert_to_docker')   # convert_to_docker: optionally with the node's web administrator
+                  'convert_to_docker', 'reinstall_node')   # optionally with the node's web administrator
+# installing CARACAL (apt, pip, image downloads) takes much longer than other commands
+INSTALL_ACTIONS = ('update_caracal', 'convert_to_docker', 'reinstall_node')
+DARK_MODES = ('off', 'dark', 'force')
 REDACTED = '•••'
 
 
@@ -217,6 +225,7 @@ COLUMNS = [
     ('files', 'pinned', 'INTEGER DEFAULT 0'),
     ('jobs', 'result_json', "TEXT DEFAULT ''"),
     ('devices', 'pending_template', 'INTEGER'),   # template of a new node, applied after its first report
+    ('global_playlist_items', 'dark', "TEXT DEFAULT ''"),   # dark mode of a website: '' = as the node, off, dark, force
 ]
 
 
@@ -478,13 +487,13 @@ def sweep_commands(c):
     now = time.time()
     c.execute("UPDATE commands SET state='expired', updated=?, result='not delivered in time' "
               "WHERE state='queued' AND expires IS NOT NULL AND expires<?", (now, now))
+    marks = ','.join('?' * len(INSTALL_ACTIONS))
     c.execute("UPDATE commands SET state='timeout', updated=?, result='no result from agent' "
-              "WHERE state='delivered' AND action NOT IN ('update_caracal','convert_to_docker') AND updated<?",
-              (now, now - DELIVERY_TIMEOUT))
-    # installing CARACAL (apt, pip, image downloads) takes much longer than other commands
+              f"WHERE state='delivered' AND action NOT IN ({marks}) AND updated<?",
+              (now, *INSTALL_ACTIONS, now - DELIVERY_TIMEOUT))
     c.execute("UPDATE commands SET state='timeout', updated=?, result='no result from agent' "
-              "WHERE state='delivered' AND action IN ('update_caracal','convert_to_docker') AND updated<?",
-              (now, now - 4 * 3600))
+              f"WHERE state='delivered' AND action IN ({marks}) AND updated<?",
+              (now, *INSTALL_ACTIONS, now - 4 * 3600))
     scrub_secrets(c)
 
 

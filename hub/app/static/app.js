@@ -396,6 +396,7 @@ function setTitle(title, crumb = '', href = '') {
   $('#title').textContent = title;
   $('#crumb').innerHTML = crumb && href ? `<a href="${href}">${esc(crumb)}</a>` : esc(crumb);
   document.title = `${title} · CARACAL Fleet`;
+  syncTopbar(true);   // another title (or crumb) may change the toolbar's height
 }
 
 // ---------- overview
@@ -570,6 +571,9 @@ function deviceActions(d = null) {
   const sound = notify && has('notify_sound'), overlay = has('overlay'), admin = sel.some(adminSupport);
   // the look editor needs a node that reports its look (newer CARACAL) and an agent that passes it on
   const look = notify && sel.some(x => lookSupport(x));
+  const webDark = has('player_settings');
+  // reinstallation and diagnostics are done by the agent itself (4.13 and newer)
+  const agent = sel.some(agentFeatures), agentWhy = agent ? t('offline') : t('err_agent_update_required');
   const ctl = can('control'), content = can('content'), manage = can('manage');
   const A = (todo, ic, label, o = {}) => ({ todo, ic, label, ...o, why: o.disabled ? o.why || t('offline') : '' });
   const cmd = d ? 'cmd' : 'bulk';
@@ -582,7 +586,8 @@ function deviceActions(d = null) {
   const menus = [
     { ic: 'playlists', label: t('menuContent'), sections: [
       [content && A('bulkAddContent', 'plus', t('addContent')), content && A('bulkCopy', 'copy', t('copyPlaylistHere'))],
-      [content && A(d ? 'overlaySettings' : 'bulkOverlay', 'settings', t('overlayBar'), { disabled: !overlay, why: why(overlay) })],
+      [content && A(d ? 'overlaySettings' : 'bulkOverlay', 'settings', t('overlayBar'), { disabled: !overlay, why: why(overlay) }),
+        content && A(d ? 'webDarkSettings' : 'bulkWebDark', 'moon', t('webDark'), { disabled: !webDark, why: why(webDark) })],
     ] },
     { ic: 'attention', label: t('menuNotify'), sections: [
       [ctl && A(d ? 'notifySend' : 'bulkNotify', 'plus', t('notifySend'), { disabled: !notify, why: notifyWhy })],
@@ -600,7 +605,9 @@ function deviceActions(d = null) {
         manage && (!d || d.download_source) && A(d ? 'downloadSource' : 'bulkDownloadSource', 'download', t('downloadSource'))],
       [manage && A(cmd, 'agent', t('act_update_agent'), { act: 'update_agent', disabled: off }),
         manage && A('caracalUpdate', 'updates', t('act_update_caracal'), { disabled: off }),
-        manage && d && d.runtime === 'host' && A('convertNodes', 'upload', t('convertToDocker'), { disabled: off })],
+        manage && d && d.runtime === 'host' && A('convertNodes', 'upload', t('convertToDocker'), { disabled: off }),
+        manage && A(d ? 'reinstallNode' : 'bulkReinstall', 'restart', t('reinstall'), { disabled: off || !agent, why: agentWhy })],
+      [manage && d && A('diagnostics', 'audit', t('diagnostics'), { disabled: off || !agent, why: agentWhy })],
       [manage && d && A('provision', 'ssh', t('sshInstall'), { data: { host: d.ip || '', name: d.name } }),
         manage && d && A('', 'console', t('console'), { href: '#/console/' + encodeURIComponent(d.id) })],
       [manage && A('bulkSetHub', 'upload', t('act_set_hub')),
@@ -745,7 +752,33 @@ document.addEventListener('keydown', e => {
 });
 
 // the large page title shrinks into the toolbar once the page scrolls
-window.addEventListener('scroll', () => { $('.topbar')?.classList.toggle('scrolled', scrollY > 6); }, { passive: true });
+// The toolbar gets lower once the page scrolls. A bottom margin of the difference keeps the page below it in place:
+// without it the page got shorter by the same amount, which moved the scroll position back over the threshold and
+// the toolbar flickered between both states (and short pages could not be scrolled at all).
+function topbarGap(tb) {
+  const c = tb.cloneNode(true);
+  [c, ...c.querySelectorAll('[id]')].forEach(x => x.removeAttribute('id'));
+  c.setAttribute('aria-hidden', 'true');
+  c.style.cssText = `position:absolute;visibility:hidden;left:0;top:0;width:${tb.offsetWidth}px;margin:0`;
+  [c, ...c.querySelectorAll('*')].forEach(x => { x.style.transition = 'none'; });
+  c.classList.remove('scrolled');
+  tb.parentNode.append(c);
+  const full = c.offsetHeight;
+  c.classList.add('scrolled');
+  const gap = full - c.offsetHeight;
+  c.remove();
+  return Math.max(0, gap);
+}
+function syncTopbar(remeasure = false) {
+  const tb = $('.topbar');
+  if (!tb) return;
+  const on = scrollY > 6;
+  if (on === tb.classList.contains('scrolled') && !(remeasure && on)) return;
+  tb.style.marginBottom = on ? topbarGap(tb) + 'px' : '';
+  tb.classList.toggle('scrolled', on);
+}
+window.addEventListener('scroll', () => syncTopbar(), { passive: true });
+window.addEventListener('resize', () => syncTopbar(true));
 
 // The thumb of the segmented tabs slides from the tab it was on.
 let thumbFrom = null;
@@ -780,10 +813,16 @@ function toggleMenu(btn) {
   pop.hidden = false;
   menuOpenedAt = performance.now();
   btn.setAttribute('aria-expanded', 'true');
-  // fixed position, so the menu is not cut off by a scrolling or clipped panel
+  // fixed position, so the menu is not cut off by a scrolling or clipped panel. It opens on the side with more room
+  // and never reaches past the window: a long menu scrolls itself (scrolling the page would close it, and a page that
+  // does not scroll left its last items unreachable).
+  pop.style.maxHeight = '';
   const r = btn.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+  const below = innerHeight - r.bottom - 12, above = r.top - 12, up = h > below && above > below;
+  const room = Math.max(120, up ? above : below);
+  if (h > room) pop.style.maxHeight = room + 'px';
   pop.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
-  pop.style.top = (r.bottom + 4 + h > innerHeight && r.top - 4 - h > 0 ? r.top - 4 - h : r.bottom + 4) + 'px';
+  pop.style.top = (up ? r.top - 4 - Math.min(h, room) : r.bottom + 4) + 'px';
   menuItems(pop)[0]?.focus();
 }
 document.addEventListener('keydown', e => {
@@ -1085,13 +1124,15 @@ const adminSupport = d => 'admin' in (d.capabilities || {});
 const nodeAdminUrl = d => d.ip ? `http://${d.ip.includes(':') ? `[${d.ip}]` : d.ip}:8080` : '';
 
 function nodeAdminCard(d) {
-  if (!adminSupport(d) && !d.admin && !d.overlay) return '';
+  if (!adminSupport(d) && !d.admin && !d.overlay && !d.player_settings) return '';
   const a = d.admin, o = d.overlay, url = nodeAdminUrl(d);
   return `<section class="card"><div class="card-head"><h2>${t('webAdmin')}</h2>${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">${icon('web')}${t('webAdminOpen')}</a>` : ''}</div>
     <dl class="kv"><dt>${t('webAdminAccount')}</dt><dd>${!a ? '—' : a.configured ? `<b>${esc(a.username)}</b>` : `<span class="tag critical">${t('webAdminMissing')}</span>`}
         ${can('manage') && adminSupport(d) ? ` <button class="btn sm ghost" data-do="nodeAdmin" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('lock')}${t(a && a.configured ? 'webAdminChange' : 'webAdminCreate')}</button>` : ''}</dd>
       <dt>${t('overlayBar')}</dt><dd>${o ? `${t(o.enabled ? 'overlayOn' : 'overlayOff')}${o.enabled ? ` · ${esc(o.size)} px` : ''}` : '—'}
-        ${can('content') && (d.capabilities || {}).overlay ? ` <button class="btn sm ghost" data-do="overlaySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd></dl>
+        ${can('content') && (d.capabilities || {}).overlay ? ` <button class="btn sm ghost" data-do="overlaySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
+      ${d.player_settings ? `<dt>${t('webDark')}</dt><dd>${t('dark_' + d.player_settings.web_dark)}
+        ${can('content') && (d.capabilities || {}).player_settings ? ` <button class="btn sm ghost" data-do="webDarkSettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>` : ''}</dl>
     <p class="muted">${t('webAdminHint')}</p></section>`;
 }
 
@@ -1136,6 +1177,82 @@ function overlayDialog(ids, current) {
       return ids.length === 1 ? sendCommand(ids[0], 'overlay_settings', payload) : sendBulk(ids, 'overlay_settings', payload);
     },
   });
+}
+
+// Websites in dark mode: the node's setting for every website and Grafana collection (an item may choose otherwise).
+const DARK_MODES = ['off', 'dark', 'force'];
+const darkField = (v = '', grafana = false) => `<label>${t('darkMode')}<select name="dark"><option value="">${t('darkAsNode')}</option>
+  ${DARK_MODES.filter(m => !grafana || m !== 'force').map(m => `<option value="${m}" ${v === m ? 'selected' : ''}>${t('dark_' + m)}</option>`).join('')}</select>
+  <small class="muted">${t(grafana ? 'darkGrafanaHint' : 'darkItemHint')}</small></label>`;
+function webDarkDialog(ids, current) {
+  const v = (current && current.web_dark) || 'off';
+  modal({
+    title: t('webDark'),
+    body: `<div class="form"><p class="muted">${t('webDarkHint')}</p>${ids.length > 1 ? `<p class="muted">${t('notifySettingsToSelected', { n: ids.length })}</p>` : ''}
+      <div class="mode-pick">${DARK_MODES.map(m => `<label class="check"><input type="radio" name="web_dark" value="${m}" ${m === v ? 'checked' : ''}><span><b>${t('dark_' + m)}</b><small>${t('darkHint_' + m)}</small></span></label>`).join('')}</div></div>`,
+    onSubmit: data => (ids.length === 1 ? sendCommand(ids[0], 'player_settings', { web_dark: data.web_dark }) : sendBulk(ids, 'player_settings', { web_dark: data.web_dark })),
+  });
+}
+
+const verGte = (v, min) => {
+  const a = (String(v || '').match(/\d+/g) || []).map(Number), b = min.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+  return true;
+};
+const agentFeatures = d => !!d && verGte(d.version, '4.13.0');
+
+// CARACAL installed again from scratch by the agent, optionally without its data (as a new node).
+async function reinstallDialog(ids) {
+  const [img] = await Promise.all([imageInfo(), loadTemplates()]);
+  if (!img) return;
+  modal({
+    title: t('reinstall'), submit: t('reinstallNow'), danger: true,
+    body: `<div class="form"><p class="muted">${t('reinstallHint')}</p>${ids.length > 1 ? `<p class="muted">${t('addToSelected', { n: ids.length })}</p>` : ''}
+      ${versionField(img)}
+      <label class="check"><input type="checkbox" name="wipe_data"><span><b>${t('reinstallWipe')}</b><br><small class="muted">${t('reinstallWipeHint')}</small></span></label>
+      <details class="admin-pick wipe-only" hidden><summary>${t('webAdminInstall')}</summary><p class="muted">${t('webAdminInstallHint')}</p>${adminFields('admin_', false)}</details>
+      ${templatePick('')}
+      <div class="note warn">${t('reinstallWarning')}</div></div>`,
+    onOpen: form => {
+      const sync = () => { $('.wipe-only', form).hidden = !form.wipe_data.checked; };
+      form.wipe_data.onchange = sync;
+      sync();
+    },
+    onSubmit: data => {
+      const wipe = !!data.wipe_data, admin = wipe ? adminFromForm(data, 'admin_') : null;
+      const payload = { version: data.version.trim(), wipe_data: wipe, ...(admin || {}), ...(data.template ? { template: Number(data.template) } : {}) };
+      return ids.length === 1 ? sendCommand(ids[0], 'reinstall_node', payload) : sendBulk(ids, 'reinstall_node', payload);
+    },
+  });
+}
+
+// What the node's screen cannot show when it stays black: the agent's report, with the usual causes pointed out.
+function diagFindings(sections) {
+  const out = [], of = title => { const o = (sections.find(s => s.title === title) || {}).output || ''; return o === '(empty)' ? '' : o; };
+  if (/\s(9\d|100)%\s+\/(var\S*)?$/m.test(of('Disk'))) out.push('diagDiskFull');   // the system or Docker's disk
+  const thr = /throttled=(0x[0-9a-f]+)/i.exec(of('Power and temperature (Raspberry Pi)'));
+  if (thr && parseInt(thr[1], 16) & 0x50005) out.push('diagPower');
+  const outputs = of('Display outputs');
+  if (outputs && !/: connected/.test(outputs)) out.push('diagNoDisplay');
+  if (/oom-kill|out of memory/i.test(of('Out of memory'))) out.push('diagMemory');
+  if (/inactive|failed|activating \(auto-restart\)/.test(of('Display service'))) out.push('diagDisplayDown');
+  if (/Restarting|Exited|unhealthy/.test(of('Containers'))) out.push('diagContainers');
+  return out;
+}
+async function diagnosticsDialog(id) {
+  const d = dev(id);
+  const dlg = modal({ title: `${t('diagnostics')} · ${esc(d ? d.name : id)}`, wide: true, body: `<div id="diagBox"><div class="note info">${t('loadingFromNode')}</div></div>` });
+  const el = $('#diagBox', dlg);
+  let r;
+  try { r = await commandResult(id, 'diagnostics', {}, 120000); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; return; }
+  if (!el.isConnected) return;
+  const sections = r.sections || [], found = diagFindings(sections);
+  const head = `${d ? d.name : id} · ${r.model || ''} · ${r.os || ''} · CARACAL ${r.caracal_version || '?'} (${r.runtime || '?'}) · agent ${r.version || '?'} · ${dt(r.taken)}`;
+  el.innerHTML = `<p class="muted">${t('diagnosticsHint')}</p><p><small class="muted">${esc(head)}</small></p>
+    ${found.length ? `<div class="note warn"><div>${found.map(k => `<b>${t(k)}</b><br><small>${t(k + 'Hint')}</small>`).join('<br>')}</div></div>` : `<div class="note ok">${t('diagNothing')}</div>`}
+    <div class="form-actions start"><button type="button" class="btn sm" data-copy-diag>${icon('copy')}${t('diagnosticsCopy')}</button></div>
+    ${sections.map(s => `<details class="diag"><summary>${esc(s.title)}</summary><pre>${esc(s.output)}</pre></details>`).join('')}`;
+  $('[data-copy-diag]', el).onclick = () => navigator.clipboard.writeText(head + '\n\n' + sections.map(s => `## ${s.title}\n${s.output}`).join('\n\n')).then(() => toast(t('copied')));
 }
 
 // Commands whose result a dialog shows: trying a watcher or a Grafana tag, the notification log.
@@ -2553,7 +2670,8 @@ function globalItemDialog(pid, kind, item = null) {
       ${isTag(kind) ? grafanaFields(it) : ''}
       <div class="row2"><label>${t(isTag(kind) ? 'durationPerDashboard' : 'durationSec')}<input name="duration" type="number" min="5" value="${esc(it.duration)}" required></label>
       ${kind === 'web' || isTag(kind) ? `<label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(it.scale ?? 1)}"></label>` : '<span></span>'}</div>
-      ${kind === 'video' ? `<small class="muted">${t('videoDurationHint')}</small>` : ''}</div>`,
+      ${kind === 'video' ? `<small class="muted">${t('videoDurationHint')}</small>` : ''}
+      ${kind === 'web' || isTag(kind) ? darkField(it.dark || '', isTag(kind)) : ''}</div>`,
     onOpen: form => {
       const f = $('input[name=file]', form);
       if (f) f.onchange = () => { if (f.files[0] && !form.name.value) form.name.value = f.files[0].name.replace(/\.[^.]+$/, ''); };
@@ -2562,6 +2680,7 @@ function globalItemDialog(pid, kind, item = null) {
       const payload = { kind, name: data.name.trim(), duration: Number(data.duration || 0), scale: Number(data.scale || 1) };
       if (kind === 'web') payload.source = data.source.trim();
       if (isTag(kind)) Object.assign(payload, grafanaPayload(data));
+      if (kind === 'web' || isTag(kind)) payload.dark = data.dark || '';
       if (item) {
         await api(`/api/global-playlists/${pid}/items/${item.id}`, { method: 'PATCH', json: payload });
       } else {
@@ -2604,7 +2723,7 @@ function globalDeployDialog(p) {
 
 // ---------- node templates: parts of a node's setup defined once, applied to nodes or baked into zero-touch media
 
-const tplParts = p => [p.playlist_id && 'playlist', p.notify && 'notify', p.image && 'picture', p.overlay && 'overlay', (p.group || p.location) && 'org'].filter(Boolean);
+const tplParts = p => [p.playlist_id && 'playlist', p.notify && 'notify', p.image && 'picture', p.overlay && 'overlay', p.player && 'player', (p.group || p.location) && 'org'].filter(Boolean);
 const tplChips = p => tplParts(p).map(x => `<span>${t('tplPart_' + x)}</span>`).join('') || `<span>${t('tplEmpty')}</span>`;
 
 // a template choice for new nodes (SD card, USB stick, installation); S.templates is loaded by the caller
@@ -2653,6 +2772,7 @@ VIEWS.templates = {
         <dt>${t('notifyLook')}</dt><dd>${n.style ? t('tplCustomLook') : t('tplDefaultLook')}${p.image ? ` · ${t('tplWithPicture')}` : ''}</dd></dl></div>` : off,
         editBtn('templateNotify', t('notifySettings')) + editBtn('templateLook', t('notifyLook')) + (edit && p.notify ? `<button class="btn sm ghost" data-do="templateClear" data-part="notify">${icon('x')}${t('tplRemovePart')}</button>` : ''))}
       ${part('settings', t('overlayBar'), t('overlayHint'), p.overlay ? `<dl class="kv"><dt>${t('overlayEnabled')}</dt><dd>${p.overlay.enabled ? t('yes') : t('no')}</dd>${p.overlay.size ? `<dt>${t('overlaySize')}</dt><dd>${p.overlay.size} px</dd>` : ''}</dl>` : off, editBtn('templateOverlay'))}
+      ${part('moon', t('webDark'), t('webDarkHint'), p.player ? `<dl class="kv"><dt>${t('webDark')}</dt><dd>${t('dark_' + p.player.web_dark)}</dd></dl>` : off, editBtn('templatePlayer'))}
       ${part('group', t('groupAndLocation'), t('tplOrgHint'), p.group || p.location ? `<dl class="kv">${p.group ? `<dt>${t('group')}</dt><dd>${esc(p.group)}</dd>` : ''}${p.location ? `<dt>${t('location')}</dt><dd>${esc(p.location)}</dd>` : ''}</dl>` : off, editBtn('templateOrg'))}
     </div>`);
     const prev = $('#tplPreview', root);
@@ -2897,6 +3017,7 @@ function assetDialog(deviceId, kind, asset = null, targets = null, preset = {}) 
     <div class="row2"><label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(a.duration ?? '')}" required></label>
     ${kind === 'web' ? `<label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(a.scale ?? 1)}"></label>` : '<span></span>'}</div>
     ${kind === 'video' ? `<small class="muted">${t('videoDurationHint')}</small>` : ''}
+    ${kind === 'web' ? darkField(a.dark || '') : ''}
     ${showEnabled ? `<label class="check"><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}>${t('enabledInPlaylist')}</label>` : ''}
     ${multi && targets === null ? `<details class="also-add"><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId)}</details>` : ''}
     ${multi && targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : ''}</div>`;
@@ -2925,7 +3046,7 @@ function assetDialog(deviceId, kind, asset = null, targets = null, preset = {}) 
     onSubmit: async (data, form) => {
       const payload = { name: data.name.trim(), duration: Number(data.duration || 0) };
       if (showEnabled) payload.enabled = !!data.enabled;
-      if (kind === 'web') { payload.source = data.source.trim(); payload.scale = Number(data.scale || 1); }
+      if (kind === 'web') { payload.source = data.source.trim(); payload.scale = Number(data.scale || 1); payload.dark = data.dark || ''; }
       if (profiles) payload.auth_profile_id = data.auth_profile_id ? Number(data.auth_profile_id) : null;
       if (asset) return sendCommand(deviceId, 'update_asset', { id: asset.id, ...payload });
       const ids = targets || [deviceId, ...(payload.auth_profile_id ? [] : pickedTargets(data))];
@@ -3008,6 +3129,7 @@ function collectionDialog(deviceId, col = null, targets = null) {
       <div class="row2"><label>${t('durationPerDashboard')}<input name="duration" type="number" min="5" value="${esc(c.duration ?? 60)}" required></label>
       <label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(c.scale ?? 1)}"></label></div>
       <small class="muted">${t('grafanaHint')}</small>
+      ${darkField(c.dark || '', true)}
       ${(dev(deviceId)?.capabilities || {}).grafana_discover ? `<div class="form-actions start"><button type="button" class="btn sm" data-try>${icon('refresh')}${t('grafanaTry')}</button></div><div class="try-result"></div>` : ''}
       ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : col ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId)}</details>`}</div>`,
     onOpen: form => {
@@ -3023,7 +3145,7 @@ function collectionDialog(deviceId, col = null, targets = null) {
       }
     },
     onSubmit: data => {
-      const payload = { name: data.name.trim(), ...grafanaPayload(data), duration: Number(data.duration || 60), scale: Number(data.scale || 1) };
+      const payload = { name: data.name.trim(), ...grafanaPayload(data), duration: Number(data.duration || 60), scale: Number(data.scale || 1), dark: data.dark || '' };
       if (col) return sendCommand(deviceId, 'update_collection', { id: col.id, ...payload });
       const ids = targets || [deviceId, ...pickedTargets(data)];
       return ids.length === 1 ? sendCommand(ids[0], 'add_collection', payload) : sendBulk(ids, 'add_collection', payload);
@@ -3304,6 +3426,16 @@ const ACTIONS_UI = {
       onSubmit: data => tplSave({ overlay: data.keep ? null : { enabled: !!data.enabled, size: Number(data.size) } }),
     });
   },
+  templatePlayer() {
+    const v = (S.template.player || {}).web_dark || '';
+    modal({
+      title: t('webDark'),
+      body: `<div class="form"><p class="muted">${t('webDarkHint')}</p><div class="mode-pick">
+        <label class="check"><input type="radio" name="web_dark" value="" ${v ? '' : 'checked'}><span><b>${t('tplKeep')}</b></span></label>
+        ${DARK_MODES.map(m => `<label class="check"><input type="radio" name="web_dark" value="${m}" ${m === v ? 'checked' : ''}><span><b>${t('dark_' + m)}</b><small>${t('darkHint_' + m)}</small></span></label>`).join('')}</div></div>`,
+      onSubmit: data => tplSave({ player: data.web_dark ? { web_dark: data.web_dark } : null }),
+    });
+  },
   templateOrg() {
     const p = S.template;
     modal({
@@ -3441,6 +3573,11 @@ const ACTIONS_UI = {
   },
   overlaySettings(b) { overlayDialog([b.dataset.id], dev(b.dataset.id)?.overlay); },
   bulkOverlay() { overlayDialog([...S.selected], null); },
+  webDarkSettings(b) { webDarkDialog([b.dataset.id], dev(b.dataset.id)?.player_settings); },
+  bulkWebDark() { webDarkDialog([...S.selected], null); },
+  reinstallNode(b) { reinstallDialog([b.dataset.id]); },
+  bulkReinstall() { reinstallDialog([...S.selected]); },
+  diagnostics(b) { diagnosticsDialog(b.dataset.id); },
   notifySkip(b) { return sendCommand(b.dataset.id, 'notify_skip'); },
   notifyRemove(b) { return sendCommand(b.dataset.id, 'notify_remove', { id: Number(b.dataset.nid) }); },
   notifyLog(b) { notifyLogDialog(b.dataset.id); },
