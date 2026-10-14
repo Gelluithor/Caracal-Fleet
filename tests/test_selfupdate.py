@@ -99,22 +99,22 @@ def test_a_new_version_that_does_not_start_brings_the_old_one_back(tmp_path):
 def test_check_and_start(client, admin_headers, monkeypatch):
     from app import images
     selfupdate._state.update(checked=0, data=None, job=None)
-    monkeypatch.setattr(images, 'list_tags', lambda image: ['latest', '4.16.1', '4.17.0', '4.18.0', 'edge', 'sha-1'])
+    monkeypatch.setattr(images, 'list_tags', lambda image: ['latest', '4.16.1', '4.17.0', '99.0.0', 'edge', 'sha-1'])
     monkeypatch.setattr(selfupdate.Docker, 'available', lambda self: False)
     monkeypatch.setenv('CARACAL_HUB_IMAGE', 'ghcr.io/o/caracal-fleet')
 
     class R:
         def json(self):
-            return [{'tag_name': 'v4.18.0', 'name': 'CARACAL Fleet 4.18.0', 'body': '## Highlights\n- **new**', 'html_url': 'https://x'},
+            return [{'tag_name': 'v99.0.0', 'name': 'CARACAL Fleet 99.0.0', 'body': '## Highlights\n- **new**', 'html_url': 'https://x'},
                     {'tag_name': 'v4.10.0', 'name': 'old', 'body': ''}]
     import requests
     monkeypatch.setattr(requests, 'get', lambda url, **kw: R())
     from app.core import HUB_VERSION, version_tuple
     r = client.get('/api/system/update?refresh=1', headers=admin_headers).json()
-    assert r['current'] == HUB_VERSION and r['latest'] == '4.18.0'
-    assert all(version_tuple(v) > version_tuple(HUB_VERSION) for v in r['newer']) and '4.18.0' in r['newer']
-    assert [n['version'] for n in r['notes']] == ['4.18.0']
+    assert r['current'] == HUB_VERSION and r['latest'] == '99.0.0'
+    assert all(version_tuple(v) > version_tuple(HUB_VERSION) for v in r['newer']) and '99.0.0' in r['newer']
+    assert [n['version'] for n in r['notes']] == ['99.0.0']
     assert r['docker']['available'] is False
-    assert client.post('/api/system/update', headers=admin_headers, json={'version': '4.18.0'}).json()['detail'] == 'docker_socket_missing'
+    assert client.post('/api/system/update', headers=admin_headers, json={'version': '99.0.0'}).json()['detail'] == 'docker_socket_missing'
     assert client.post('/api/system/update', headers=admin_headers, json={'version': '9.9.9'}).json()['detail'] == 'version_required'
     selfupdate._state.update(checked=0, data=None, job=None)
