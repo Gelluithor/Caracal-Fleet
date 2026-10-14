@@ -38,10 +38,22 @@ function t(key, vars) {
 }
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const can = p => !!S.me && S.me.permissions.includes(p);
+// what the user may do with one device (a user can be limited to some locations, groups or devices)
+const canOn = (d, p) => (d && Array.isArray(d.can) ? d.can.includes(p) : can(p));
+// a permission with the whole fleet (system settings, staged updates, groups and locations)
+const canAll = p => !!S.me && (S.me.everywhere || []).includes(p);
 const dev = id => S.devices.find(d => d.id === id);
 const num = v => (v === null || v === undefined || v === '' ? null : Number(v));
 
-function errText(e) { const m = e && e.message ? e.message : String(e); return I18N[S.lang]['err_' + m] || I18N.en['err_' + m] || m; }
+function errText(e) {
+  const m = e && e.message ? e.message : String(e);
+  const tr = k => I18N[S.lang]['err_' + k] || I18N.en['err_' + k];
+  if (tr(m)) return tr(m);
+  // "code: detail" (e.g. the permissions a user cannot grant, or what a backup destination answered)
+  const i = m.indexOf(':'), code = m.slice(0, i), rest = m.slice(i + 1).trim();
+  if (i > 0 && code === 'cannot_grant') return tr(code) + ' ' + rest.split(',').map(p => t('perm_' + p)).join(', ');
+  return i > 0 && tr(code) ? tr(code) + ': ' + rest : m;
+}
 
 async function api(path, opts = {}) {
   const o = { ...opts, headers: { ...(opts.headers || {}) } };
@@ -313,8 +325,12 @@ async function start() {
   $('#shell').hidden = false;
   applyStatic();
   buildNav();
-  $('#addDeviceBtn').hidden = !can('manage');
+  $('#addDeviceBtn').hidden = !can('install') && !can('settings');
   $('#userBtn').textContent = S.me.username.slice(0, 2).toUpperCase();
+  if (!can('view')) {   // an account without a role and without a user group
+    $('#view').innerHTML = `<section class="card">${emptyState('lock', t('noAccessTitle'), t('noAccessHint'), '')}</section>`;
+    return;
+  }
   await refresh();
   route();
 }
@@ -348,7 +364,7 @@ async function refresh() {
 const NAV = [
   ['overview', 'view'], ['devices', 'view'], ['wall', 'view'], ['attention', 'view'], ['playlists', 'view'], ['global', 'view'],
   ['templates', 'view'], ['schedule', 'view'], ['organization', 'view'],
-  ['operations', 'view'], ['updates', 'manage'], ['audit', 'manage'], ['users', 'admin'], ['settings', 'view'],
+  ['operations', 'view'], ['updates', 'updates'], ['audit', 'audit'], ['users', 'users'], ['settings', 'view'],
 ];
 
 function buildNav() {
@@ -514,7 +530,7 @@ const eventRow = (e, withDevice) => `<a class="event ${e.kind === 'end' ? 'ok' :
 function welcomeCard() {
   const opt = (todo, ic, title, text) => `<button class="welcome-opt" data-do="${todo}">${icon(ic)}<b>${title}</b><span>${text}</span></button>`;
   return `<section class="card welcome"><div class="welcome-head">${icon('devices')}<div><h2>${t('welcomeTitle')}</h2><p class="muted">${t('welcomeText')}</p></div></div>
-    ${can('manage') ? `<div class="welcome-opts">${opt('sdCard', 'download', t('sdCardTitle'), t('welcomeSd'))}${opt('discover', 'search', t('discoverTitle'), t('welcomeDiscover'))}${opt('provision', 'ssh', t('sshInstall'), t('welcomeSsh'))}${can('admin') ? opt('oneCommand', 'console', t('oneCommand'), t('welcomeOneCommand')) : ''}</div>`
+    ${can('install') ? `<div class="welcome-opts">${opt('sdCard', 'download', t('sdCardTitle'), t('welcomeSd'))}${opt('discover', 'search', t('discoverTitle'), t('welcomeDiscover'))}${opt('provision', 'ssh', t('sshInstall'), t('welcomeSsh'))}${can('admin') ? opt('oneCommand', 'console', t('oneCommand'), t('welcomeOneCommand')) : ''}</div>`
       : `<p class="muted">${t('welcomeViewer')}</p>`}</section>`;
 }
 
@@ -614,7 +630,8 @@ function deviceActions(d = null) {
   // reinstallation and diagnostics are done by the agent itself (4.13 and newer)
   const agent = sel.some(agentFeatures), agentWhy = agent ? t('offline') : t('err_agent_update_required');
   const screen = sel.some(x => verGte(x.version, '4.14.0')), screenWhy = screen ? t('offline') : t('needAgent414');
-  const ctl = can('control'), content = can('content'), manage = can('manage');
+  const any = p => sel.some(x => canOn(x, p));
+  const ctl = any('control'), content = any('content'), manage = any('devices'), upd = any('updates'), install = can('install');
   const A = (todo, ic, label, o = {}) => ({ todo, ic, label, ...o, why: o.disabled ? o.why || t('offline') : '' });
   const cmd = d ? 'cmd' : 'bulk';
   const play = ctl ? [
@@ -643,13 +660,13 @@ function deviceActions(d = null) {
         manage && d && A('templateFromDevice', 'copy', t('saveAsTemplate')),
         manage && A(d ? 'nodeAdmin' : 'bulkNodeAdmin', 'lock', t('webAdmin'), { disabled: off || !admin, why: why(admin) || t('offline') }),
         manage && (!d || d.download_source) && A(d ? 'downloadSource' : 'bulkDownloadSource', 'download', t('downloadSource'))],
-      [manage && A(cmd, 'agent', t('act_update_agent'), { act: 'update_agent', disabled: off }),
-        manage && A('caracalUpdate', 'updates', t('act_update_caracal'), { disabled: off }),
-        manage && d && d.runtime === 'host' && A('convertNodes', 'upload', t('convertToDocker'), { disabled: off }),
-        manage && A(d ? 'reinstallNode' : 'bulkReinstall', 'restart', t('reinstall'), { disabled: off || !agent, why: agentWhy })],
+      [upd && A(cmd, 'agent', t('act_update_agent'), { act: 'update_agent', disabled: off }),
+        upd && A('caracalUpdate', 'updates', t('act_update_caracal'), { disabled: off }),
+        upd && d && d.runtime === 'host' && A('convertNodes', 'upload', t('convertToDocker'), { disabled: off }),
+        upd && A(d ? 'reinstallNode' : 'bulkReinstall', 'restart', t('reinstall'), { disabled: off || !agent, why: agentWhy })],
       [manage && d && A('diagnostics', 'audit', t('diagnostics'), { disabled: off || !agent, why: agentWhy })],
-      [manage && d && A('provision', 'ssh', t('sshInstall'), { data: { host: d.ip || '', name: d.name } }),
-        manage && d && A('', 'console', t('console'), { href: '#/console/' + encodeURIComponent(d.id) })],
+      [install && d && A('provision', 'ssh', t('sshInstall'), { data: { host: d.ip || '', name: d.name } }),
+        d && canOn(d, 'console') && A('', 'console', t('console'), { href: '#/console/' + encodeURIComponent(d.id) })],
       [ctl && (!d || d.screen !== 'off') && A('screenSet', 'moon', t('screenSwitchOff'), { data: { state: 'off' }, disabled: off || !screen, why: screenWhy }),
         ctl && (!d || d.screen === 'off') && A('screenSet', 'sun', t('screenSwitchOn'), { data: { state: 'on' }, disabled: off || !screen, why: screenWhy })],
       [manage && A('bulkSetHub', 'upload', t('act_set_hub')),
@@ -737,7 +754,7 @@ function paletteResults(q) {
   if (words.length) add(t('paletteActions'), S.devices.filter(d => d !== here).flatMap(d => actionsOf(d, d.id, d.name)), 8);
   add(t('palettePages'), NAV.filter(([, p]) => can(p)).map(([v]) => ({ html: `<a class="pi" href="#/${v}">${icon(v)}<span>${t('nav_' + v)}</span></a>`, text: norm(t('nav_' + v)) })), words.length ? 4 : 11);
   add(t('paletteGeneral'), [
-    can('manage') && { html: `<button class="pi" data-do="provision">${icon('plus')}<span>${t('addDevice')}</span></button>`, text: norm(t('addDevice')) },
+    can('install') && { html: `<button class="pi" data-do="provision">${icon('plus')}<span>${t('addDevice')}</span></button>`, text: norm(t('addDevice')) },
     { html: `<button class="pi" data-do="toggleTheme">${icon('moon')}<span>${t('paletteTheme')}</span></button>`, text: norm(t('paletteTheme') + ' dark light') },
     { html: `<button class="pi" data-do="switchLang">${icon('web')}<span>${t('paletteLang')}</span></button>`, text: norm(t('paletteLang') + ' language jazyk') },
     { html: `<button class="pi" data-do="showShortcuts">${icon('keyboard')}<span>${t('shortcuts')}</span></button>`, text: norm(t('shortcuts') + ' keyboard klavesnice') },
@@ -909,11 +926,11 @@ VIEWS.attention = {
 
 function quickFix(d, a, inDetail = false) {
   const btn = (act, label) => `<button class="btn sm" data-do="cmd" data-id="${esc(d.id)}" data-act="${act}">${label}</button>`;
-  if (a.code === 'player' && can('control')) return btn('restart_player', t('act_restart_player'));
-  if (a.code === 'agent_outdated' && can('manage') && d.online) return btn('update_agent', t('act_update_agent'));
-  if (a.code === 'caracal_outdated' && can('manage') && d.online) return `<button class="btn sm" data-do="caracalUpdate" data-id="${esc(d.id)}">${t('act_update_caracal')}</button>`;
-  if (a.code === 'local_api' && can('control')) return btn('reboot', t('act_reboot'));
-  if (a.code === 'admin_missing' && can('manage') && d.online && adminSupport(d)) return `<button class="btn sm" data-do="nodeAdmin" data-id="${esc(d.id)}">${t('webAdminCreate')}</button>`;
+  if (a.code === 'player' && canOn(d, 'control')) return btn('restart_player', t('act_restart_player'));
+  if (a.code === 'agent_outdated' && canOn(d, 'updates') && d.online) return btn('update_agent', t('act_update_agent'));
+  if (a.code === 'caracal_outdated' && canOn(d, 'updates') && d.online) return `<button class="btn sm" data-do="caracalUpdate" data-id="${esc(d.id)}">${t('act_update_caracal')}</button>`;
+  if (a.code === 'local_api' && canOn(d, 'control')) return btn('reboot', t('act_reboot'));
+  if (a.code === 'admin_missing' && canOn(d, 'devices') && d.online && adminSupport(d)) return `<button class="btn sm" data-do="nodeAdmin" data-id="${esc(d.id)}">${t('webAdminCreate')}</button>`;
   return inDetail ? '' : `<a class="btn sm" href="#/device/${encodeURIComponent(d.id)}">${t('open')}</a>`;
 }
 
@@ -923,7 +940,7 @@ const DEVICE_TABS = ['overview', 'playlist', 'collections', 'logins', 'notify', 
 const TAB_COUNTS = { playlist: 'playlist_count', collections: 'collection_count', logins: 'profile_count', notify: 'watcher_count' };
 
 function deviceTabs(d, tab) {
-  return DEVICE_TABS.filter(x => x !== 'settings' || can('manage')).map(x => `<a href="#/device/${encodeURIComponent(d.id)}/${x}" class="${x === tab ? 'active' : ''}">${t('tab_' + x)}${TAB_COUNTS[x] && d[TAB_COUNTS[x]] ? ` <span class="count">${d[TAB_COUNTS[x]]}</span>` : ''}</a>`).join('');
+  return DEVICE_TABS.filter(x => x !== 'settings' || canOn(d, 'devices')).map(x => `<a href="#/device/${encodeURIComponent(d.id)}/${x}" class="${x === tab ? 'active' : ''}">${t('tab_' + x)}${TAB_COUNTS[x] && d[TAB_COUNTS[x]] ? ` <span class="count">${d[TAB_COUNTS[x]]}</span>` : ''}</a>`).join('');
 }
 
 VIEWS.device = {
@@ -998,7 +1015,7 @@ function closeConsole() {
 VIEWS.console = {
   mount(root) {
     const d = S.detail;
-    if (!d || !can('manage')) { setTitle(t('console')); root.innerHTML = `<div class="card empty">${t(d ? 'err_forbidden' : 'err_device_not_found')}</div>`; return; }
+    if (!d || !canOn(d, 'console')) { setTitle(t('console')); root.innerHTML = `<div class="card empty">${t(d ? 'err_forbidden' : 'err_device_not_found')}</div>`; return; }
     setTitle(t('console'), d.name, '#/device/' + encodeURIComponent(d.id));
     root.innerHTML = `<form class="card console-login" id="conForm" novalidate><div class="form">
         <div class="row2"><label>${t('hostIp')}<input name="host" value="${esc(d.ip)}" required></label><label>${t('sshPort')}<input name="port" type="number" min="1" max="65535" value="22"></label></div>
@@ -1101,7 +1118,7 @@ function freezeBanner(d) {
   if (!d.frozen || !d.online) return '';
   const until = d.frozen_until ? t('frozenUntil', { time: dt(d.frozen_until) }) : t('frozenIndef');
   return `<div class="freeze-banner"><span class="freeze-ic">${icon('snow')}</span><div><b>${t('frozenOn', { name: esc(d.current_name || t('nothingPlaying')) })}</b><small>${until}</small></div>
-    ${can('control') ? `<button class="btn primary" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze">${icon('play')}${t('resumePlayback')}</button>` : ''}</div>`;
+    ${canOn(d, 'control') ? `<button class="btn primary" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze">${icon('play')}${t('resumePlayback')}</button>` : ''}</div>`;
 }
 
 function deviceOverview(d) {
@@ -1127,7 +1144,7 @@ function deviceOverview(d) {
         <dt>${t('lastSeen')}</dt><dd>${dt(d.last_seen)}</dd><dt>${t('agent')}</dt><dd>${esc(d.version || '—')} (${t('latest')} ${esc(S.agentVersion)})</dd>
         ${d.screen ? `<dt>${t('act_screen')}</dt><dd>${t(d.screen === 'on' ? 'screenOn' : 'screenOff')}</dd>` : ''}
         <dt>${t('localApi')}</dt><dd>${d.api_ok === false ? `<span class="tag critical">${t('unavailable')}</span>` : d.api_ok ? `<span class="tag ok">OK</span>` : '—'}</dd>
-        <dt>${t('downloadSource')}</dt><dd>${d.download_source ? t('downloadSource_' + d.download_source) : '—'}${can('manage') && d.download_source ? ` <button class="btn sm ghost" data-do="downloadSource" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
+        <dt>${t('downloadSource')}</dt><dd>${d.download_source ? t('downloadSource_' + d.download_source) : '—'}${canOn(d, 'devices') && d.download_source ? ` <button class="btn sm ghost" data-do="downloadSource" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
         <dt>${t('pendingCommands')}</dt><dd>${d.pending_commands}</dd>${d.notes ? `<dt>${t('notes')}</dt><dd>${esc(d.notes)}</dd>` : ''}</dl></section>
     </div>${nodeAdminCard(d)}${screenCard(d)}`;
 }
@@ -1180,11 +1197,11 @@ function nodeAdminCard(d) {
   const a = d.admin, o = d.overlay, url = nodeAdminUrl(d);
   return `<section class="card"><div class="card-head"><h2>${t('webAdmin')}</h2>${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">${icon('web')}${t('webAdminOpen')}</a>` : ''}</div>
     <dl class="kv"><dt>${t('webAdminAccount')}</dt><dd>${!a ? '—' : a.configured ? `<b>${esc(a.username)}</b>` : `<span class="tag critical">${t('webAdminMissing')}</span>`}
-        ${can('manage') && adminSupport(d) ? ` <button class="btn sm ghost" data-do="nodeAdmin" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('lock')}${t(a && a.configured ? 'webAdminChange' : 'webAdminCreate')}</button>` : ''}</dd>
+        ${canOn(d, 'devices') && adminSupport(d) ? ` <button class="btn sm ghost" data-do="nodeAdmin" data-id="${esc(d.id)}" ${d.online ? '' : 'disabled'}>${icon('lock')}${t(a && a.configured ? 'webAdminChange' : 'webAdminCreate')}</button>` : ''}</dd>
       <dt>${t('overlayBar')}</dt><dd>${o ? `${t(o.enabled ? 'overlayOn' : 'overlayOff')}${o.enabled ? ` · ${esc(o.size)} px` : ''}` : '—'}
-        ${can('content') && (d.capabilities || {}).overlay ? ` <button class="btn sm ghost" data-do="overlaySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
+        ${canOn(d, 'content') && (d.capabilities || {}).overlay ? ` <button class="btn sm ghost" data-do="overlaySettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>
       ${d.player_settings ? `<dt>${t('webDark')}</dt><dd>${t('dark_' + d.player_settings.web_dark)}
-        ${can('content') && (d.capabilities || {}).player_settings ? ` <button class="btn sm ghost" data-do="webDarkSettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>` : ''}</dl>
+        ${canOn(d, 'content') && (d.capabilities || {}).player_settings ? ` <button class="btn sm ghost" data-do="webDarkSettings" data-id="${esc(d.id)}">${icon('edit')}${t('edit')}</button>` : ''}</dd>` : ''}</dl>
     <p class="muted">${t('webAdminHint')}</p></section>`;
 }
 
@@ -1333,7 +1350,7 @@ function commandsTable(rows, showDevice) {
     <tbody>${rows.map(c => `<tr><td class="nowrap">${dt(c.created)}</td>${showDevice ? `<td><a href="#/device/${encodeURIComponent(c.device_id)}">${esc(c.device_name || c.device_id)}</a></td>` : ''}
       <td><b>${esc(t('act_' + c.action))}</b></td><td><small class="muted">${esc(payloadSummary(c.payload_json))}</small></td><td>${esc(c.username || '—')}</td>
       <td><span class="badge st-${c.state}">${t('state_' + c.state)}</span></td><td>${c.result ? `<button type="button" class="result result-btn" data-do="showResult" data-cid="${c.id}" title="${t('showDetail')}">${esc(c.result.slice(0, 140))}</button>` : ''}</td>
-      <td>${c.state === 'queued' && can('control') ? `<button class="btn sm ghost" data-do="cancelCmd" data-cid="${c.id}">${t('cancel')}</button>` : ''}</td></tr>`).join('')
+      <td>${c.state === 'queued' && canOn(dev(c.device_id) || S.detail, 'control') ? `<button class="btn sm ghost" data-do="cancelCmd" data-cid="${c.id}">${t('cancel')}</button>` : ''}</td></tr>`).join('')
       || `<tr><td colspan="8" class="empty">${t('noCommands')}</td></tr>`}</tbody></table></div>`;
 }
 
@@ -1443,7 +1460,7 @@ function deviceHistory(d) {
       <div class="tl-body"><b>${esc(t('act_' + c.action))}</b> <small class="muted">${esc([payloadSummary(c.payload_json), c.username].filter(Boolean).join(' · '))}</small>
         <span class="badge st-${c.state}">${t('state_' + c.state)}</span>
         ${c.result ? `<button type="button" class="result result-btn" data-do="showResult" data-cid="${c.id}">${esc(c.result.slice(0, 90))}</button>` : ''}
-        ${c.state === 'queued' && can('control') ? `<button class="btn sm ghost" data-do="cancelCmd" data-cid="${c.id}">${t('cancel')}</button>` : ''}</div><time>${clock(c.created)}</time></div>` }))),
+        ${c.state === 'queued' && canOn(dev(c.device_id) || S.detail, 'control') ? `<button class="btn sm ghost" data-do="cancelCmd" data-cid="${c.id}">${t('cancel')}</button>` : ''}</div><time>${clock(c.created)}</time></div>` }))),
   ].sort((a, b) => b.ts - a.ts);
   const day = ts => { const x = new Date(ts * 1000), today = new Date(); const y = new Date(); y.setDate(today.getDate() - 1);
     return x.toDateString() === today.toDateString() ? t('today') : x.toDateString() === y.toDateString() ? t('yesterday') : x.toLocaleDateString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB', { weekday: 'long', day: 'numeric', month: 'long' }); };
@@ -1480,7 +1497,7 @@ function orderedAssets(d) {
 }
 
 function renderPlaylist(el, d) {
-  const edit = can('content'), ctl = can('control') && d.online;
+  const edit = canOn(d, 'content'), ctl = canOn(d, 'control') && d.online;
   const assets = orderedAssets(d);
   const html = `<section class="card flush">
     <div class="toolbar">
@@ -1503,7 +1520,7 @@ function renderPlaylist(el, d) {
       return `<li class="pl-row ${playing ? 'playing' : ''} ${a.enabled ? '' : 'disabled'}" data-aid="${esc(a.id)}" ${edit ? 'draggable="true"' : ''}>
         ${edit ? `<span class="handle" title="${t('dragToReorder')}">${icon('drag')}</span>` : ''}<span class="idx">${i + 1}</span>
         <span class="kind k-${esc(a.kind)}">${kindIcon(a.kind)}</span>
-        <div class="pl-main"><b>${esc(a.name)}</b><small>${esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' ? ' · ' + esc(a.source) : ''}</small>
+        <div class="pl-main"><b>${esc(a.name)}</b>${validityTag(a)}<small>${esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' ? ' · ' + esc(a.source) : ''}</small>
           ${dash && dash.length ? `<button class="pl-expand ${open ? 'open' : ''}" data-do="toggleCol" data-col="${esc(a.id)}" aria-expanded="${open ? 'true' : 'false'}">${icon('chev')}${t('dashboardsCount', { n: dash.length })}</button>` : ''}</div>
         <span class="pl-dur">${a.duration ? dur(a.duration) : (a.kind === 'video' ? t('fullLength') : '—')}</span>
         <span class="pl-tags">${playing ? `<span class="tag ok">${d.frozen ? icon('snow') + t('frozen') : icon('play') + t('playing')}</span>` : ''}${a.enabled ? '' : `<span class="tag">${t('disabled')}</span>`}${loginTag(d, a)}</span>
@@ -1554,7 +1571,7 @@ function setOrder(order) {
 // ---------- collections
 
 function renderCollections(d) {
-  const edit = can('content'), ctl = can('control') && d.online;
+  const edit = canOn(d, 'content'), ctl = canOn(d, 'control') && d.online;
   const canAdd = edit && d.capabilities.add_grafana_tag !== false;
   return `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('grafanaCollections')} <span class="muted">(${d.collections.length})</span></h2>
     ${canAdd ? `<button class="btn" data-do="addCollection" data-id="${esc(d.id)}">${icon('plus')}${t('addCollection')}</button>
@@ -1603,11 +1620,11 @@ const profileName = (d, id) => ((d.profiles || []).find(p => String(p.id) === St
 const loginTag = (d, a) => (a.kind === 'web' && a.auth_profile_id ? `<span class="tag login-tag" title="${esc(t('login'))}">${icon('lock')}${esc(profileName(d, a.auth_profile_id))}</span>` : '');
 
 function renderProfiles(d) {
-  const support = loginSupport(d), edit = can('content') && support === 'ok';
+  const support = loginSupport(d), edit = canOn(d, 'content') && support === 'ok';
   const profiles = d.profiles || [];
   return `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('loginProfiles')} <span class="muted">(${profiles.length})</span></h2>
     ${edit ? `<button class="btn primary" data-do="addProfile" data-id="${esc(d.id)}">${icon('plus')}${t('addLogin')}</button>` : ''}</div>
-    ${support !== 'ok' && can('content') ? `<div class="note">${t(support === 'node' ? 'loginsNeedCaracal' : 'loginsNeedAgent')}</div>` : ''}
+    ${support !== 'ok' && canOn(d, 'content') ? `<div class="note">${t(support === 'node' ? 'loginsNeedCaracal' : 'loginsNeedAgent')}</div>` : ''}
     ${!d.online && edit ? `<div class="note">${t('offlineQueued')}</div>` : ''}
     <div class="col-grid">${profiles.map(p => {
       const pages = d.assets.filter(a => a.kind === 'web' && String(a.auth_profile_id) === String(p.id));
@@ -1642,9 +1659,9 @@ const choice = (list, sel, prefix) => list.map(x => `<option value="${x}" ${x ==
 function renderNotifications(d) {
   const support = notifySupport(d), n = d.notifications;
   if (support !== 'ok' || !n) return `<section class="card">${emptyState('attention', t('notifyUnsupported'), t(support === 'node' ? 'notifyNeedCaracal' : 'notifyNeedAgent'),
-    can('manage') && d.online ? (support === 'node' ? `<button class="btn primary" data-do="caracalUpdate" data-id="${esc(d.id)}">${icon('updates')}${t('act_update_caracal')}</button>`
+    canOn(d, 'updates') && d.online ? (support === 'node' ? `<button class="btn primary" data-do="caracalUpdate" data-id="${esc(d.id)}">${icon('updates')}${t('act_update_caracal')}</button>`
       : `<button class="btn primary" data-do="cmd" data-id="${esc(d.id)}" data-act="update_agent">${icon('agent')}${t('act_update_agent')}</button>`) : '')}</section>`;
-  const s = { ...NOTIFY_DEFAULTS, ...n.settings }, edit = can('content'), ctl = can('control'), caps = d.capabilities || {};
+  const s = { ...NOTIFY_DEFAULTS, ...n.settings }, edit = canOn(d, 'content'), ctl = canOn(d, 'control'), caps = d.capabilities || {};
   const cur = n.current;
   return `<div class="grid two">
     <section class="card"><div class="card-head"><h2>${t('notifyScreen')}</h2><span class="tag ${s.enabled ? 'ok' : ''}">${t(s.enabled ? 'notifyOn' : 'notifyOff')}</span></div>
@@ -1664,7 +1681,7 @@ function renderNotifications(d) {
         <dt>${t('notifyHistory')}</dt><dd>${t('notifyHistoryValue', { n: s.history_max, days: s.history_days })}</dd>
         <dt>${t('notifySounds')}</dt><dd>${NOTIFY_LEVELS.map(l => n.sounds && n.sounds[l] ? `<span class="tag info" title="${esc(n.sounds[l].name)}">${t('notifyLevel_' + l)}: ${esc(n.sounds[l].name)}</span>` : '').join(' ') || t('notifySoundsDefault')}
           ${edit && (d.capabilities || {}).notify_sound ? `<button class="btn sm ghost" data-do="notifySound" data-id="${esc(d.id)}">${icon('upload')}${t('notifySoundUpload')}</button>` : ''}</dd></dl></section></div>
-  ${notifyQueueCard(d, n, ctl && caps.notify_remove)}${nodeTokensCard(d, n, can('manage') && caps.notify_token_update)}
+  ${notifyQueueCard(d, n, ctl && caps.notify_remove)}${nodeTokensCard(d, n, canOn(d, 'devices') && caps.notify_token_update)}
   <section class="card flush"><div class="toolbar"><h2 class="grow">${t('watchers')} <span class="muted">(${n.watchers.length})</span></h2>
     ${edit ? `<button class="btn primary" data-do="addWatcher" data-id="${esc(d.id)}">${icon('plus')}${t('addWatcher')}</button>` : ''}</div>
     <div class="note">${t('watchersHint')}</div>
@@ -1713,7 +1730,7 @@ async function notifyLogDialog(id) {
   let r;
   try { r = await commandResult(id, 'notify_log'); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; return; }
   if (!el.isConnected) return;
-  const content = can('content'), manage = can('manage');
+  const content = canOn(dev(id), 'content'), manage = canOn(dev(id), 'devices');
   el.innerHTML = `<h3>${t('notifyHistory')} <span class="muted">(${r.history_count ?? 0})</span></h3>
     <div class="table-wrap"><table class="table"><thead><tr><th>${t('time')}</th><th>${t('notifyLevel')}</th><th>${t('notifyTitle')}</th><th>${t('notifySource')}</th><th>${t('state')}</th></tr></thead>
     <tbody>${(r.history || []).map(x => `<tr><td class="nowrap">${dt(x.created)}</td><td><span class="tag ${LEVEL_TAG[x.level] || 'info'}">${t('notifyLevel_' + (x.level || 'info'))}</span></td>
@@ -2059,11 +2076,11 @@ VIEWS.organization = {
       const unassigned = S.devices.filter(d => !(kind === 'groups' ? d.group : d.location)).length;
       const field = kind === 'groups' ? 'group' : 'location';
       patch($('#org' + kind[0].toUpperCase() + kind.slice(1), root), `<div class="toolbar"><h2 class="grow">${icon(kind === 'groups' ? 'group' : 'location')} ${t(kind)}</h2>
-        ${can('manage') ? `<button class="btn sm primary" data-do="orgEdit" data-kind="${kind}">${icon('plus')}${t('add')}</button>` : ''}</div>
+        ${canAll('devices') ? `<button class="btn sm primary" data-do="orgEdit" data-kind="${kind}">${icon('plus')}${t('add')}</button>` : ''}</div>
         <div class="org-list">${S.org[kind].map(o => `<div class="org-row">
           <a href="#/devices?${field}=${encodeURIComponent(o.name)}"><b>${esc(o.name)}</b><small class="muted">${esc([o.address, o.description].filter(Boolean).join(' · '))}</small></a>
           <span class="muted nowrap">${o.online}/${o.total} ${t('online').toLowerCase()}</span>
-          ${can('manage') ? `<span class="row-actions"><button class="icon-btn" data-do="orgEdit" data-kind="${kind}" data-name="${esc(o.name)}" title="${t('edit')}">${icon('edit')}</button>
+          ${canAll('devices') ? `<span class="row-actions"><button class="icon-btn" data-do="orgEdit" data-kind="${kind}" data-name="${esc(o.name)}" title="${t('edit')}">${icon('edit')}</button>
           <button class="icon-btn danger" data-do="orgDelete" data-kind="${kind}" data-name="${esc(o.name)}" title="${t('delete')}">${icon('trash')}</button></span>` : ''}</div>`).join('')
           || emptyState(kind === 'groups' ? 'group' : 'location', t(kind === 'groups' ? 'noGroups' : 'noLocations'), t(kind === 'groups' ? 'groupsHint' : 'locationsHint'), '')}
         <div class="org-row muted"><span>${t('unassigned')}</span><span>${unassigned}</span></div></div>`);
@@ -2077,7 +2094,7 @@ VIEWS.operations = {
   mount(root) {
     setTitle(t('nav_operations'));
     const tab = S.route.id === 'jobs' ? 'jobs' : 'commands';
-    root.innerHTML = `<nav class="tabs"><a href="#/operations/commands" class="${tab === 'commands' ? 'active' : ''}">${t('commandHistory')}</a><a href="#/operations/jobs" class="${tab === 'jobs' ? 'active' : ''}">${t('sshJobs')}</a></nav>
+    root.innerHTML = `<nav class="tabs"><a href="#/operations/commands" class="${tab === 'commands' ? 'active' : ''}">${t('commandHistory')}</a>${can('install') ? `<a href="#/operations/jobs" class="${tab === 'jobs' ? 'active' : ''}">${t('sshJobs')}</a>` : ''}</nav>
       ${tab === 'commands' ? `<section class="card flush"><div class="toolbar"><select id="cDev"><option value="">${t('allDevices')}</option>${S.devices.map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}</select>
       <select id="cState"><option value="">${t('allStates')}</option>${['queued', 'delivered', 'completed', 'failed', 'expired', 'timeout', 'cancelled'].map(s => `<option value="${s}">${t('state_' + s)}</option>`).join('')}</select></div><div id="cTable"></div></section>`
       : `<section class="card flush"><div id="jTable"></div></section>`}`;
@@ -2123,32 +2140,177 @@ function auditAction(a) {
   return t('audit_' + a.replace('.', '_'));
 }
 
-// ---------- users
+// ---------- users, roles and user groups
+
+const BUILTIN_ROLES = ['admin', 'manager', 'operator', 'viewer'];
+const DEVICE_PERMS = ['view', 'control', 'content', 'schedule', 'devices', 'updates', 'console'];
+const SYSTEM_PERMS = ['install', 'notify_api', 'audit', 'users', 'settings'];
+const roleLabel = (key, name) => (BUILTIN_ROLES.includes(key) ? t('role_' + key) : name || (S.roles || []).find(r => r.key === key)?.name || (key ? key : t('roleNone')));
+// "all devices" or the locations, groups and devices a role holds for
+function scopeText(s) {
+  if (!s || s.all) return t('scopeAll');
+  const parts = [...(s.locations || []).map(x => `${icon('location')}${esc(x)}`), ...(s.groups || []).map(x => `${icon('group')}${esc(x)}`),
+    ...(s.devices || []).map(x => `${icon('devices')}${esc(dev(x)?.name || x)}`)];
+  return parts.length ? `<span class="scope-list">${parts.join('')}</span>` : `<span class="muted">${t('scopeNothing')}</span>`;
+}
 
 VIEWS.users = {
   mount(root) {
     setTitle(t('nav_users'));
-    root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('nav_users')}</h2><button class="btn primary" data-do="userEdit">${icon('plus')}${t('newUser')}</button></div><div id="uTable"></div></section>
-      <section class="card"><h2>${t('rolesTitle')}</h2><div class="roles">${['admin', 'manager', 'operator', 'viewer'].map(r => `<div><span class="badge role">${t('role_' + r)}</span><p class="muted">${t('roleDesc_' + r)}</p></div>`).join('')}</div></section>`;
+    const tab = ['roles', 'groups'].includes(S.route.id) ? S.route.id : 'people';
+    const add = { people: ['userEdit', 'newUser'], roles: ['roleEdit', 'roleNew'], groups: ['userGroupEdit', 'userGroupNew'] }[tab];
+    root.innerHTML = `<nav class="tabs"><a href="#/users" class="${tab === 'people' ? 'active' : ''}">${t('usersTab')}</a><a href="#/users/roles" class="${tab === 'roles' ? 'active' : ''}">${t('rolesTab')}</a><a href="#/users/groups" class="${tab === 'groups' ? 'active' : ''}">${t('userGroupsTab')}</a></nav>
+      <section class="card flush"><div class="toolbar"><p class="muted grow">${t(tab === 'people' ? 'usersHint' : tab === 'roles' ? 'rolesHint' : 'userGroupsHint')}</p><button class="btn primary" data-do="${add[0]}">${icon('plus')}${t(add[1])}</button></div><div id="uTable"></div></section>`;
   },
   async update(root) {
-    const users = await api('/api/users').catch(() => null);
-    if (!users) return;
-    S.users = users;
-    patch($('#uTable', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('username')}</th><th>${t('role')}</th><th>${t('language')}</th><th>${t('state')}</th><th>${t('created')}</th><th></th></tr></thead>
-      <tbody>${users.map(u => `<tr><td><b>${esc(u.username)}</b>${u.username === S.me.username ? ` <span class="tag">${t('you')}</span>` : ''}</td><td><span class="badge role">${t('role_' + u.role)}</span></td>
-      <td>${u.language === 'en' ? 'English' : 'Čeština'}</td><td>${u.enabled ? `<span class="tag ok">${t('active')}</span>` : `<span class="tag">${t('disabled')}</span>`}${u.totp ? ` <span class="tag info">2FA</span>` : ''}${u.must_change_password ? ` <span class="tag frozen">${t('pwOneTime')}</span>` : ''}${u.sso ? ` <span class="tag">SSO</span>` : ''}</td><td class="nowrap">${dt(u.created)}</td>
-      <td class="actions-cell">${u.totp ? `<button class="btn sm ghost" data-do="totpReset" data-uid="${u.id}" data-name="${esc(u.username)}">${t('totpReset')}</button>` : ''}<button class="icon-btn" data-do="userEdit" data-uid="${u.id}" title="${t('edit')}">${icon('edit')}</button>
-      ${u.username !== S.me.username ? `<button class="icon-btn danger" data-do="userDelete" data-uid="${u.id}" data-name="${esc(u.username)}" title="${t('delete')}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`);
+    const [users, roles, groups] = await Promise.all([api('/api/users'), api('/api/roles'), api('/api/user-groups')].map(p => p.catch(() => null)));
+    if (!users || !roles || !groups) return;
+    Object.assign(S, { users, roles: roles.roles, userGroups: groups });
+    const tab = ['roles', 'groups'].includes(S.route.id) ? S.route.id : 'people';
+    const groupName = id => groups.find(g => g.id === id)?.name || '';
+    if (tab === 'people') {
+      patch($('#uTable', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('username')}</th><th>${t('role')}</th><th>${t('scope')}</th><th>${t('userGroupsTab')}</th><th>${t('state')}</th><th></th></tr></thead>
+        <tbody>${users.map(u => `<tr><td><b>${esc(u.username)}</b>${u.username === S.me.username ? ` <span class="tag">${t('you')}</span>` : ''}<br><small class="muted">${u.language === 'en' ? 'English' : 'Čeština'} · ${dt(u.created)}</small></td>
+        <td>${u.role ? `<span class="badge role">${esc(roleLabel(u.role))}</span>` : `<span class="muted">${t('roleNone')}</span>`}</td><td>${u.role ? scopeText(u.scope) : '—'}</td>
+        <td>${u.groups.map(g => `<span class="tag">${esc(groupName(g))}</span>`).join(' ') || '—'}</td>
+        <td>${u.enabled ? `<span class="tag ok">${t('active')}</span>` : `<span class="tag">${t('disabled')}</span>`}${u.totp ? ` <span class="tag info">2FA</span>` : ''}${u.must_change_password ? ` <span class="tag frozen">${t('pwOneTime')}</span>` : ''}${u.sso ? ` <span class="tag">SSO</span>` : ''}</td>
+        <td class="actions-cell">${u.totp ? `<button class="btn sm ghost" data-do="totpReset" data-uid="${u.id}" data-name="${esc(u.username)}">${t('totpReset')}</button>` : ''}<button class="icon-btn" data-do="userEdit" data-uid="${u.id}" title="${t('edit')}">${icon('edit')}</button>
+        ${u.username !== S.me.username ? `<button class="icon-btn danger" data-do="userDelete" data-uid="${u.id}" data-name="${esc(u.username)}" title="${t('delete')}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`);
+    } else if (tab === 'roles') {
+      patch($('#uTable', root), `<div class="role-list">${roles.roles.map(r => `<div class="role-card">
+        <div class="role-head"><b>${esc(roleLabel(r.key, r.name))}</b>${r.builtin ? ` <span class="tag">${t('roleBuiltin')}</span>` : ''}<span class="grow"></span>
+          <small class="muted">${t('roleUsedBy', { u: r.users, g: r.groups })}</small>
+          <span class="row-actions"><button class="btn sm ghost" data-do="roleEdit" data-copy="${esc(r.key)}">${icon('copy')}${t('duplicate')}</button>${r.builtin ? '' : `<button class="icon-btn" data-do="roleEdit" data-key="${esc(r.key)}" title="${t('edit')}">${icon('edit')}</button><button class="icon-btn danger" data-do="roleDelete" data-key="${esc(r.key)}" data-name="${esc(r.name)}" title="${t('delete')}">${icon('trash')}</button>`}</span></div>
+        <p class="muted">${esc(r.builtin ? t('roleDesc_' + r.key) : r.description || '')}</p>
+        <div class="perm-chips">${r.permissions.map(p => `<span class="perm ${SYSTEM_PERMS.includes(p) ? 'system' : ''}" title="${esc(t('permHint_' + p))}">${t('perm_' + p)}</span>`).join('')}</div></div>`).join('')}</div>`);
+    } else {
+      patch($('#uTable', root), groups.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('role')}</th><th>${t('scope')}</th><th>${t('members')}</th><th></th></tr></thead>
+        <tbody>${groups.map(g => `<tr><td><b>${esc(g.name)}</b>${g.description ? `<br><small class="muted">${esc(g.description)}</small>` : ''}</td><td><span class="badge role">${esc(roleLabel(g.role))}</span></td><td>${scopeText(g.scope)}</td>
+        <td>${g.members.map(id => esc(users.find(u => u.id === id)?.username || '')).filter(Boolean).join(', ') || '—'}</td>
+        <td class="actions-cell"><button class="icon-btn" data-do="userGroupEdit" data-gid="${g.id}" title="${t('edit')}">${icon('edit')}</button><button class="icon-btn danger" data-do="userGroupDelete" data-gid="${g.id}" data-name="${esc(g.name)}" title="${t('delete')}">${icon('trash')}</button></td></tr>`).join('')}</tbody></table></div>`
+        : emptyState('users', t('noUserGroups'), t('userGroupsEmptyHint'), `<button class="btn primary" data-do="userGroupEdit">${icon('plus')}${t('userGroupNew')}</button>`));
+    }
   },
 };
+
+// The scope of a role: all devices, or chosen locations, device groups and devices.
+function scopeFields(scope) {
+  const s = scope && !scope.all ? scope : null;
+  const box = (kind, items) => `<details class="scope-box" ${s && (s[kind] || []).length ? 'open' : ''}><summary>${t('scope_' + kind)} <span class="muted" data-count="${kind}"></span></summary>
+    <div class="scope-items">${items.map(([v, l]) => `<label class="check"><input type="checkbox" data-scope="${kind}" value="${esc(v)}" ${s && (s[kind] || []).includes(v) ? 'checked' : ''}>${esc(l)}</label>`).join('') || `<span class="muted">${t('noneYet')}</span>`}</div></details>`;
+  return `<div class="scope-pick"><span class="label">${t('scope')}</span>
+    <div class="radios"><label class="check"><input type="radio" name="scope_all" value="1" ${s ? '' : 'checked'}>${t('scopeAll')}</label>
+    <label class="check"><input type="radio" name="scope_all" value="0" ${s ? 'checked' : ''}>${t('scopeChosen')}</label></div>
+    <div class="scope-chosen" ${s ? '' : 'hidden'}><p class="muted">${t('scopeHint')}</p>
+      ${box('locations', (S.org.locations || []).map(x => [x.name, x.name]))}${box('groups', (S.org.groups || []).map(x => [x.name, x.name]))}${box('devices', S.devices.map(d => [d.id, d.name]))}</div></div>`;
+}
+function bindScope(form) {
+  const sync = () => {
+    $('.scope-chosen', form).hidden = form.querySelector('[name=scope_all]:checked').value === '1';
+    for (const k of ['locations', 'groups', 'devices']) { const n = $$(`[data-scope="${k}"]:checked`, form).length; $(`[data-count="${k}"]`, form).textContent = n ? `(${n})` : ''; }
+  };
+  form.addEventListener('change', sync);
+  sync();
+}
+function readScope(form) {
+  if (form.querySelector('[name=scope_all]:checked').value === '1') return { all: true };
+  const out = {};
+  for (const k of ['locations', 'groups', 'devices']) out[k] = $$(`[data-scope="${k}"]:checked`, form).map(x => x.value);
+  return out;
+}
+const roleOptions = (value, none = false) => (none ? `<option value="" ${value ? '' : 'selected'}>${t('roleNone')}</option>` : '')
+  + (S.roles || BUILTIN_ROLES.map(key => ({ key }))).map(r => `<option value="${esc(r.key)}" ${value === r.key ? 'selected' : ''}>${esc(roleLabel(r.key, r.name))}</option>`).join('');
+
+function userDialog(uid) {
+  const u = uid ? S.users.find(x => x.id === uid) : null;
+  const groups = S.userGroups || [];
+  modal({
+    title: u ? t('editUser') + ': ' + esc(u.username) : t('newUser'), wide: true,
+    body: `<div class="form">${u ? '' : `<label>${t('username')}<input name="username" required pattern="[A-Za-z0-9._@\\-]{2,64}"></label>`}
+      <label>${u ? t('resetPassword') : t('password')}<span class="pw-row"><input name="password" type="password" minlength="10" autocomplete="new-password" ${u ? `placeholder="${t('leaveEmpty')}"` : 'required'}>
+        <button type="button" class="btn sm" data-gen-pw>${icon('refresh')}${t('pwGenerate')}</button></span></label>
+      <label class="check must-change" ${u ? 'hidden' : ''}><input type="checkbox" name="must_change" ${u ? '' : 'checked'}><span>${t('pwMustChange')}<br><small class="muted">${t('pwMustChangeHint')}</small></span></label>
+      <div class="row2"><label>${t('role')}<select name="role">${roleOptions(u ? u.role : 'viewer', true)}</select></label>
+      <label>${t('language')}<select name="language"><option value="cs" ${u?.language === 'en' ? '' : 'selected'}>Čeština</option><option value="en" ${u?.language === 'en' ? 'selected' : ''}>English</option></select></label></div>
+      ${scopeFields(u ? u.scope : { all: true })}
+      ${groups.length ? `<div><span class="label">${t('userGroupsTab')}</span><div class="check-grid">${groups.map(g => `<label class="check"><input type="checkbox" data-group value="${g.id}" ${u && u.groups.includes(g.id) ? 'checked' : ''}><span>${esc(g.name)}<br><small class="muted">${esc(roleLabel(g.role))}</small></span></label>`).join('')}</div><small class="muted">${t('userGroupsMemberHint')}</small></div>` : ''}
+      ${u ? `<label class="check"><input type="checkbox" name="enabled" ${u.enabled ? 'checked' : ''}>${t('accountEnabled')}</label>` : ''}</div>`,
+    onOpen: form => {
+      bindScope(form);
+      const pw = form.password, must = $('.must-change', form);
+      // a new password for an existing user: the one-time choice appears (checked)
+      pw.oninput = () => { if (u) { must.hidden = !pw.value; if (pw.value && !must.dataset.touched) form.must_change.checked = true; } };
+      form.must_change.onchange = () => { must.dataset.touched = '1'; };
+      $('[data-gen-pw]', form).onclick = () => {
+        const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        const rnd = crypto.getRandomValues(new Uint32Array(14));
+        pw.value = Array.from(rnd, x => chars[x % chars.length]).join('');
+        pw.type = 'text';
+        pw.select();
+        pw.oninput();
+      };
+    },
+    onSubmit: async (data, form) => {
+      const common = { role: data.role, language: data.language, scope: readScope(form), groups: $$('[data-group]:checked', form).map(x => Number(x.value)) };
+      if (u) {
+        const body = { ...common, enabled: !!data.enabled };
+        if (data.password) Object.assign(body, { password: data.password, must_change: !!data.must_change });
+        await api('/api/users/' + u.id, { method: 'PATCH', json: body });
+      } else {
+        await api('/api/users', { method: 'POST', json: { ...common, username: data.username, password: data.password, must_change: !!data.must_change } });
+      }
+      toast(t('saved'));
+      render();
+    },
+  });
+}
+
+function roleDialog(key, copyFrom) {
+  const r = key ? S.roles.find(x => x.key === key) : null;
+  const src = r || (copyFrom ? S.roles.find(x => x.key === copyFrom) : null);
+  const perms = new Set(src ? src.permissions : ['view']);
+  const row = p => `<label class="check perm-row"><input type="checkbox" name="perm_${p}" ${perms.has(p) ? 'checked' : ''} ${p === 'view' ? 'disabled checked' : ''}><span><b>${t('perm_' + p)}</b><br><small class="muted">${t('permHint_' + p)}</small></span></label>`;
+  modal({
+    title: r ? t('roleEdit') : t('roleNew'), wide: true,
+    body: `<div class="form"><div class="row2"><label>${t('name')}<input name="name" required maxlength="80" value="${esc(r ? r.name : src ? roleLabel(src.key, src.name) + ' 2' : '')}"></label>
+      <label>${t('description')}<input name="description" maxlength="500" value="${esc(r ? r.description : '')}"></label></div>
+      <h3>${t('permDevices')}</h3><p class="muted">${t('permDevicesHint')}</p><div class="check-grid">${DEVICE_PERMS.map(row).join('')}</div>
+      <h3>${t('permSystem')}</h3><p class="muted">${t('permSystemHint')}</p><div class="check-grid">${SYSTEM_PERMS.map(row).join('')}</div></div>`,
+    onSubmit: async (data, form) => {
+      const body = { name: data.name.trim(), description: data.description.trim(), permissions: [...DEVICE_PERMS, ...SYSTEM_PERMS].filter(p => p === 'view' || form['perm_' + p].checked) };
+      await api(r ? '/api/roles/' + r.key : '/api/roles', { method: r ? 'PATCH' : 'POST', json: body });
+      toast(t('saved'));
+      render();
+    },
+  });
+}
+
+function userGroupDialog(gid) {
+  const g = gid ? S.userGroups.find(x => x.id === gid) : null;
+  modal({
+    title: g ? t('userGroupEdit') : t('userGroupNew'), wide: true,
+    body: `<div class="form"><p class="muted">${t('userGroupsHint')}</p>
+      <div class="row2"><label>${t('name')}<input name="name" required maxlength="80" value="${esc(g ? g.name : '')}" placeholder="${esc(t('userGroupNameHint'))}"></label>
+      <label>${t('role')}<select name="role">${roleOptions(g ? g.role : 'operator')}</select></label></div>
+      <label>${t('description')}<input name="description" maxlength="500" value="${esc(g ? g.description : '')}"></label>
+      ${scopeFields(g ? g.scope : { all: true })}
+      <div><span class="label">${t('members')}</span><div class="check-grid">${S.users.map(u => `<label class="check"><input type="checkbox" data-member value="${u.id}" ${g && g.members.includes(u.id) ? 'checked' : ''}>${esc(u.username)}</label>`).join('')}</div></div></div>`,
+    onOpen: form => bindScope(form),
+    onSubmit: async (data, form) => {
+      const body = { name: data.name.trim(), description: data.description.trim(), role: data.role, scope: readScope(form), members: $$('[data-member]:checked', form).map(x => Number(x.value)) };
+      await api(g ? '/api/user-groups/' + g.id : '/api/user-groups', { method: g ? 'PATCH' : 'POST', json: body });
+      toast(t('saved'));
+      render();
+    },
+  });
+}
 
 // ---------- settings
 
 // Settings are split into sections with their own navigation (#/settings/<section>).
 const SETTINGS = [
-  ['account', 'view', 'users'], ['update', 'admin', 'updates'], ['alerts', 'admin', 'bell'], ['install', 'admin', 'plus'], ['notifyapi', 'manage', 'web'],
-  ['proxy', 'manage', 'download'], ['sso', 'admin', 'lock'], ['branding', 'admin', 'image'], ['backup', 'admin', 'upload'],
+  ['account', 'view', 'users'], ['update', 'settings', 'updates'], ['alerts', 'settings', 'bell'], ['install', 'settings', 'plus'], ['notifyapi', 'notify_api', 'web'],
+  ['proxy', 'updates', 'download'], ['sso', 'users', 'lock'], ['branding', 'settings', 'image'], ['backup', 'settings', 'upload'],
 ];
 
 VIEWS.settings = {
@@ -2179,7 +2341,7 @@ function mdLite(text) {
   return html + (list ? '</ul>' : '');
 }
 async function fleetUpdateNotice(el) {
-  if (!el || !can('admin')) return;
+  if (!el || !can('settings')) return;
   if (!S.fleetUpdate) S.fleetUpdate = api('/api/system/update').catch(() => null);
   const u = await S.fleetUpdate;
   if (!u || !el.isConnected) return;
@@ -2205,6 +2367,10 @@ async function fleetUpdateCard(root, refresh = false) {
     ${newest && !running ? (d.available ? `<p class="muted">${t('fleetUpdateHow')}</p><div class="form-actions start"><button class="btn primary" id="updRun" data-version="${esc(newest)}">${icon('updates')}${t('fleetUpdateNow', { version: esc(newest) })}</button></div>`
       : `<p class="muted">${t('fleetUpdateManual')}</p><pre class="code" id="updCmd">${esc(manual)}</pre><div class="form-actions start"><button class="btn sm" id="updCopy">${icon('copy')}${t('copy')}</button></div>
         <details><summary>${t('fleetUpdateSocket')}</summary><p class="muted">${t('fleetUpdateSocketHint')}</p><pre class="code">volumes:\n  - /var/run/docker.sock:/var/run/docker.sock</pre></details>`) : ''}</section>
+    ${(u.older || []).length && !running ? `<section class="card"><h2>${t('fleetRollback')}</h2><p class="muted">${t('fleetRollbackHint')}</p>
+      <div class="form"><div class="row2"><label>${t('fleetRollbackTo')}<select id="rbVersion">${u.older.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}</select></label><span></span></div>
+      <div id="rbData"></div>
+      <div class="form-actions start">${d.available ? `<button class="btn" id="rbRun">${icon('restart')}${t('fleetRollbackRun')}</button>` : `<small class="muted">${t('fleetRollbackManual')}</small>`}</div></div></section>` : ''}
     ${(u.notes || []).map(n => `<section class="card release-notes"><div class="card-head"><h2>${esc(n.name)}</h2><span class="muted">${n.published ? esc(String(n.published).slice(0, 10)) : ''}</span></div>${mdLite(n.body)}
       ${n.url ? `<p><a href="${esc(n.url)}" target="_blank" rel="noopener">${t('fleetUpdateOnGithub')}</a></p>` : ''}</section>`).join('')}`;
   $('#updCheck', root).onclick = () => fleetUpdateCard(root, true);
@@ -2217,6 +2383,28 @@ async function fleetUpdateCard(root, refresh = false) {
     fleetUpdateCard(root);
     waitForNewVersion(run.dataset.version);
   };
+  // going back: the backups that version made can bring its data back too
+  const rbVersion = $('#rbVersion', root);
+  if (rbVersion) {
+    const showData = async () => {
+      const v = rbVersion.value, box = $('#rbData', root);
+      const b = await api('/api/system/update/backups?version=' + encodeURIComponent(v)).catch(() => ({ backups: [] }));
+      if (!box.isConnected || rbVersion.value !== v) return;
+      box.innerHTML = `<div class="radios"><label class="check"><input type="radio" name="rbData" value="" ${b.backups.length ? '' : 'checked'}><span>${t('fleetRollbackKeep')}<br><small class="muted">${t('fleetRollbackKeepHint')}</small></span></label>
+        ${b.backups.map((x, i) => `<label class="check"><input type="radio" name="rbData" value="${esc(x.name)}" ${i ? '' : 'checked'}><span>${t('fleetRollbackRestore', { date: dt(x.created) })}<br><small class="muted">${t('fleetRollbackRestoreHint')}</small></span></label>`).join('')}</div>
+        ${b.backups.length ? '' : `<div class="note warn">${t('fleetRollbackNoBackup', { version: esc(v) })}</div>`}`;
+    };
+    rbVersion.onchange = showData;
+    showData();
+    const rb = $('#rbRun', root);
+    if (rb) rb.onclick = async () => {
+      const v = rbVersion.value, restore = (root.querySelector('[name=rbData]:checked') || {}).value || '';
+      if (!await confirmBox(t(restore ? 'fleetRollbackConfirmRestore' : 'fleetRollbackConfirm', { version: esc(v) }), true, t('fleetRollbackRun'))) return;
+      try { await api('/api/system/update', { method: 'POST', json: { version: v, restore } }); } catch (e) { return toast(errText(e), 'err'); }
+      fleetUpdateCard(root);
+      waitForNewVersion(v);
+    };
+  }
   if (running) setTimeout(() => root.isConnected && fleetUpdateCard(root), 3000);
 }
 // the hub restarts during the update: the page waits for the new version and reloads itself
@@ -2298,7 +2486,7 @@ const SETTINGS_VIEW = {
   },
   account(root) {
     root.innerHTML = `<section class="card"><h2>${t('myAccount')}</h2>
-      <dl class="kv"><dt>${t('username')}</dt><dd>${esc(S.me.username)}</dd><dt>${t('role')}</dt><dd>${t('role_' + S.me.role)}</dd></dl>
+      <dl class="kv"><dt>${t('username')}</dt><dd>${esc(S.me.username)}</dd><dt>${t('role')}</dt><dd>${esc(roleLabel(S.me.role, S.me.role_name))}${S.me.scoped ? ` <span class="tag">${t('scopeLimited')}</span>` : ''}</dd></dl>
       <form id="pwForm" class="form"><h3>${t('changePassword')}</h3>
         <label>${t('currentPassword')}<input type="password" name="current_password" autocomplete="current-password" required></label>
         <label>${t('newPassword')}<input type="password" name="new_password" minlength="10" autocomplete="new-password" required></label>
@@ -2342,12 +2530,16 @@ const SETTINGS_VIEW = {
     root.innerHTML = `<section class="card"><h2>${t('backupTitle')}</h2><p class="muted">${t('backupHint')}</p>
         <div class="form-actions start"><button class="btn primary" id="backupDownload">${icon('download')}${t('backupDownload')}</button></div></section>
       <section class="card" id="backupSchedule"><div class="empty">…</div></section>
+      <section class="card flush" id="backupOffsite"><div class="empty">…</div></section>
       <section class="card"><h2>${t('restoreTitle')}</h2><p class="muted">${t('restoreHint')}</p>
-        <div class="form"><label>${t('backupFile')}<input type="file" id="restoreFile" accept=".zip,application/zip"></label>
+        <div class="form"><label>${t('backupFile')}<input type="file" id="restoreFile" accept=".zip,.enc,application/zip"></label>
+        <label id="restorePassRow" hidden>${t('offsitePassphrase')}<input type="password" id="restorePass" autocomplete="off"><small>${t('restorePassHint')}</small></label>
         <div class="form-actions"><button class="btn danger" id="restoreRun">${icon('upload')}${t('restoreRun')}</button></div></div></section>
       <section class="card"><h2>${t('migrateTitle')}</h2><ol class="steps">${t('migrateSteps')}</ol></section>`;
     this.handlers(root);
     backupScheduleCard($('#backupSchedule', root));
+    offsiteCard($('#backupOffsite', root));
+    $('#restoreFile', root).onchange = e => { $('#restorePassRow', root).hidden = !/\.enc$/i.test(e.target.files[0]?.name || ''); };
   },
   // logo and backup buttons (each wires only what its section shows)
   handlers(root) {
@@ -2378,7 +2570,8 @@ const SETTINGS_VIEW = {
       if (!f) return toast(t('err_invalid_backup'), 'err');
       if (!await confirmBox(t('confirmRestore'))) return;
       try {
-        const r = await fetch('/api/backup/restore', { method: 'POST', body: f, headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/zip' } });
+        const r = await fetch('/api/backup/restore', { method: 'POST', body: f, headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/octet-stream',
+          ...($('#restorePass', root).value ? { 'X-Backup-Passphrase': $('#restorePass', root).value } : {}) } });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
         toast(t('restoreDone'));
@@ -2392,6 +2585,165 @@ const SETTINGS_VIEW = {
     if (conf && root.isConnected) renderAlerts(root, conf);
   },
 };
+
+// ---------- backups outside the server (Settings → Backup)
+
+const OFFSITE_TYPES = ['s3', 'webdav', 'sftp', 'smb', 'nfs', 'rclone', 'folder'];
+const OFFSITE_ICON = { s3: 'upload', webdav: 'web', sftp: 'ssh', smb: 'group', nfs: 'download', rclone: 'web', folder: 'download' };
+// [field, input kind, placeholder]; labels are t('ofs_' + field)
+const OFFSITE_FIELDS = {
+  s3: [['endpoint', 'text', 'https://s3.eu-central-1.amazonaws.com'], ['region', 'text', 'eu-central-1'], ['bucket', 'text', 'caracal-backups'], ['prefix', 'text', 'fleet'],
+    ['access_key', 'text', ''], ['secret_key', 'password', ''], ['style', 'check'], ['verify_tls', 'check']],
+  webdav: [['url', 'text', 'https://cloud.example.com/remote.php/dav/files/USER/Backups/'], ['username', 'text', ''], ['password', 'password', ''], ['verify_tls', 'check']],
+  sftp: [['host', 'text', 'nas.local'], ['port', 'number', '22'], ['username', 'text', ''], ['password', 'password', ''], ['private_key', 'textarea', '-----BEGIN OPENSSH PRIVATE KEY-----'],
+    ['key_passphrase', 'password', ''], ['path', 'text', '/backups/caracal']],
+  smb: [['server', 'text', 'nas.local'], ['share', 'text', 'backups'], ['path', 'text', 'caracal'], ['username', 'text', ''], ['password', 'password', ''], ['domain', 'text', ''], ['port', 'number', '445']],
+  nfs: [['server', 'text', 'nas.local'], ['export', 'text', '/volume1/backups'], ['path', 'text', 'caracal']],
+  rclone: [['config', 'textarea', '[gdrive]\ntype = drive\nscope = drive.file\ntoken = {...}'], ['path', 'text', 'Backups/caracal']],
+  folder: [['path', 'text', '/backups']],
+};
+// S3-compatible services: endpoint and region
+const S3_PRESETS = {
+  aws: ['https://s3.eu-central-1.amazonaws.com', 'eu-central-1', 'virtual'], b2: ['https://s3.eu-central-003.backblazeb2.com', 'eu-central-003', 'path'],
+  r2: ['https://ACCOUNT_ID.r2.cloudflarestorage.com', 'auto', 'path'], wasabi: ['https://s3.eu-central-2.wasabisys.com', 'eu-central-2', 'path'],
+  hetzner: ['https://fsn1.your-objectstorage.com', 'fsn1', 'path'], minio: ['https://minio.example.com', 'us-east-1', 'path'],
+};
+const offsiteWhere = x => ({ s3: `${x.bucket}${x.prefix ? '/' + x.prefix : ''} · ${hostOf(x.endpoint)}`, webdav: hostOf(x.url), sftp: `${x.host}:${x.path || '~'}`,
+  smb: `\\\\${x.server}\\${x.share}${x.path ? '\\' + x.path : ''}`, nfs: `${x.server}:${x.export}${x.path ? '/' + x.path : ''}`, rclone: x.path || '/', folder: x.path })[x.type] || '';
+
+async function offsiteCard(el) {
+  const [d, sched] = await Promise.all([api('/api/backup-targets'), api('/api/backups')].map(p => p.catch(() => null)));
+  if (!d || !el.isConnected) return;
+  S.offsite = d;
+  const row = x => {
+    const st = x.status;
+    const state = x.running ? `<span class="tag info">${t('offsiteRunning')}</span>`
+      : !st ? `<span class="tag">${t('offsiteNever')}</span>`
+      : st.ok ? `<span class="tag ok" title="${esc(st.name || '')}">${t('offsiteOk', { time: ago(st.ts), size: fmtSize(st.size || 0) })}</span>`
+      : `<span class="tag critical" title="${esc(st.error)}">${t('chFailed')} · ${ago(st.ts)}</span>`;
+    return `<div class="channel">${icon(OFFSITE_ICON[x.type])}<div class="channel-main"><b>${esc(x.name)}</b><small class="muted">${t('ofsType_' + x.type)} · ${esc(offsiteWhere(x))} · ${t('offsiteKeep', { n: x.keep })}</small>
+      ${st && !st.ok ? `<small class="err-line">${esc(errText(st.error))}</small>` : ''}</div>
+      ${x.enabled === false ? `<span class="tag">${t('chPaused')}</span>` : ''}${state}
+      <span class="row-actions"><button class="btn sm" data-ofs-up="${esc(x.id)}" ${x.running ? 'disabled' : ''}>${icon('upload')}${t('offsiteUploadNow')}</button>
+      <button class="btn sm ghost" data-ofs-files="${esc(x.id)}">${icon('download')}${t('offsiteFiles')}</button>
+      <button class="icon-btn" data-ofs-edit="${esc(x.id)}" title="${t('edit')}">${icon('edit')}</button>
+      <button class="icon-btn danger" data-ofs-del="${esc(x.id)}" title="${t('delete')}">${icon('trash')}</button></span></div>`;
+  };
+  el.innerHTML = `<div class="toolbar"><h2 class="grow">${t('offsiteTitle')}</h2><button class="btn sm" id="ofsCrypt">${icon('lock')}${t(d.encrypted ? 'offsiteEncOn' : 'offsiteEncOff')}</button><button class="btn sm primary" id="ofsAdd">${icon('plus')}${t('offsiteAdd')}</button></div>
+    <div class="card-pad"><p class="muted">${t('offsiteHint')}</p>${d.targets.length && sched && !sched.settings.enabled ? `<div class="note warn">${t('offsiteNoDaily')}</div>` : ''}</div>
+    ${d.targets.length ? `<div class="channel-list">${d.targets.map(row).join('')}</div>` : emptyState('upload', t('offsiteNone'), t('offsiteNoneHint'), '')}`;
+  const again = () => offsiteCard(el);
+  $('#ofsAdd', el).onclick = () => offsiteDialog(null, again);
+  $('#ofsCrypt', el).onclick = () => offsiteCryptDialog(d.encrypted, again);
+  $$('[data-ofs-edit]', el).forEach(b => { b.onclick = () => offsiteDialog(d.targets.find(x => x.id === b.dataset.ofsEdit), again); });
+  $$('[data-ofs-del]', el).forEach(b => { b.onclick = async () => {
+    const x = d.targets.find(y => y.id === b.dataset.ofsDel);
+    if (!await confirmBox(t('offsiteDeleteConfirm', { name: esc(x.name) }))) return;
+    await api('/api/backup-targets/' + x.id, { method: 'DELETE' });
+    again();
+  }; });
+  $$('[data-ofs-up]', el).forEach(b => { b.onclick = async () => {
+    try { await api(`/api/backup-targets/${b.dataset.ofsUp}/upload`, { method: 'POST' }); toast(t('offsiteStarted')); } catch (err) { toast(errText(err), 'err'); }
+    again();
+    // the copy runs in the background: the list shows it when it is done
+    const poll = setInterval(async () => {
+      if (!el.isConnected) return clearInterval(poll);
+      const now = await api('/api/backup-targets').catch(() => null);
+      if (now && !now.targets.some(x => x.running)) { clearInterval(poll); again(); }
+    }, 3000);
+  }; });
+  $$('[data-ofs-files]', el).forEach(b => { b.onclick = () => offsiteFilesDialog(d.targets.find(x => x.id === b.dataset.ofsFiles), d.encrypted); });
+}
+
+function offsiteDialog(x, done) {
+  let type = x ? x.type : 's3';
+  const cur = x || { keep: 14, enabled: true, verify_tls: true };
+  const field = ([name, kind, ph]) => {
+    const v = cur[name] ?? (name === 'port' ? ph : '');
+    if (kind === 'check') return `<label class="check"><input type="checkbox" name="${name}" ${(name === 'style' ? cur.style === 'virtual' : cur[name] !== false) ? 'checked' : ''}>${t('ofs_' + name)}</label>`;
+    const hint = I18N[S.lang]['ofsHint_' + type + '_' + name] || I18N[S.lang]['ofsHint_' + name];
+    const input = kind === 'textarea' ? `<textarea name="${name}" rows="${name === 'config' ? 8 : 4}" spellcheck="false" placeholder="${esc(ph)}">${esc(v)}</textarea>`
+      : `<input name="${name}" type="${kind}" value="${esc(v)}" placeholder="${esc(ph || '')}" autocomplete="off" spellcheck="false">`;
+    return `<label>${t('ofs_' + name)}${input}${hint ? `<small>${hint}</small>` : ''}</label>`;
+  };
+  const fields = () => `<p class="muted">${t('ofsTypeHint_' + type)}</p>
+    ${type === 's3' ? `<label>${t('ofsPreset')}<select data-preset><option value="">—</option>${Object.keys(S3_PRESETS).map(k => `<option value="${k}">${t('ofsPreset_' + k)}</option>`).join('')}</select></label>` : ''}
+    ${OFFSITE_FIELDS[type].map(field).join('')}`;
+  const read = form => {
+    const out = { id: x ? x.id : '', type, name: form.name.value.trim(), keep: Number(form.keep.value) || 14, enabled: form.enabled.checked };
+    for (const [name, kind] of OFFSITE_FIELDS[type]) {
+      const el = form.elements[name];
+      out[name] = kind === 'check' ? (name === 'style' ? (el.checked ? 'virtual' : 'path') : el.checked) : el.value;
+    }
+    return out;
+  };
+  modal({
+    title: x ? t('offsiteEdit') : t('offsiteAdd'), wide: true,
+    body: `<div class="form">${x ? '' : `<div class="ch-types">${OFFSITE_TYPES.map(k => `<label class="ch-type"><input type="radio" name="type" value="${k}" ${k === type ? 'checked' : ''}>${icon(OFFSITE_ICON[k])}<span>${t('ofsType_' + k)}</span></label>`).join('')}</div>`}
+      <div class="row2"><label>${t('name')}<input name="name" value="${esc(cur.name || '')}" placeholder="${esc(t('offsiteNameHint'))}"></label>
+      <label>${t('offsiteKeepLabel')}<input name="keep" type="number" min="1" max="365" value="${cur.keep || 14}"></label></div>
+      <div id="ofsFields" class="form">${fields()}</div>
+      <label class="check"><input type="checkbox" name="enabled" ${cur.enabled !== false ? 'checked' : ''}>${t('offsiteEnabled')}</label>
+      <div class="form-actions start"><button type="button" class="btn" id="ofsTry">${icon('refresh')}${t('offsiteTest')}</button></div><div class="try-result"></div></div>`,
+    onOpen: form => {
+      const wire = () => {
+        const preset = $('[data-preset]', form);
+        if (preset) preset.onchange = () => { const p = S3_PRESETS[preset.value]; if (!p) return; form.endpoint.value = p[0]; form.region.value = p[1]; form.style.checked = p[2] === 'virtual'; };
+      };
+      $$('[name=type]', form).forEach(r => { r.onchange = () => { type = r.value; $('#ofsFields', form).innerHTML = fields(); wire(); }; });
+      wire();
+      $('#ofsTry', form).onclick = e => tryCommand(form, e.currentTarget, () => api('/api/backup-targets/test', { method: 'POST', json: read(form) }),
+        r => (r.ok ? `<div class="note info">${icon('check')}${t('offsiteTestOk')}${r.host_key ? `<br><small class="muted">${esc(r.host_key.slice(0, 60))}…</small>` : ''}</div>` : `<div class="note warn">${esc(errText(r.error))}</div>`));
+    },
+    onSubmit: async (data, form) => {
+      const body = read(form);
+      await api(x ? '/api/backup-targets/' + x.id : '/api/backup-targets', { method: x ? 'PATCH' : 'POST', json: body });
+      toast(t('saved'));
+      done();
+    },
+  });
+}
+
+function offsiteCryptDialog(on, done) {
+  modal({
+    title: t('offsiteEncTitle'), submit: t('save'),
+    body: `<div class="form"><p class="muted">${t('offsiteEncHint')}</p>
+      <label>${t('offsitePassphrase')}<input type="password" name="passphrase" minlength="12" autocomplete="new-password" ${on ? `placeholder="${t('leaveEmptyOff')}"` : 'required'}></label>
+      <label>${t('offsitePassphrase2')}<input type="password" name="passphrase2" autocomplete="new-password"></label>
+      <div class="note warn">${t('offsiteEncWarn')}</div></div>`,
+    onSubmit: async data => {
+      if (data.passphrase !== data.passphrase2) throw new Error('passphrase_mismatch');
+      if (!data.passphrase && on && !await confirmBox(t('offsiteEncDisable'))) return false;
+      await api('/api/backup-targets/encryption', { method: 'PUT', json: { passphrase: data.passphrase } });
+      toast(t('saved'));
+      done();
+    },
+  });
+}
+
+async function offsiteFilesDialog(x, encrypted) {
+  const dlg = modal({ title: t('offsiteFilesTitle', { name: esc(x.name) }), wide: true, body: `<div id="ofsList"><div class="note info">${t('loading')}</div></div>` });
+  let r;
+  try { r = await api(`/api/backup-targets/${x.id}/files`); } catch (e) { $('#ofsList', dlg).innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; return; }
+  const list = $('#ofsList', dlg);
+  list.innerHTML = r.files.length ? `<p class="muted">${t('offsiteFilesHint')}</p><div class="table-wrap"><table class="table"><thead><tr><th>${t('file')}</th><th>${t('created')}</th><th></th></tr></thead><tbody>
+    ${r.files.map(f => `<tr><td><b>${esc(f.name)}</b>${f.name.endsWith('.enc') ? ` <span class="tag">${icon('lock')}${t('encrypted')}</span>` : ''}<br><small class="muted">${fmtSize(f.size)}</small></td><td class="nowrap">${f.mtime ? dt(f.mtime) : '—'}</td>
+    <td class="actions-cell"><button class="btn sm danger" data-restore="${esc(f.name)}">${icon('upload')}${t('restoreRun')}</button></td></tr>`).join('')}</tbody></table></div>`
+    : `<div class="note">${t('offsiteFilesNone')}</div>`;
+  $$('[data-restore]', list).forEach(b => { b.onclick = () => {
+    const name = b.dataset.restore, enc = name.endsWith('.enc');
+    modal({
+      title: t('restoreTitle'), submit: t('restoreRun'), danger: true,
+      body: `<div class="form"><p>${t('confirmRestore')}</p><p class="muted">${esc(x.name)}: <b>${esc(name)}</b></p>
+        ${enc ? `<label>${t('offsitePassphrase')}<input type="password" name="passphrase" autocomplete="off" ${encrypted ? `placeholder="${t('restorePassStored')}"` : 'required'}></label>` : ''}</div>`,
+      onSubmit: async data => {
+        await api(`/api/backup-targets/${x.id}/restore`, { method: 'POST', json: { name, passphrase: data.passphrase || '' } });
+        toast(t('restoreDone'));
+        waitForRestart();
+      },
+    });
+  }; });
+}
 
 // ---------- alerts for administrators (Settings → Alerts)
 
@@ -2532,14 +2884,14 @@ VIEWS.updates = {
     root.innerHTML = `<div class="grid two">
       <section class="card"><div class="card-head"><h2>${t('nodeImage')}</h2><button class="btn sm ghost" data-do="imageRefresh">${icon('refresh')}${t('refresh')}</button></div>
         <p class="muted">${t('nodeImageHint')}</p>
-        <form id="imgForm" class="form"><label>${t('imageName')}<input name="image" placeholder="ghcr.io/OWNER/caracal-node" ${can('admin') ? '' : 'readonly'}></label>
-        ${can('admin') ? `<div class="form-actions"><button class="btn">${t('save')}</button></div>` : ''}</form>
+        <form id="imgForm" class="form"><label>${t('imageName')}<input name="image" placeholder="ghcr.io/OWNER/caracal-node" ${canAll('updates') ? '' : 'readonly'}></label>
+        ${canAll('updates') ? `<div class="form-actions"><button class="btn">${t('save')}</button></div>` : ''}</form>
         <h3>${t('availableVersions')}</h3><div id="imgVersions"></div></section>
       <section class="card"><h2>${t('howUpdateWorks')}</h2><ol class="steps">${t('updateStepsDocker')}</ol></section></div>
       <section class="card flush"><div class="toolbar"><h2 class="grow">${t('nodeVersions')}</h2>
         <button class="btn" data-do="convertNodes">${icon('upload')}${t('convertToDocker')}</button>
         <button class="btn primary" data-do="caracalUpdate" data-outdated="1">${icon('updates')}${t('updateOutdated')}</button></div><div id="relNodes"></div></section>
-      <section class="card flush"><div class="toolbar"><h2 class="grow">${t('rollouts')}</h2>${can('manage') ? `<button class="btn" data-do="rolloutAuto">${icon('settings')}${t('autoUpdate')}</button>
+      <section class="card flush"><div class="toolbar"><h2 class="grow">${t('rollouts')}</h2>${canAll('updates') ? `<button class="btn" data-do="rolloutAuto">${icon('settings')}${t('autoUpdate')}</button>
         <button class="btn primary" data-do="rolloutNew">${icon('updates')}${t('rolloutNew')}</button>` : ''}</div><p class="muted card-intro">${t('rolloutsHint')}</p><div id="rollouts"></div></section>
       <details class="card legacy"><summary><b>${t('classicNodes')}</b> <span class="muted">${t('classicNodesHint')}</span></summary>
         <div class="grid two legacy-body"><section><h3>${t('releaseUpload')}</h3><p class="muted">${t('releaseUploadHint')}</p>
@@ -2608,7 +2960,7 @@ VIEWS.updates = {
     patch($('#relNodes', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('device')}</th><th>${t('locationGroup')}</th><th>${t('runtime')}</th><th>CARACAL</th><th>${t('agent')}</th><th>${t('state')}</th><th></th></tr></thead>
       <tbody>${S.devices.map(d => {
         const want = latest[d.runtime];
-        const action = !can('manage') || !d.online ? '' : d.runtime === 'docker'
+        const action = !canOn(d, 'updates') || !d.online ? '' : d.runtime === 'docker'
           ? `<button class="btn sm" data-do="caracalUpdate" data-id="${esc(d.id)}">${icon('updates')}${t('act_update_caracal')}</button>`
           : `<button class="btn sm" data-do="convertNodes" data-id="${esc(d.id)}">${icon('upload')}${t('convertToDocker')}</button>`;
         return `<tr data-href="#/device/${encodeURIComponent(d.id)}"><td><div class="dev-name">${dot(d)}<b>${esc(d.name)}</b></div></td>
@@ -2622,7 +2974,7 @@ VIEWS.updates = {
 // Staged updates: pilots first, then batches after a healthy wait; a failure stops the rollout.
 const ROLLOUT_STAGE = { waiting: '', updating: 'info', checking: 'info', done: 'ok', failed: 'critical' };
 function rolloutsHtml(ro) {
-  const edit = can('manage'), a = ro.auto;
+  const edit = canAll('updates'), a = ro.auto;
   const auto = `<div class="note ${a.enabled ? 'info' : ''}">${a.enabled ? t('autoUpdateOn', { hour: a.hour, group: esc(a.pilot_group || t('autoPilotFirst', { n: a.pilot_count })), batch: a.batch, wait: a.wait }) : t('autoUpdateOff')}</div>`;
   const names = ids => ids.map(id => esc(dev(id)?.name || id)).join(', ');
   return auto + (ro.rollouts.map(r => {
@@ -2903,7 +3255,7 @@ VIEWS.global = {
       ${edit ? ['web', 'image', 'video', 'grafana-tag'].map(k => `<button class="btn" data-do="globalAddItem" data-kind="${k}">${kindIcon(k)}${t({ web: 'addWeb', image: 'addImage', video: 'addVideo' }[k] || 'grafanaCollection')}</button>`).join('') : ''}</div>
       <ol class="playlist">${p.items.map((it, i) => `<li class="g-row">
         <span class="idx">${i + 1}</span><span class="kind k-${esc(it.kind)}">${kindIcon(it.kind)}</span>
-        <div class="pl-main"><b>${esc(it.name)}</b><small>${esc(kindLabel(it.kind))} · ${esc(it.kind === 'web' ? it.source : isTag(it.kind) ? `${t('grafanaTag')} ${it.tag} · ${it.grafana_url}` : (it.file_name || '') + (it.file_size ? ' · ' + fmtSize(it.file_size) : ''))}</small></div>
+        <div class="pl-main"><b>${esc(it.name)}</b>${validityTag(it)}<small>${esc(kindLabel(it.kind))} · ${esc(it.kind === 'web' ? it.source : isTag(it.kind) ? `${t('grafanaTag')} ${it.tag} · ${it.grafana_url}` : (it.file_name || '') + (it.file_size ? ' · ' + fmtSize(it.file_size) : ''))}</small></div>
         <span class="pl-dur">${it.duration ? dur(it.duration) : t('fullLength')}</span>
         <span class="pl-actions">${edit ? `<button class="icon-btn" title="${t('moveUp')}" data-do="globalMove" data-iid="${it.id}" data-dir="-1" ${i ? '' : 'disabled'}>${icon('up')}</button>
           <button class="icon-btn" title="${t('moveDown')}" data-do="globalMove" data-iid="${it.id}" data-dir="1" ${i < p.items.length - 1 ? '' : 'disabled'}>${icon('down')}</button>
@@ -2926,6 +3278,28 @@ function fmtSize(n) {
   return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' kB';
 }
 
+// An item shown only from / until a time: the browser's local time, sent as Unix time (CARACAL 2026.10.14 and newer)
+const toLocalInput = ts => (ts ? new Date(ts * 1000 - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
+const fromLocalInput = v => (v ? Math.round(new Date(v).getTime() / 1000) : null);
+const validitySupport = ids => ids.every(id => (dev(id)?.capabilities || {}).validity === true);
+function validityFields(it = {}) {
+  return `<details class="validity" ${it.valid_from || it.valid_until ? 'open' : ''}><summary>${t('validity')}${it.valid_from || it.valid_until ? ` <span class="muted">${validityText(it)}</span>` : ''}</summary>
+    <p class="muted">${t('validityHint')}</p><div class="row2"><label>${t('validFrom')}<input type="datetime-local" name="valid_from" value="${toLocalInput(it.valid_from)}"></label>
+    <label>${t('validUntil')}<input type="datetime-local" name="valid_until" value="${toLocalInput(it.valid_until)}"></label></div></details>`;
+}
+const validityPayload = data => ({ valid_from: fromLocalInput(data.valid_from), valid_until: fromLocalInput(data.valid_until) });
+function validityText(it) {
+  const f = x => new Date(x * 1000).toLocaleString(S.lang === 'en' ? 'en-GB' : 'cs-CZ', { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return it.valid_from && it.valid_until ? `${f(it.valid_from)} – ${f(it.valid_until)}` : it.valid_from ? t('validFromText', { t: f(it.valid_from) }) : t('validUntilText', { t: f(it.valid_until) });
+}
+// a tag in the playlist: waiting for its time, playing until..., or over
+function validityTag(it) {
+  if (!it.valid_from && !it.valid_until) return '';
+  const now = Date.now() / 1000;
+  const state = it.valid_until && now >= it.valid_until ? 'over' : it.valid_from && now < it.valid_from ? 'waiting' : 'on';
+  return ` <span class="tag validity-${state}" title="${esc(validityText(it))}">${icon('schedule')}${t('validity_' + state)} · ${esc(validityText(it))}</span>`;
+}
+
 function globalItemDialog(pid, kind, item = null) {
   const isMedia = kind === 'image' || kind === 'video';
   const it = item || { name: '', source: '', duration: kind === 'grafana-tag' ? 60 : kind === 'web' ? 30 : 15, scale: 1, kiosk: true };
@@ -2938,7 +3312,8 @@ function globalItemDialog(pid, kind, item = null) {
       <div class="row2"><label>${t(isTag(kind) ? 'durationPerDashboard' : 'durationSec')}<input name="duration" type="number" min="5" value="${esc(it.duration)}" required></label>
       ${kind === 'web' || isTag(kind) ? `<label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(it.scale ?? 1)}"></label>` : '<span></span>'}</div>
       ${kind === 'video' ? `<small class="muted">${t('videoDurationHint')}</small>` : ''}
-      ${kind === 'web' || isTag(kind) ? darkField(it.dark || '', isTag(kind)) : ''}</div>`,
+      ${kind === 'web' || isTag(kind) ? darkField(it.dark || '', isTag(kind)) : ''}
+      ${validityFields(it)}</div>`,
     onOpen: form => {
       const f = $('input[name=file]', form);
       if (f) f.onchange = () => { if (f.files[0] && !form.name.value) form.name.value = f.files[0].name.replace(/\.[^.]+$/, ''); };
@@ -2948,6 +3323,7 @@ function globalItemDialog(pid, kind, item = null) {
       if (kind === 'web') payload.source = data.source.trim();
       if (isTag(kind)) Object.assign(payload, grafanaPayload(data));
       if (kind === 'web' || isTag(kind)) payload.dark = data.dark || '';
+      Object.assign(payload, validityPayload(data));
       if (item) {
         await api(`/api/global-playlists/${pid}/items/${item.id}`, { method: 'PATCH', json: payload });
       } else {
@@ -3002,7 +3378,7 @@ VIEWS.templates = {
     setTitle(t('nav_templates'));
     if (S.route.id) { root.innerHTML = `<div id="tHead"></div><div id="tParts"></div><div id="tUsed"></div>`; return; }
     root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('nav_templates')}</h2>
-      ${can('manage') ? `<button class="btn" data-do="templateFromDevice">${icon('copy')}${t('templateFromDevice')}</button><button class="btn primary" data-do="templateNew">${icon('plus')}${t('templateNew')}</button>` : ''}</div>
+      ${can('devices') ? `<button class="btn" data-do="templateFromDevice">${icon('copy')}${t('templateFromDevice')}</button><button class="btn primary" data-do="templateNew">${icon('plus')}${t('templateNew')}</button>` : ''}</div>
       <p class="muted card-intro">${t('templatesHint')}</p><div id="tList"></div></section>`;
   },
   async update(root) {
@@ -3012,7 +3388,7 @@ VIEWS.templates = {
       patch($('#tList', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('tplContains')}</th><th>${t('updated')}</th></tr></thead>
         <tbody>${rows.map(p => `<tr data-href="#/templates/${p.id}"><td><b>${esc(p.name)}</b>${p.description ? `<br><small class="muted">${esc(p.description)}</small>` : ''}</td>
         <td><div class="chips">${tplChips(p)}</div></td><td class="nowrap">${dt(p.updated)}<br><small class="muted">${esc(p.updated_by)}</small></td></tr>`).join('')
-        || `<tr><td colspan="3">${emptyState('templates', t('noTemplates'), t('templatesHint'), can('manage') ? `<button class="btn primary" data-do="templateNew">${icon('plus')}${t('templateNew')}</button>` : '')}</td></tr>`}</tbody></table></div>`);
+        || `<tr><td colspan="3">${emptyState('templates', t('noTemplates'), t('templatesHint'), can('devices') ? `<button class="btn primary" data-do="templateNew">${icon('plus')}${t('templateNew')}</button>` : '')}</td></tr>`}</tbody></table></div>`);
       return;
     }
     const p = await api('/api/templates/' + encodeURIComponent(S.route.id)).catch(() => null);
@@ -3020,7 +3396,7 @@ VIEWS.templates = {
     if (!p) { patch($('#tHead', root), `<div class="card empty">${t('err_not_found')}</div>`); return; }
     S.template = p;
     setTitle(p.name, t('nav_templates'), '#/templates');
-    const edit = can('manage'), n = p.notify || {};
+    const edit = can('devices'), n = p.notify || {};
     const editBtn = (todo, label = t('edit')) => (edit ? `<button class="btn sm" data-do="${todo}">${icon('edit')}${label}</button>` : '');
     const off = `<span class="muted">${t('tplKeep')}</span>`;
     patch($('#tHead', root), `<section class="card dev-hero"><div class="hero-main"><div class="hero-title">${icon('templates')}<h2>${esc(p.name)}</h2></div>
@@ -3161,7 +3537,7 @@ async function proxyCard(el) {
   const p = await api('/api/proxy/status').catch(() => null);
   if (!p) { el.remove(); return; }
   const nodes = S.devices.filter(d => d.download_source === 'fleet').length;
-  el.innerHTML = `<div class="card-head"><h2>${t('proxyTitle')}</h2>${can('admin') ? `<button class="btn sm ghost" data-do="proxyClear">${icon('trash')}${t('proxyClear')}</button>` : ''}</div>
+  el.innerHTML = `<div class="card-head"><h2>${t('proxyTitle')}</h2>${can('settings') ? `<button class="btn sm ghost" data-do="proxyClear">${icon('trash')}${t('proxyClear')}</button>` : ''}</div>
     <p class="muted">${t('proxyHint')}</p>
     <dl class="kv"><dt>${t('proxyNodes')}</dt><dd>${nodes}</dd>
       <dt>${t('proxyCache')}</dt><dd>${fmtSize(p.cache_bytes)} / ${fmtSize(p.cache_limit)} (${t('proxyAptPart', { size: fmtSize(p.apt_bytes) })})</dd>
@@ -3172,9 +3548,9 @@ async function proxyCard(el) {
   const m = await api('/api/proxy/mirrors').catch(() => null);
   if (!m || !el.isConnected) return;
   $('#mirrorBox', el).innerHTML = `<h3>${t('mirrorsTitle')}</h3><p class="muted">${t('mirrorsHint')}</p>
-    <form class="form" id="mirrorForm"><label>${t('mirrorsLabel')}<textarea name="mirrors" rows="4" spellcheck="false" placeholder="mirror.example.cz\nhttp://apt.firma.lan:8080" ${can('admin') ? '' : 'readonly'}>${esc(m.mirrors.map(x => (x.scheme === 'http' ? 'http://' : '') + x.host).join('\n'))}</textarea>
+    <form class="form" id="mirrorForm"><label>${t('mirrorsLabel')}<textarea name="mirrors" rows="4" spellcheck="false" placeholder="mirror.example.cz\nhttp://apt.firma.lan:8080" ${can('settings') ? '' : 'readonly'}>${esc(m.mirrors.map(x => (x.scheme === 'http' ? 'http://' : '') + x.host).join('\n'))}</textarea>
       <small class="muted">${t('mirrorsFormat')}</small></label>
-    ${can('admin') ? `<div class="form-actions"><button class="btn primary">${t('save')}</button></div>` : ''}</form>`;
+    ${can('settings') ? `<div class="form-actions"><button class="btn primary">${t('save')}</button></div>` : ''}</form>`;
   $('#mirrorForm', el).onsubmit = async e => {
     e.preventDefault();
     const lines = e.target.mirrors.value.split(/\s+/).map(x => x.trim()).filter(Boolean);
@@ -3298,6 +3674,7 @@ function assetDialog(deviceId, kind, asset = null, targets = null, preset = {}) 
     ${kind === 'video' ? `<small class="muted">${t('videoDurationHint')}</small>` : ''}
     ${kind === 'web' ? darkField(a.dark || '') : ''}
     ${showEnabled ? `<label class="check"><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}>${t('enabledInPlaylist')}</label>` : ''}
+    ${validitySupport(targets || [deviceId]) ? validityFields(a) : ''}
     ${multi && targets === null ? `<details class="also-add"><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId)}</details>` : ''}
     ${multi && targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : ''}</div>`;
   modal({
@@ -3327,6 +3704,7 @@ function assetDialog(deviceId, kind, asset = null, targets = null, preset = {}) 
       if (showEnabled) payload.enabled = !!data.enabled;
       if (kind === 'web') { payload.source = data.source.trim(); payload.scale = Number(data.scale || 1); payload.dark = data.dark || ''; }
       if (profiles) payload.auth_profile_id = data.auth_profile_id ? Number(data.auth_profile_id) : null;
+      if ('valid_from' in data) Object.assign(payload, validityPayload(data));
       if (asset) return sendCommand(deviceId, 'update_asset', { id: asset.id, ...payload });
       const ids = targets || [deviceId, ...(payload.auth_profile_id ? [] : pickedTargets(data))];
       if (isMedia) {
@@ -3409,6 +3787,7 @@ function collectionDialog(deviceId, col = null, targets = null) {
       <label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(c.scale ?? 1)}"></label></div>
       <small class="muted">${t('grafanaHint')}</small>
       ${darkField(c.dark || '', true)}
+      ${validitySupport(targets || [deviceId]) ? validityFields(c) : ''}
       ${(dev(deviceId)?.capabilities || {}).grafana_discover ? `<div class="form-actions start"><button type="button" class="btn sm" data-try>${icon('refresh')}${t('grafanaTry')}</button></div><div class="try-result"></div>` : ''}
       ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : col ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId)}</details>`}</div>`,
     onOpen: form => {
@@ -3425,6 +3804,7 @@ function collectionDialog(deviceId, col = null, targets = null) {
     },
     onSubmit: data => {
       const payload = { name: data.name.trim(), ...grafanaPayload(data), duration: Number(data.duration || 60), scale: Number(data.scale || 1), dark: data.dark || '' };
+      if ('valid_from' in data) Object.assign(payload, validityPayload(data));
       if (col) return sendCommand(deviceId, 'update_collection', { id: col.id, ...payload });
       const ids = targets || [deviceId, ...pickedTargets(data)];
       return ids.length === 1 ? sendCommand(ids[0], 'add_collection', payload) : sendBulk(ids, 'add_collection', payload);
@@ -3438,7 +3818,16 @@ const camStreamRow = (st = {}, edit = false) => `<div class="stream-row" data-st
   <input data-f="url" placeholder="rtsp://192.168.1.20:554/stream1" value="${esc(st.url || '')}" required spellcheck="false">
   <input data-f="username" placeholder="${esc(edit ? t('camUnchanged') : t('username'))}" value="${esc(st.username || '')}" autocomplete="off">
   <input data-f="password" type="password" placeholder="${esc(edit ? t('camUnchanged') : t('password'))}" autocomplete="new-password">
+  <button type="button" class="icon-btn" data-preview-row title="${t('camPreview')}">${icon('eye')}</button>
   <button type="button" class="icon-btn danger" data-del-stream title="${t('delete')}">${icon('x')}</button></div>`;
+// A picture of a stream, taken by the node (CARACAL 2026.10.14 and agent 4.16)
+async function cameraPreview(deviceId, payload, box) {
+  box.innerHTML = `<div class="note">${t('camPreviewLoading')}</div>`;
+  try {
+    const r = await commandResult(deviceId, 'camera_preview', payload);
+    box.innerHTML = r.image ? `<img class="cam-preview" alt="" src="data:${esc(r.type || 'image/jpeg')};base64,${r.image}">` : `<div class="note warn">${esc(r.text || r.detail || t('camPreviewNone'))}</div>`;
+  } catch (e) { box.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; }
+}
 function cameraDialog(deviceId, cam = null, targets = null) {
   let src = { streams: [{}], layout: 'auto' };
   if (cam) { try { src = { ...src, ...JSON.parse(cam.source || '{}') }; } catch { /* ignore */ } }
@@ -3450,6 +3839,7 @@ function cameraDialog(deviceId, cam = null, targets = null) {
       <label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(cam ? cam.duration : 30)}" required></label></div>
       <div class="row2"><label>${t('camLayout')}<select name="layout">${layouts.map(([v, l]) => `<option value="${v}" ${src.layout === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="check"><input type="checkbox" name="audio" ${src.audio ? 'checked' : ''}>${t('camAudio')}</label></div>
+      ${validitySupport(targets || [deviceId]) ? validityFields(cam || {}) : ''}
       <h3>${t('camStreams')}</h3>${cam ? `<p class="muted">${t('camEditHint')}</p>` : ''}<div id="camRows">${src.streams.map(x => camStreamRow(x, !!cam)).join('')}</div>
       <div class="form-actions start"><button type="button" class="btn sm" data-add-stream>${icon('plus')}${t('camAddStream')}</button></div>
       ${targets ? '' : `<details class="onvif"><summary>${t('camOnvif')}</summary><p class="muted">${t('camOnvifHint')}</p>
@@ -3461,14 +3851,29 @@ function cameraDialog(deviceId, cam = null, targets = null) {
     onOpen: form => {
       bindTargetPicker(form);
       const rows = $('#camRows', form), ov = k => $(`[data-onvif="${k}"]`, form);
+      const preview = (dev(deviceId)?.capabilities || {}).camera_preview === true;
+      if (!preview) $$('[data-preview-row]', form).forEach(b => b.remove());
       form.addEventListener('click', async e => {
-        if (e.target.closest('[data-add-stream]')) rows.insertAdjacentHTML('beforeend', camStreamRow());
+        if (e.target.closest('[data-add-stream]')) {
+          rows.insertAdjacentHTML('beforeend', camStreamRow());
+          if (!preview) $$('[data-preview-row]', form).forEach(b => b.remove());
+        }
+        const pr = e.target.closest('[data-preview-row]');
+        if (pr) {
+          const row = pr.closest('[data-stream]'), f = k => $(`[data-f=${k}]`, row).value.trim();
+          const index = $$('[data-stream]', form).indexOf(row);
+          // an edited camera without a new password: the node uses the stored one
+          const payload = cam && !f('password') && !f('username') ? { id: cam.id, index } : { url: f('url'), username: f('username'), password: $('[data-f=password]', row).value };
+          let box = row.nextElementSibling;
+          if (!box || !box.classList.contains('cam-preview-box')) { row.insertAdjacentHTML('afterend', '<div class="cam-preview-box"></div>'); box = row.nextElementSibling; }
+          cameraPreview(deviceId, payload, box);
+        }
         const del = e.target.closest('[data-del-stream]');
         if (del && $$('[data-stream]', form).length > 1) del.closest('[data-stream]').remove();
         const disc = e.target.closest('[data-discover]');
         if (disc) {
           tryCommand(form, disc, () => commandResult(deviceId, 'camera_discover'), r => (r.cameras || []).length
-            ? `<div class="cam-list">${r.cameras.map(x => `<button type="button" class="btn sm" data-pick-cam="${esc(x.address)}" data-xaddr="${esc(x.xaddr)}">${icon('camera')}${esc(x.name || x.hardware || x.address)} <small class="muted">${esc(x.address)}</small></button>`).join('')}</div>`
+            ? `<div class="cam-list">${r.cameras.map(x => `<button type="button" class="btn sm" data-pick-cam="${esc(x.address)}" data-xaddr="${esc(x.xaddr)}">${icon('camera')}${esc(x.name || x.hardware || x.address)} <small class="muted">${esc(x.address)}${x.kind === 'recorder' ? ' · ' + t('camRecorder') : ''}</small></button>`).join('')}</div>`
             : `<div class="note">${t('camNoneFound')}</div>`, '.cam-found');
         }
         const pick = e.target.closest('[data-pick-cam]');
@@ -3477,18 +3882,36 @@ function cameraDialog(deviceId, cam = null, targets = null) {
         if (load) {
           tryCommand(form, load, () => commandResult(deviceId, 'camera_onvif', { host: ov('host').value.trim(), port: Number(ov('port').value) || 80,
             username: ov('username').value, password: ov('password').value, xaddr: ov('xaddr').value }), r => {
-            setTimeout(() => $$('[data-use-stream]', form).forEach(b => {
-              b.onclick = () => {
-                const x = r.streams[Number(b.dataset.useStream)], empty = $$('[data-stream]', form).find(row => !$('[data-f=url]', row).value);
-                const html = camStreamRow({ name: x.name, url: x.url, username: ov('username').value });
-                if (empty) empty.outerHTML = html; else rows.insertAdjacentHTML('beforeend', html);
-                const added = $$('[data-stream]', form).find(row => $('[data-f=url]', row).value === x.url);
-                if (added) $('[data-f=password]', added).value = ov('password').value;
-                if (!form.name.value) form.name.value = x.name || ov('host').value;
-                b.disabled = true;
-              };
-            }));
-            return `<div class="cam-list">${(r.streams || []).map((x, i) => `<button type="button" class="btn sm" data-use-stream="${i}">${icon('plus')}${esc(x.name || x.url)}</button>`).join('')}</div>`;
+            const use = i => {
+              const x = r.streams[i], empty = $$('[data-stream]', form).find(row => !$('[data-f=url]', row).value);
+              if ($$('[data-stream]', form).some(row => $('[data-f=url]', row).value === x.url)) return;
+              if (!empty && $$('[data-stream]', form).length >= 9) return toast(t('camMaxStreams'), 'err');
+              const html = camStreamRow({ name: x.name, url: x.url, username: ov('username').value });
+              if (empty) empty.outerHTML = html; else rows.insertAdjacentHTML('beforeend', html);
+              if (!preview) $$('[data-preview-row]', form).forEach(b => b.remove());
+              const added = $$('[data-stream]', form).find(row => $('[data-f=url]', row).value === x.url);
+              if (added) $('[data-f=password]', added).value = ov('password').value;
+              if (!form.name.value) form.name.value = x.name || ov('host').value;
+              const btn = $(`[data-use-stream="${i}"]`, form);
+              if (btn) btn.disabled = true;
+            };
+            setTimeout(() => {
+              $$('[data-use-stream]', form).forEach(b => { b.onclick = () => use(Number(b.dataset.useStream)); });
+              $$('[data-preview-stream]', form).forEach(b => {
+                b.onclick = () => {
+                  const x = r.streams[Number(b.dataset.previewStream)];
+                  cameraPreview(deviceId, { url: x.url, username: ov('username').value, password: ov('password').value }, $('.cam-found-preview', form));
+                };
+              });
+              const mains = $('[data-use-mains]', form);
+              // a recorder: the first stream of every channel (its main stream), as many as fit
+              if (mains) mains.onclick = () => { const seen = new Set(); r.streams.forEach((x, i) => { if (x.source && !seen.has(x.source)) { seen.add(x.source); use(i); } }); };
+            });
+            const channels = new Set((r.streams || []).map(x => x.source).filter(Boolean));
+            return `${channels.size > 1 ? `<div class="note info"><div>${t('camRecorderFound', { n: channels.size, s: r.streams.length })}</div><button type="button" class="btn sm" data-use-mains>${icon('plus')}${t('camAddMains')}</button></div>` : ''}
+              <div class="stream-list">${(r.streams || []).map((x, i) => `<div class="stream-pick"><div><b>${esc(x.name || x.url)}</b><small class="muted">${esc(x.url)}</small></div>
+              ${preview ? `<button type="button" class="btn sm ghost" data-preview-stream="${i}">${icon('eye')}${t('camPreview')}</button>` : ''}<button type="button" class="btn sm" data-use-stream="${i}">${icon('plus')}${t('add')}</button></div>`).join('')}</div>
+              <div class="cam-found-preview"></div>`;
           }, '.cam-streams');
         }
       });
@@ -3496,6 +3919,7 @@ function cameraDialog(deviceId, cam = null, targets = null) {
     onSubmit: data => {
       const streams = $$('#camRows [data-stream]').map(row => Object.fromEntries($$('[data-f]', row).map(i => [i.dataset.f, i.value.trim()])));
       const payload = { name: data.name.trim(), duration: Number(data.duration || 30), layout: data.layout, audio: !!data.audio, streams };
+      if ('valid_from' in data) Object.assign(payload, validityPayload(data));
       if (cam) return sendCommand(deviceId, 'update_camera', { id: cam.id, ...payload });
       const ids = targets || [deviceId, ...pickedTargets(data)];
       return ids.length === 1 ? sendCommand(ids[0], 'add_camera', payload) : sendBulk(ids, 'add_camera', payload);
@@ -3550,7 +3974,7 @@ async function provisionDialog(host = '', name = '', mode = 'node') {
       <label class="check"><input type="radio" name="mode" value="agent" ${mode === 'agent' ? 'checked' : ''}><span><b>${t('modeAgent')}</b><small>${t('modeAgentHint')}</small></span></label></div>
       <div class="node-only">${img.image ? versionField(img) : `<div class="note warn">${t('err_node_image_missing')} <a href="#/updates">${t('nav_updates')}</a></div>`}</div>
       <div class="row2"><label>${t('hostIp')}<input name="host" value="${esc(host)}" required></label><label>${t('sshPort')}<input name="port" type="number" value="22"></label></div>
-      <div class="form-actions start"><button type="button" class="btn sm ghost" data-do="discover">${icon('refresh')}${t('discoverTitle')}</button>${can('admin') ? `<button type="button" class="btn sm ghost" data-do="sdCard">${icon('download')}${t('sdCardTitle')}</button>` : ''}</div>
+      <div class="form-actions start"><button type="button" class="btn sm ghost" data-do="discover">${icon('refresh')}${t('discoverTitle')}</button>${can('settings') ? `<button type="button" class="btn sm ghost" data-do="sdCard">${icon('download')}${t('sdCardTitle')}</button>` : ''}</div>
       <div class="row2"><label>${t('sshUser')}<input name="username" value="pi" required></label><label>${t('sshPassword')}<input name="password" type="password" autocomplete="off"></label></div>
       <details><summary>${t('sshKeyAuth')}</summary><label>${t('privateKey')}<textarea name="private_key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label><label>${t('passphrase')}<input name="passphrase" type="password"></label></details>
       <label>${t('deviceName')}<input name="name" value="${esc(name)}"></label>
@@ -3631,46 +4055,6 @@ function assignDialog(ids) {
       await api('/api/devices/assign', { method: 'POST', json: body });
       toast(t('saved'));
       tick();
-    },
-  });
-}
-
-function userDialog(uid) {
-  const u = uid ? S.users.find(x => x.id === uid) : null;
-  const roles = ['viewer', 'operator', 'manager', 'admin'];
-  modal({
-    title: u ? t('editUser') + ': ' + esc(u.username) : t('newUser'),
-    body: `<div class="form">${u ? '' : `<label>${t('username')}<input name="username" required pattern="[A-Za-z0-9._@\\-]{2,64}"></label>`}
-      <label>${u ? t('resetPassword') : t('password')}<span class="pw-row"><input name="password" type="password" minlength="10" autocomplete="new-password" ${u ? `placeholder="${t('leaveEmpty')}"` : 'required'}>
-        <button type="button" class="btn sm" data-gen-pw>${icon('refresh')}${t('pwGenerate')}</button></span></label>
-      <label class="check must-change" ${u ? 'hidden' : ''}><input type="checkbox" name="must_change" ${u ? '' : 'checked'}><span>${t('pwMustChange')}<br><small class="muted">${t('pwMustChangeHint')}</small></span></label>
-      <div class="row2"><label>${t('role')}<select name="role">${roles.map(r => `<option value="${r}" ${(u ? u.role : 'viewer') === r ? 'selected' : ''}>${t('role_' + r)}</option>`).join('')}</select></label>
-      <label>${t('language')}<select name="language"><option value="cs" ${u?.language === 'en' ? '' : 'selected'}>Čeština</option><option value="en" ${u?.language === 'en' ? 'selected' : ''}>English</option></select></label></div>
-      ${u ? `<label class="check"><input type="checkbox" name="enabled" ${u.enabled ? 'checked' : ''}>${t('accountEnabled')}</label>` : ''}</div>`,
-    onOpen: form => {
-      const pw = form.password, must = $('.must-change', form);
-      // a new password for an existing user: the one-time choice appears (checked)
-      pw.oninput = () => { if (u) { must.hidden = !pw.value; if (pw.value && !must.dataset.touched) form.must_change.checked = true; } };
-      form.must_change.onchange = () => { must.dataset.touched = '1'; };
-      $('[data-gen-pw]', form).onclick = () => {
-        const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-        const rnd = crypto.getRandomValues(new Uint32Array(14));
-        pw.value = Array.from(rnd, x => chars[x % chars.length]).join('');
-        pw.type = 'text';
-        pw.select();
-        pw.oninput();
-      };
-    },
-    onSubmit: async data => {
-      if (u) {
-        const body = { role: data.role, language: data.language, enabled: !!data.enabled };
-        if (data.password) Object.assign(body, { password: data.password, must_change: !!data.must_change });
-        await api('/api/users/' + u.id, { method: 'PATCH', json: body });
-      } else {
-        await api('/api/users', { method: 'POST', json: { ...data, must_change: !!data.must_change } });
-      }
-      toast(t('saved'));
-      render();
     },
   });
 }
@@ -4068,6 +4452,20 @@ const ACTIONS_UI = {
     toast(t('deleted'));
     render();
   },
+  roleEdit(b) { roleDialog(b.dataset.key || null, b.dataset.copy || null); },
+  async roleDelete(b) {
+    if (!await confirmBox(t('confirmDeleteItem', { name: esc(b.dataset.name) }))) return;
+    await api('/api/roles/' + encodeURIComponent(b.dataset.key), { method: 'DELETE' });
+    toast(t('deleted'));
+    render();
+  },
+  userGroupEdit(b) { userGroupDialog(b.dataset.gid ? Number(b.dataset.gid) : null); },
+  async userGroupDelete(b) {
+    if (!await confirmBox(t('confirmDeleteItem', { name: esc(b.dataset.name) }))) return;
+    await api('/api/user-groups/' + b.dataset.gid, { method: 'DELETE' });
+    toast(t('deleted'));
+    render();
+  },
 };
 
 // Offer only content types every selected node can receive.
@@ -4160,7 +4558,7 @@ $('#paletteBtn').onclick = e => { e.stopPropagation(); openPalette(); };
 $('#userBtn').onclick = e => {
   e.stopPropagation();
   const d = $('#userDrop');
-  d.innerHTML = `<div class="dd-head"><b>${esc(S.me.username)}</b><small>${t('role_' + S.me.role)}</small></div><a href="#/settings">${t('nav_settings')}</a><button data-do="showShortcuts">${t('shortcuts')}</button><button id="logoutBtn">${t('signOut')}</button>`;
+  d.innerHTML = `<div class="dd-head"><b>${esc(S.me.username)}</b><small>${esc(roleLabel(S.me.role, S.me.role_name))}</small></div><a href="#/settings">${t('nav_settings')}</a><button data-do="showShortcuts">${t('shortcuts')}</button><button id="logoutBtn">${t('signOut')}</button>`;
   d.hidden = !d.hidden;
   $('#logoutBtn').onclick = logout;
 };
@@ -4268,7 +4666,7 @@ VIEWS.schedule = {
   async update(root) {
     const d = await loadScheduleData();
     if (!$('#schHead', root)) return;
-    const edit = can('manage'), mine = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    const edit = can('schedule'), tzEdit = can('settings'), mine = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
     const nowMin = toMin(d.now.slice(11, 16));
     patch($('#schHead', root), `<div class="sched-kinds">
       <section class="card sched-kind"><div class="kind-ic">${icon('schedule')}</div><div><h2>${t('regimeTitle')}</h2><p class="muted">${t('regimeWhat')}</p>
@@ -4277,8 +4675,8 @@ VIEWS.schedule = {
       <section class="card sched-kind"><div class="kind-ic">${icon('play')}</div><div><h2>${t('tasksTitle')}</h2><p class="muted">${t('tasksWhat')}</p>
         <ul class="kind-points"><li>${t('tasksPoint1')}</li><li>${t('tasksPoint2')}</li></ul>
         ${edit ? `<div class="form-actions start"><button class="btn primary" data-do="taskEdit">${icon('plus')}${t('taskNew')}</button><button class="btn" data-do="taskEdit" data-preset="restart">${t('presetRestart')}</button></div>` : ''}</div></section></div>
-      <p class="muted sched-clock">${icon('schedule')}${t('schedClock', { now: esc(d.now), tz: esc(d.timezone) })}${edit ? ` · <button class="link" data-do="schedTz" data-tz="${esc(d.timezone)}">${t('schedTimezoneChange')}</button>` : ''}</p>
-      ${edit && mine && mine !== d.timezone ? `<div class="note warn"><div>${t('schedTzOther', { tz: esc(mine) })} <button class="btn sm" data-do="schedTz" data-tz="${esc(mine)}" data-direct="1">${t('schedTzUse', { tz: esc(mine) })}</button></div></div>` : ''}`);
+      <p class="muted sched-clock">${icon('schedule')}${t('schedClock', { now: esc(d.now), tz: esc(d.timezone) })}${tzEdit ? ` · <button class="link" data-do="schedTz" data-tz="${esc(d.timezone)}">${t('schedTimezoneChange')}</button>` : ''}</p>
+      ${tzEdit && mine && mine !== d.timezone ? `<div class="note warn"><div>${t('schedTzOther', { tz: esc(mine) })} <button class="btn sm" data-do="schedTz" data-tz="${esc(mine)}" data-direct="1">${t('schedTzUse', { tz: esc(mine) })}</button></div></div>` : ''}`);
     patch($('#schList', root), d.schedules.length ? `<h2 class="sched-section">${t('regimeTitle')}</h2>` + d.schedules.map(s => `<section class="card regime ${s.enabled ? '' : 'disabled'}">
       <div class="card-head"><div><h2>${esc(s.name)}${s.enabled ? '' : ` <span class="tag">${t('disabled')}</span>`}</h2><div class="chips">${targetsText(s.targets)}<span>${t('nDevices', { n: s.devices.length })}</span></div></div>
         ${edit ? `<div class="tpl-actions"><button class="btn sm" data-do="schedEdit" data-id="${s.id}">${icon('edit')}${t('edit')}</button><button class="icon-btn danger" title="${t('delete')}" data-do="schedDelete" data-id="${s.id}">${icon('trash')}</button></div>` : ''}</div>

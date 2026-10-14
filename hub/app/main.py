@@ -15,8 +15,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import console, images, monitor, notify, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, templates
-from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, PERMS, ROLES, USERNAME_RE, APP_DIR,
+from . import access, console, images, monitor, notify, offsite, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, templates
+from .core import (ACTIONS, AGENT_VERSION, BOOT, DEVICE_PERMISSIONS, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, APP_DIR, require_device,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
                    sweep_commands, token_hash, validate_admin, version_tuple, DARK_MODES, COMMAND_SEQ)
@@ -46,6 +46,8 @@ app.include_router(templates.router)    # node templates
 app.include_router(schedule.router)     # schedules and scheduled actions
 app.include_router(rollout.router)      # staged updates of Docker nodes
 app.include_router(security.router)     # two-factor sign-in and single sign-on
+app.include_router(access.router)       # users, roles and user groups
+app.include_router(offsite.router)      # backups outside the server
 
 
 SECURITY_HEADERS = {
@@ -184,13 +186,13 @@ async def login(r: Request):
 
 @app.get('/api/me')
 def me(r: Request):
-    u = current_user(r)
+    u = current_user(r, None)
     return {**public_user(u), 'hub_version': HUB_VERSION, 'agent_version': AGENT_VERSION}
 
 
 @app.patch('/api/me')
 async def edit_me(r: Request):
-    u = current_user(r)
+    u = current_user(r, None)
     d = await body(r)
     token = None
     with db() as c:
@@ -219,11 +221,12 @@ def latest_versions():
 
 @app.get('/api/devices')
 def list_devices(r: Request):
-    current_user(r)
+    u = current_user(r)
     with db() as c:
         sweep_commands(c)
         failed = failed_counts(c)
-        rows = c.execute('SELECT * FROM devices ORDER BY name COLLATE NOCASE').fetchall()
+        rows = [x for x in c.execute('SELECT * FROM devices ORDER BY name COLLATE NOCASE').fetchall()
+                if u['access'].on('view', x)]
         pending = {x['device_id']: x['n'] for x in c.execute(
             "SELECT device_id, COUNT(*) n FROM commands WHERE state IN ('queued','delivered') GROUP BY device_id")}
     latest = latest_versions()
@@ -233,6 +236,7 @@ def list_devices(r: Request):
         d = build(row, failed.get(row['id'], 0), latest_caracal=latest)
         d['pending_commands'] = pending.get(row['id'], 0)
         d['muted_until'] = mutes.get(row['id'])
+        d['can'] = [p for p in DEVICE_PERMISSIONS if u['access'].on(p, row)]
         devices.append(d)
     return {'devices': devices, 'attention_count': sum(1 for d in devices if d['needs_attention']),
             'agent_version': AGENT_VERSION, 'hub_version': HUB_VERSION, 'server_time': time.time()}
@@ -240,10 +244,11 @@ def list_devices(r: Request):
 
 @app.get('/api/devices/{did}')
 def device_detail(did: str, r: Request):
-    current_user(r)
+    u = current_user(r)
     with db() as c:
         sweep_commands(c)
         row = get_device_row(c, did)
+        require_device(u, 'view', row)
         failed = failed_counts(c)
         cmds = [dict(x) for x in c.execute(
             'SELECT id, action, payload_json, state, result, created, updated, username FROM commands '
@@ -254,19 +259,22 @@ def device_detail(did: str, r: Request):
     d['commands'] = cmds
     d['pending_commands'] = sum(1 for x in cmds if x['state'] in ('queued', 'delivered'))
     d['muted_until'] = monitor.muted_until(did)
+    d['can'] = [p for p in DEVICE_PERMISSIONS if u['access'].on(p, row)]   # what this user may do with it
     return d
 
 
 @app.patch('/api/devices/{did}')
 async def edit_device(did: str, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     d = await body(r)
     with db() as c:
         row = dict(get_device_row(c, did))
+        require_device(u, 'devices', row)
         name = text(d.get('name', row['name']), 120) or did
         group = text(d.get('group', row['device_group']), 120)
         location = text(d.get('location', row['location']), 120)
         notes = text(d.get('notes', row['notes']), 2000)
+        _check_move(c, u, [row], group, location)
         c.execute('UPDATE devices SET name=?, device_group=?, location=?, notes=? WHERE id=?',
                   (name, group, location, notes, did))
         _ensure_org(c, group, location)
@@ -276,9 +284,10 @@ async def edit_device(did: str, r: Request):
 
 @app.delete('/api/devices/{did}')
 def delete_device(did: str, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     with db() as c:
         row = get_device_row(c, did)
+        require_device(u, 'devices', row)
         c.execute('DELETE FROM commands WHERE device_id=?', (did,))
         c.execute('DELETE FROM devices WHERE id=?', (did,))
         (SCREENSHOTS / f'{did}.jpg').unlink(missing_ok=True)
@@ -291,16 +300,36 @@ def delete_device(did: str, r: Request):
 @app.post('/api/devices/assign')
 async def assign_devices(r: Request):
     """Bulk assignment of group and/or location. Missing key = unchanged, empty string = cleared."""
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     d = await body(r)
     ids = [str(x) for x in d.get('device_ids') or []]
     with db() as c:
+        rows = [get_device_row(c, i) for i in ids]
+        for row in rows:
+            require_device(u, 'devices', row)
+        _check_move(c, u, [dict(x) for x in rows], text(d['group'], 120) if 'group' in d else None,
+                    text(d['location'], 120) if 'location' in d else None)
         for key, col in (('group', 'device_group'), ('location', 'location')):
             if key in d:
                 c.executemany(f'UPDATE devices SET {col}=? WHERE id=?', [(text(d[key], 120), i) for i in ids])
         _ensure_org(c, text(d.get('group'), 120), text(d.get('location'), 120))
     audit(u, 'device.assign', ','.join(ids), {k: d[k] for k in ('group', 'location') if k in d})
     return {'ok': True}
+
+
+def _check_move(c, u, rows, group, location):
+    """A user with a scope may only move devices within it and only to groups and locations that exist.
+    group/location None = unchanged."""
+    if u['access'].everywhere('devices'):
+        return
+    for kind, table, value in (('group', 'device_groups', group), ('location', 'device_locations', location)):
+        if value and not c.execute(f'SELECT 1 FROM {table} WHERE name=?', (value,)).fetchone():
+            raise HTTPException(403, f'new_{kind}_forbidden')
+    for row in rows:
+        moved = {**row, **({'device_group': group} if group is not None else {}),
+                 **({'location': location} if location is not None else {})}
+        if not u['access'].on('devices', moved):
+            raise HTTPException(403, 'move_outside_scope')
 
 
 def _ensure_org(c, group, location):
@@ -473,6 +502,17 @@ def validate_command(c, row, action, payload):
                    'xaddr': text(payload.get('xaddr'), 500)}
     if action == 'camera_discover':
         payload = {}
+    if action == 'camera_preview':   # one picture of a stream: an address with credentials, or a stored camera's stream
+        if payload.get('id') not in (None, ''):
+            try:
+                payload = {'id': int(payload['id']), 'index': max(0, min(int(payload.get('index') or 0), CAMERA_MAX - 1))}
+            except (TypeError, ValueError):
+                raise HTTPException(400, 'item_required')
+        else:
+            url = text(payload.get('url'), 2000)
+            if not url.lower().startswith(CAMERA_SCHEMES) or any(ch.isspace() for ch in url):
+                raise HTTPException(400, 'invalid_stream_url')
+            payload = {'url': url, 'username': text(payload.get('username'), 200), 'password': str(payload.get('password') or '')[:200]}
     if action == 'screen':
         if payload.get('state') not in ('on', 'off'):
             raise HTTPException(400, 'invalid_value')
@@ -515,6 +555,27 @@ def validate_timing(d):
         raise HTTPException(400, 'invalid_duration')
     if 'scale' in out and not 0.5 <= out['scale'] <= 3:
         raise HTTPException(400, 'invalid_scale')
+    out.update(validate_validity(d))
+    return out
+
+
+def validate_validity(d):
+    """An item shown only from / until a time (Unix time; None = without a limit). CARACAL 2026.10.14 and newer."""
+    out = {}
+    for key in ('valid_from', 'valid_until'):
+        if key not in d:
+            continue
+        if d[key] in (None, ''):
+            out[key] = None
+            continue
+        try:
+            out[key] = float(d[key])
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'invalid_validity')
+        if not 946684800 <= out[key] <= 4102444800:
+            raise HTTPException(400, 'invalid_validity')
+    if out.get('valid_from') and out.get('valid_until') and out['valid_until'] <= out['valid_from']:
+        raise HTTPException(400, 'invalid_validity')
     return out
 
 
@@ -592,7 +653,7 @@ SOUND_MAX = 5 * 1024 ** 2
 # command -> local endpoint of the node, for commands that old agents do not know at all
 NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot', 'player_settings': 'player_settings',
                   'add_camera': 'add_camera', 'update_camera': 'update_camera', 'camera_onvif': 'camera_onvif',
-                  'camera_discover': 'camera_discover'}
+                  'camera_discover': 'camera_discover', 'camera_preview': 'camera_preview'}
 CAMERA_SCHEMES, CAMERA_LAYOUTS, CAMERA_MAX = ('rtsp://', 'rtsps://', 'http://', 'https://'), ('auto', '2', '2x2', '3x3'), 9
 # what only newer agents can do (they report their version in every heartbeat)
 AGENT_FEATURES = {'reinstall_node': (4, 13, 0), 'diagnostics': (4, 13, 0), 'player_settings': (4, 13, 0),
@@ -629,6 +690,7 @@ def validate_camera(d, edit=False):
             raise HTTPException(400, 'invalid_stream_url')
         out['streams'].append({'name': text(st.get('name'), 80), 'url': url, 'username': text(st.get('username'), 200),
                                'password': str(st.get('password') or '')[:200]})
+    out.update(validate_validity(d))
     return out
 
 
@@ -820,9 +882,10 @@ def validate_grafana(d, required=True):
 async def device_command(did: str, r: Request):
     d = await body(r)
     action = str(d.get('action', ''))
-    u = current_user(r, ACTIONS.get(action, ('admin',))[0])
+    u = current_user(r, ACTIONS.get(action, ('settings',))[0])
     with db() as c:
         row = get_device_row(c, did)
+        require_device(u, ACTIONS.get(action, ('settings',))[0], row)
         payload = validate_command(c, row, action, d.get('payload'))
         cid = queue_command(c, did, action, payload, u['username'])
     audit(u, 'command.' + action, did, redact(action, payload))
@@ -833,7 +896,8 @@ async def device_command(did: str, r: Request):
 async def bulk_command(r: Request):
     d = await body(r)
     action = str(d.get('action', ''))
-    u = current_user(r, ACTIONS.get(action, ('admin',))[0])
+    perm = ACTIONS.get(action, ('settings',))[0]
+    u = current_user(r, perm)
     ids = list(dict.fromkeys(str(x) for x in d.get('device_ids') or []))
     if not ids:
         raise HTTPException(400, 'no_devices')
@@ -842,6 +906,7 @@ async def bulk_command(r: Request):
         for did in ids:
             try:
                 row = get_device_row(c, did)
+                require_device(u, perm, row)
                 payload = validate_command(c, row, action, d.get('payload'))
                 queued.append(queue_command(c, did, action, payload, u['username'], batch))
             except HTTPException as e:
@@ -854,8 +919,9 @@ async def bulk_command(r: Request):
 
 @app.get('/api/commands')
 def list_commands(r: Request, device_id: str = '', state: str = '', limit: int = 300):
-    current_user(r)
-    q, args = 'SELECT c.*, d.name device_name FROM commands c LEFT JOIN devices d ON d.id=c.device_id WHERE 1=1', []
+    u = current_user(r)
+    q, args = ('SELECT c.*, d.name device_name, d.device_group, d.location FROM commands c '
+               'LEFT JOIN devices d ON d.id=c.device_id WHERE 1=1', [])
     if device_id:
         q += ' AND c.device_id=?'
         args.append(device_id)
@@ -867,6 +933,8 @@ def list_commands(r: Request, device_id: str = '', state: str = '', limit: int =
     with db() as c:
         sweep_commands(c)
         rows = [dict(x) for x in c.execute(q, args)]
+    rows = [x for x in rows if u['access'].on('view', {'id': x['device_id'], 'device_group': x.pop('device_group'),
+                                                         'location': x.pop('location')})]
     for x in rows:
         x['payload_json'] = redact_json(x['action'], x['payload_json'])
     return rows
@@ -874,14 +942,16 @@ def list_commands(r: Request, device_id: str = '', state: str = '', limit: int =
 
 @app.get('/api/commands/{cid}')
 def get_command(cid: int, r: Request):
-    current_user(r)
+    u = current_user(r)
     with db() as c:
         sweep_commands(c)
-        row = c.execute('SELECT c.*, d.name device_name FROM commands c LEFT JOIN devices d ON d.id=c.device_id '
-                        'WHERE c.id=?', (cid,)).fetchone()
-    if not row:
+        row = c.execute('SELECT c.*, d.name device_name, d.device_group, d.location FROM commands c '
+                        'LEFT JOIN devices d ON d.id=c.device_id WHERE c.id=?', (cid,)).fetchone()
+    if not row or not u['access'].on('view', {'id': row['device_id'], 'device_group': row['device_group'], 'location': row['location']}):
         raise HTTPException(404, 'not_found')
     x = dict(row)
+    x.pop('device_group')
+    x.pop('location')
     x['payload_json'] = redact_json(x['action'], x['payload_json'])
     return x
 
@@ -890,6 +960,9 @@ def get_command(cid: int, r: Request):
 def cancel_command(cid: int, r: Request):
     u = current_user(r, 'control')
     with db() as c:
+        row = c.execute('SELECT d.* FROM commands c JOIN devices d ON d.id=c.device_id WHERE c.id=?', (cid,)).fetchone()
+        if row:
+            require_device(u, 'control', row)
         n = c.execute("UPDATE commands SET state='cancelled', updated=? WHERE id=? AND state='queued'",
                       (time.time(), cid)).rowcount
         scrub_secrets(c)
@@ -951,9 +1024,11 @@ async def copy_content(r: Request):
     if not targets:
         raise HTTPException(400, 'no_devices')
     with db() as c:
-        source = build(get_device_row(c, src), full=True)
+        src_row = get_device_row(c, src)
+        require_device(u, 'view', src_row)
+        source = build(src_row, full=True)
         for t in targets:
-            get_device_row(c, t)
+            require_device(u, 'content', get_device_row(c, t))
     asset_ids, col_ids = d.get('asset_ids'), d.get('collection_ids')
     is_col = lambda a: a['kind'] == COLLECTION_KIND
     if asset_ids is None and col_ids is None:
@@ -1004,17 +1079,24 @@ async def copy_content(r: Request):
 
 @app.get('/api/org')
 def list_org(r: Request):
-    current_user(r)
+    u = current_user(r)
     now = time.time()
     out = {}
     with db() as c:
+        devices = [x for x in c.execute('SELECT * FROM devices') if u['access'].on('view', x)]
+        everything = u['access'].everywhere('view')
+        # a user with a scope sees the groups and locations of the scope and of the devices the user sees
+        scopes = [s for _, s in u['access'].grants if s is not None]
         for kind, (table, col) in ORG.items():
-            stats = {x[col]: x for x in c.execute(
-                f'SELECT {col}, COUNT(*) total, SUM(CASE WHEN last_seen>? THEN 1 ELSE 0 END) online '
-                f'FROM devices GROUP BY {col}', (now - 35,))}
-            out[kind] = [{**dict(x), 'total': stats[x['name']]['total'] if x['name'] in stats else 0,
-                          'online': (stats[x['name']]['online'] or 0) if x['name'] in stats else 0}
-                         for x in c.execute(f'SELECT * FROM {table} ORDER BY name COLLATE NOCASE')]
+            stats = {}
+            for x in devices:
+                st = stats.setdefault(x[col], {'total': 0, 'online': 0})
+                st['total'] += 1
+                st['online'] += 1 if (x['last_seen'] or 0) > now - 35 else 0
+            named = {n for s in scopes for n in s[kind]}
+            out[kind] = [{**dict(x), 'total': stats.get(x['name'], {}).get('total', 0), 'online': stats.get(x['name'], {}).get('online', 0)}
+                         for x in c.execute(f'SELECT * FROM {table} ORDER BY name COLLATE NOCASE')
+                         if everything or x['name'] in stats or x['name'] in named]
     return out
 
 
@@ -1026,7 +1108,9 @@ def _org(kind):
 
 @app.post('/api/org/{kind}')
 async def create_org(kind: str, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
+    if not u['access'].everywhere('devices'):
+        raise HTTPException(403, 'forbidden')
     table, _ = _org(kind)
     d = await body(r)
     name = text(d.get('name'), 120)
@@ -1047,7 +1131,9 @@ async def create_org(kind: str, r: Request):
 
 @app.patch('/api/org/{kind}/{name}')
 async def edit_org(kind: str, name: str, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
+    if not u['access'].everywhere('devices'):
+        raise HTTPException(403, 'forbidden')
     table, col = _org(kind)
     d = await body(r)
     new = text(d.get('name', name), 120)
@@ -1062,103 +1148,31 @@ async def edit_org(kind: str, name: str, r: Request):
         if kind == 'locations':
             c.execute(f'UPDATE {table} SET address=? WHERE name=?', (text(d.get('address'), 500), new))
         c.execute(f'UPDATE devices SET {col}=? WHERE {col}=?', (new, name))
+        if new != name:
+            access.rename_in_scopes(c, kind, name, new)
     audit(u, f'{kind}.edit', name, {'name': new})
     return {'ok': True}
 
 
 @app.delete('/api/org/{kind}/{name}')
 def delete_org(kind: str, name: str, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
+    if not u['access'].everywhere('devices'):
+        raise HTTPException(403, 'forbidden')
     table, col = _org(kind)
     with db() as c:
         c.execute(f'DELETE FROM {table} WHERE name=?', (name,))
         c.execute(f"UPDATE devices SET {col}='' WHERE {col}=?", (name,))
+        access.rename_in_scopes(c, kind, name)
     audit(u, f'{kind}.delete', name)
     return {'ok': True}
 
 
 # ---------------------------------------------------------------- users, audit, settings
 
-@app.get('/api/users')
-def list_users(r: Request):
-    current_user(r, 'admin')
-    with db() as c:
-        return [dict(x) for x in c.execute(
-            "SELECT id, username, role, language, enabled, created, totp_secret != '' AS totp, must_change_password, "
-            "password_hash LIKE 'sso$%' AS sso FROM users ORDER BY username COLLATE NOCASE")]
-
-
-@app.post('/api/users')
-async def create_user(r: Request):
-    u = current_user(r, 'admin')
-    d = await body(r)
-    username, password = text(d.get('username'), 64), str(d.get('password', ''))
-    role, language = d.get('role', 'viewer'), d.get('language', 'cs')
-    if not USERNAME_RE.fullmatch(username):
-        raise HTTPException(400, 'invalid_username')
-    if role not in ROLES or language not in LANGUAGES:
-        raise HTTPException(400, 'invalid_role')
-    if len(password) < 10:
-        raise HTTPException(400, 'password_too_short')
-    with db() as c:
-        if c.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
-            raise HTTPException(409, 'already_exists')
-        c.execute('INSERT INTO users(username, password_hash, role, language, enabled, created, must_change_password) '
-                  'VALUES(?,?,?,?,1,?,?)', (username, hash_password(password), role, language, time.time(), int(bool(d.get('must_change')))))
-    audit(u, 'user.create', username, {'role': role, 'must_change': bool(d.get('must_change'))})
-    return {'ok': True}
-
-
-def _other_admins(c, uid):
-    return c.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1 AND id!=?", (uid,)).fetchone()[0]
-
-
-@app.patch('/api/users/{uid}')
-async def edit_user(uid: int, r: Request):
-    u = current_user(r, 'admin')
-    d = await body(r)
-    with db() as c:
-        target = c.execute('SELECT * FROM users WHERE id=?', (uid,)).fetchone()
-        if not target:
-            raise HTTPException(404, 'not_found')
-        role = d.get('role', target['role'])
-        language = d.get('language', target['language'])
-        enabled = 1 if d.get('enabled', bool(target['enabled'])) else 0
-        if role not in ROLES or language not in LANGUAGES:
-            raise HTTPException(400, 'invalid_role')
-        if (role != 'admin' or not enabled) and target['role'] == 'admin' and not _other_admins(c, uid):
-            raise HTTPException(409, 'last_admin')
-        c.execute('UPDATE users SET role=?, language=?, enabled=? WHERE id=?', (role, language, enabled, uid))
-        if d.get('password'):
-            if len(str(d['password'])) < 10:
-                raise HTTPException(400, 'password_too_short')
-            c.execute('UPDATE users SET password_hash=?, must_change_password=? WHERE id=?',
-                      (hash_password(str(d['password'])), int(bool(d.get('must_change'))), uid))
-    audit(u, 'user.edit', target['username'],
-          {'role': role, 'language': language, 'enabled': bool(enabled), 'password_reset': bool(d.get('password')),
-           'must_change': bool(d.get('password') and d.get('must_change'))})
-    return {'ok': True}
-
-
-@app.delete('/api/users/{uid}')
-def delete_user(uid: int, r: Request):
-    u = current_user(r, 'admin')
-    with db() as c:
-        target = c.execute('SELECT * FROM users WHERE id=?', (uid,)).fetchone()
-        if not target:
-            raise HTTPException(404, 'not_found')
-        if target['id'] == u['id']:
-            raise HTTPException(409, 'cannot_delete_self')
-        if target['role'] == 'admin' and not _other_admins(c, uid):
-            raise HTTPException(409, 'last_admin')
-        c.execute('DELETE FROM users WHERE id=?', (uid,))
-    audit(u, 'user.delete', target['username'])
-    return {'ok': True}
-
-
 @app.get('/api/audit')
 def list_audit(r: Request, q: str = '', limit: int = 500):
-    current_user(r, 'manage')
+    current_user(r, 'audit')
     sql, args = 'SELECT * FROM audit', []
     if q:
         sql += ' WHERE username LIKE ? OR action LIKE ? OR target LIKE ? OR detail LIKE ?'
@@ -1171,16 +1185,15 @@ def list_audit(r: Request, q: str = '', limit: int = 500):
 
 @app.get('/api/settings')
 def settings(r: Request):
-    current_user(r, 'admin')
-    return {'enroll_token': cfg()['enroll_token'], 'hub_version': HUB_VERSION, 'agent_version': AGENT_VERSION,
-            'roles': {role: sorted(p for p, rs in PERMS.items() if role in rs) for role in ROLES}}
+    current_user(r, 'settings')   # the enrollment token
+    return {'enroll_token': cfg()['enroll_token'], 'hub_version': HUB_VERSION, 'agent_version': AGENT_VERSION}
 
 
 # ---------------------------------------------------------------- SSH provisioning jobs
 
 @app.post('/api/provision')
 async def provision(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'install')
     d = await body(r)
     params = {k: text(d.get(k), 8000) for k in ('host', 'username', 'password', 'private_key', 'passphrase', 'name',
                                                  'hub_url', 'group', 'location')}
@@ -1215,7 +1228,7 @@ async def provision(r: Request):
 @app.post('/api/discover')
 async def discover(r: Request):
     """Scan a local network for devices with SSH (new Raspberry Pis to install)."""
-    u = current_user(r, 'manage')
+    u = current_user(r, 'install')
     d = await body(r)
     try:
         hosts = provisioning.discovery_hosts(text(d.get('cidr'), 64))
@@ -1230,14 +1243,14 @@ async def discover(r: Request):
 
 @app.get('/api/jobs')
 def list_jobs(r: Request, limit: int = 100):
-    current_user(r)
+    current_user(r, 'install')
     with db() as c:
         return [dict(x) for x in c.execute('SELECT * FROM jobs ORDER BY id DESC LIMIT ?', (max(1, min(limit, 1000)),))]
 
 
 @app.get('/api/jobs/{jid}')
 def get_job(jid: int, r: Request):
-    current_user(r)
+    current_user(r, 'install')
     with db() as c:
         row = c.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone()
     if not row:
@@ -1375,7 +1388,8 @@ async def command_result(did: str, cid: int, r: Request):
         if row['state'] not in ('delivered', 'timeout'):
             return {'ok': True, 'ignored': True}
         # a diagnostics report is longer than other results (it is JSON, so it must not be cut)
-        limit = 200000 if row['action'] == 'diagnostics' else 16000
+        # a diagnostics report and a camera picture are longer than other results (JSON, so they must not be cut)
+        limit = 200000 if row['action'] in ('diagnostics', 'camera_preview') else 16000
         c.execute('UPDATE commands SET state=?, result=?, updated=? WHERE id=?',
                   ('completed' if ok else 'failed', result[-limit:], time.time(), cid))
         if ok and row['action'] == 'reinstall_node':
@@ -1445,9 +1459,9 @@ async def device_screenshot(did: str, r: Request):
 
 @app.get('/api/devices/{did}/screenshot')
 def device_screenshot_file(did: str, r: Request):
-    current_user(r)
+    u = current_user(r)
     with db() as c:
-        get_device_row(c, did)
+        require_device(u, 'view', get_device_row(c, did))
     path = SCREENSHOTS / f'{did}.jpg'
     if not path.exists():
         raise HTTPException(404, 'not_found')
@@ -1458,9 +1472,10 @@ def device_screenshot_file(did: str, r: Request):
 def device_notify_image(did: str, r: Request):
     """The picture of the device's notification look, for the preview in the look editor: the hub's copy of the
     file the device reports (by checksum), so only pictures sent through Fleet can be shown."""
-    current_user(r)
+    u = current_user(r)
     with db() as c:
         row = get_device_row(c, did)
+        require_device(u, 'view', row)
         image = (notifications_of(json.loads(row['status_json'] or '{}')) or {}).get('image') or {}
         f = c.execute("SELECT * FROM files WHERE sha256=? AND kind='image' ORDER BY rowid DESC LIMIT 1",
                       (str(image.get('sha256') or ''),)).fetchone() if image.get('sha256') else None

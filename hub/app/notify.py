@@ -67,14 +67,14 @@ def _public(row):
 
 @router.get('/api/notify-tokens')
 def list_tokens(r: Request):
-    current_user(r, 'manage')
+    current_user(r, 'notify_api')
     with db() as c:
         return [_public(x) for x in c.execute('SELECT * FROM notify_tokens ORDER BY name COLLATE NOCASE, id')]
 
 
 @router.post('/api/notify-tokens')
 async def create_token(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'notify_api')
     d = await _json(r)
     name = _text(d.get('name'), 60)
     if not name:
@@ -93,7 +93,7 @@ async def create_token(r: Request):
 
 @router.patch('/api/notify-tokens/{tid}')
 async def edit_token(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'notify_api')
     d = await _json(r)
     with db() as c:
         row = c.execute('SELECT * FROM notify_tokens WHERE id=?', (tid,)).fetchone()
@@ -111,7 +111,7 @@ async def edit_token(tid: int, r: Request):
 
 @router.delete('/api/notify-tokens/{tid}')
 def delete_token(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'notify_api')
     with db() as c:
         row = c.execute('SELECT name FROM notify_tokens WHERE id=?', (tid,)).fetchone()
         if not row:

@@ -4,3 +4,4 @@ paramiko==3.5.1
 requests==2.32.3
 tzdata==2025.2
 segno==1.6.6
+smbprotocol==1.16.1

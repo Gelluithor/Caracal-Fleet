@@ -109,7 +109,7 @@ def _valid_logo(data, ext):
 
 @router.post('/api/branding/logo')
 async def upload_logo(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     ext = LOGO_TYPES.get(r.headers.get('Content-Type', '').split(';')[0].strip())
     if not ext:
         raise HTTPException(400, 'unsupported_file')
@@ -130,7 +130,7 @@ async def upload_logo(r: Request):
 
 @router.delete('/api/branding/logo')
 def delete_logo(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     for old in BRANDING.glob('logo.*'):
         old.unlink()
     audit(u, 'system.logo_delete')
@@ -166,7 +166,7 @@ def _build_backup(path):
 
 @router.get('/api/backup')
 async def export_backup(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     fd, name = tempfile.mkstemp(prefix='backup-', suffix='.zip', dir=DATA)
     os.close(fd)
     path = Path(name)
@@ -219,12 +219,48 @@ def restart_process():
     os._exit(3)
 
 
+def stage_restore(archive, passphrase=''):
+    """Check a backup (decrypting it first when it is encrypted) and unpack it for the next start; returns its
+    manifest."""
+    from . import offsite
+    staging = DATA / 'restore-staging'
+    plain = None
+    try:
+        if offsite.is_encrypted(archive):
+            passphrase = passphrase or offsite.settings()['passphrase']
+            if not passphrase:
+                raise HTTPException(400, 'passphrase_required')
+            plain = archive.with_suffix('.zip')
+            try:
+                offsite.decrypt_file(archive, plain, passphrase)
+            except offsite.TargetError as e:
+                raise HTTPException(400, str(e))
+            archive = plain
+        shutil.rmtree(staging, ignore_errors=True)
+        manifest = _validate_and_unpack(archive, staging)
+        shutil.rmtree(RESTORE_DIR, ignore_errors=True)
+        staging.rename(RESTORE_DIR)
+        return manifest
+    finally:
+        if plain:
+            plain.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+async def restore_file(u, archive, passphrase='', source='upload'):
+    manifest = await run_in_threadpool(stage_restore, archive, passphrase)
+    audit(u, 'system.restore', source, {'backup_created': manifest.get('created'),
+                                        'backup_hub_version': manifest.get('hub_version')})
+    threading.Thread(target=restart_process, daemon=True).start()
+    return {'ok': True, 'restart': True}
+
+
 @router.post('/api/backup/restore')
 async def restore_backup(r: Request):
-    u = current_user(r, 'admin')
-    fd, name = tempfile.mkstemp(prefix='restore-', suffix='.zip', dir=DATA)
+    """An uploaded backup (.zip, or .zip.enc with the passphrase in X-Backup-Passphrase)."""
+    u = current_user(r, 'settings')
+    fd, name = tempfile.mkstemp(prefix='restore-', suffix='.bin', dir=DATA)
     archive, size = Path(name), 0
-    staging = DATA / 'restore-staging'
     try:
         with os.fdopen(fd, 'wb') as f:
             async for chunk in r.stream():
@@ -232,23 +268,16 @@ async def restore_backup(r: Request):
                 if size > BACKUP_MAX:
                     raise HTTPException(413, 'file_too_large')
                 f.write(chunk)
-        shutil.rmtree(staging, ignore_errors=True)
-        manifest = await run_in_threadpool(_validate_and_unpack, archive, staging)
-        shutil.rmtree(RESTORE_DIR, ignore_errors=True)
-        staging.rename(RESTORE_DIR)
+        return await restore_file(u, archive, r.headers.get('X-Backup-Passphrase', ''))
     finally:
         archive.unlink(missing_ok=True)
-        shutil.rmtree(staging, ignore_errors=True)
-    audit(u, 'system.restore', '', {'backup_created': manifest.get('created'),
-                                    'backup_hub_version': manifest.get('hub_version')})
-    threading.Thread(target=restart_process, daemon=True).start()
-    return {'ok': True, 'restart': True}
 
 
 # ---------------------------------------------------------------- scheduled backups
 
 # Backups made by the hub itself, once a day at the chosen hour, kept in the data folder (the newest `keep` ones).
-# They are full backups like the downloaded ones; copying them off the server is up to the administrator.
+# They are full backups like the downloaded ones; every stored backup is also copied to the destinations outside
+# the server (offsite.py).
 BACKUPS = DATA / 'backups'
 BACKUP_FILE = re.compile(r'^caracal-fleet-backup-\d{8}-\d{4}\.zip$')
 BACKUP_DEFAULTS = {'enabled': False, 'hour': 2, 'keep': 7}
@@ -287,6 +316,8 @@ def backup_tick(now=None):
     full['backup_day'] = today
     save_cfg(full)
     path = make_scheduled_backup(now)
+    from . import offsite
+    offsite.upload_async(path)
     with db() as c:
         c.execute('INSERT INTO audit(username, action, target, detail, created) VALUES(?,?,?,?,?)',
                   ('schedule', 'system.backup', path.name, json.dumps({'size': path.stat().st_size, 'scheduled': True}), time.time()))
@@ -302,14 +333,14 @@ def _backup_list():
 
 @router.get('/api/backups')
 def list_backups(r: Request):
-    current_user(r, 'admin')
+    current_user(r, 'settings')
     return {'settings': backup_conf(), 'backups': _backup_list(), 'folder': str(BACKUPS)}
 
 
 @router.put('/api/backups/settings')
 async def backup_settings(r: Request):
     from .core import cfg, save_cfg
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     d = await _json(r)
     try:
         conf = {'enabled': bool(d.get('enabled')), 'hour': int(d.get('hour', 2)), 'keep': int(d.get('keep', 7))}
@@ -326,8 +357,10 @@ async def backup_settings(r: Request):
 
 @router.post('/api/backups/run')
 async def run_backup(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     path = await run_in_threadpool(make_scheduled_backup)
+    from . import offsite
+    offsite.upload_async(path)
     audit(u, 'system.backup', path.name, {'size': path.stat().st_size, 'stored': True})
     return {'name': path.name, 'size': path.stat().st_size}
 
@@ -340,7 +373,7 @@ def _backup_path(name):
 
 @router.get('/api/backups/{name}')
 def download_backup(name: str, r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     path = _backup_path(name)
     audit(u, 'system.backup_download', name)
     return FileResponse(path, media_type='application/zip', filename=name)
@@ -348,7 +381,7 @@ def download_backup(name: str, r: Request):
 
 @router.delete('/api/backups/{name}')
 def delete_backup(name: str, r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     _backup_path(name).unlink()
     audit(u, 'system.backup_delete', name)
     return {'ok': True}
@@ -359,7 +392,7 @@ def delete_backup(name: str, r: Request):
 @router.get('/api/system/update')
 async def update_info(r: Request, refresh: bool = False):
     from . import selfupdate
-    current_user(r, 'admin')
+    current_user(r, 'settings')
     data = await run_in_threadpool(selfupdate.check, refresh)
     return {**data, **selfupdate.status()}
 
@@ -367,9 +400,18 @@ async def update_info(r: Request, refresh: bool = False):
 @router.post('/api/system/update')
 async def update_start(r: Request):
     from . import selfupdate
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     d = await _json(r)
     version = str(d.get('version') or '').strip()
-    await run_in_threadpool(selfupdate.start, version, u['username'])
-    audit(u, 'system.update', version, {'from': HUB_VERSION})
+    restore = str(d.get('restore') or '').strip()
+    await run_in_threadpool(selfupdate.start, version, u['username'], restore)
+    audit(u, 'system.update', version, {'from': HUB_VERSION, 'restore': restore})
     return {'ok': True}
+
+
+@router.get('/api/system/update/backups')
+async def update_backups(r: Request, version: str = ''):
+    """The backups made by an older version: going back to it can bring back its data too."""
+    from . import selfupdate
+    current_user(r, 'settings')
+    return {'backups': await run_in_threadpool(selfupdate.backups_of, version.strip()[:40])}

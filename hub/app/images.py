@@ -92,7 +92,9 @@ async def get_node_image(r: Request, refresh: bool = False):
 
 @router.put('/api/node-image')
 async def set_node_image(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'updates')
+    if not u['access'].everywhere('updates'):
+        raise HTTPException(403, 'forbidden')
     d = await r.json()
     image = str(d.get('image', '')).strip().lower()
     if image and not IMAGE_RE.fullmatch(image):
@@ -111,8 +113,8 @@ def _queue(r_user, ids, action, payload, wanted_runtime):
     with db() as c:
         for did in ids:
             row = c.execute('SELECT * FROM devices WHERE id=?', (did,)).fetchone()
-            if not row:
-                skipped.append({'device_id': did, 'reason': 'device_not_found'})
+            if not row or not r_user['access'].on('updates', row):
+                skipped.append({'device_id': did, 'reason': 'device_not_found' if not row else 'forbidden'})
                 continue
             d = build(row)
             if not d['online']:
@@ -151,7 +153,7 @@ def _prepare_for_fleet_nodes(ids, image, version):
 @router.post('/api/node-image/deploy')
 async def deploy_version(r: Request):
     """Update Docker nodes to an image version."""
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
     version, ids, image = await _deploy_body(r)
     res = _queue(u, ids, 'update_caracal', {'version': version, 'image': image}, 'docker')
     _prepare_for_fleet_nodes(ids, image, version)
@@ -162,7 +164,7 @@ async def deploy_version(r: Request):
 @router.post('/api/node-image/convert')
 async def convert_nodes(r: Request):
     """Convert classic CARACAL nodes to Docker (data in /var/lib/caracal are kept)."""
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
     version, ids, image = await _deploy_body(r)
     d = await r.json()
     # optional: the web administrator of the converted nodes (created, or a new name and password)

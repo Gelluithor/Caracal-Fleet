@@ -19,7 +19,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from .core import DARK_MODES, FILES, audit, current_user, db, new_batch, queue_command
+from .core import DARK_MODES, FILES, audit, current_user, db, new_batch, queue_command, require_device
 from .devices import build, notifications_of, overlay_of, player_settings_of
 
 router = APIRouter()
@@ -217,7 +217,7 @@ def list_templates(r: Request):
 
 @router.post('/api/templates')
 async def create_template(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     d = await _json(r)
     name = _text(d.get('name'), 120)
     if not name:
@@ -236,12 +236,13 @@ async def create_template(r: Request):
 async def template_from_device(r: Request):
     """A template with what a node has now: notifications and their look (with the picture when it was sent through
     Fleet), the countdown bar, group and location, and optionally its playlist as a new global playlist."""
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     d = await _json(r)
     with db() as c:
         row = c.execute('SELECT * FROM devices WHERE id=?', (_text(d.get('device_id'), 64),)).fetchone()
         if not row:
             raise HTTPException(404, 'device_not_found')
+        require_device(u, 'view', row)
         status = json.loads(row['status_json'] or '{}')
         device = build(row, full=True)
         name = _text(d.get('name'), 120) or device['name']
@@ -298,7 +299,7 @@ def get_template(tid: int, r: Request):
 
 @router.patch('/api/templates/{tid}')
 async def edit_template(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     d = await _json(r)
     with db() as c:
         row = _row(c, tid)
@@ -314,7 +315,7 @@ async def edit_template(tid: int, r: Request):
 
 @router.delete('/api/templates/{tid}')
 def delete_template(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     with db() as c:
         row = _row(c, tid)
         c.execute('DELETE FROM node_templates WHERE id=?', (tid,))
@@ -334,7 +335,7 @@ def _unpin(c, fid):
 async def template_image(tid: int, r: Request):
     """The picture of the notification look: an uploaded image (file_id) or {"reset": true}."""
     from .main import validate_notify_image
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     d = await _json(r)
     with db() as c:
         row = _row(c, tid)
@@ -367,7 +368,7 @@ def template_image_file(tid: int, r: Request):
 
 @router.post('/api/templates/{tid}/apply')
 async def apply_template(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     d = await _json(r)
     targets = list(dict.fromkeys(str(x) for x in d.get('target_ids') or []))
     if not targets:
@@ -376,11 +377,15 @@ async def apply_template(tid: int, r: Request):
     with db() as c:
         tpl = _row(c, tid)
         rows = []
+        data = json.loads(tpl['data_json'] or '{}')
         for t in targets:
             row = c.execute('SELECT * FROM devices WHERE id=?', (t,)).fetchone()
             if not row:
                 raise HTTPException(404, 'device_not_found')
+            require_device(u, 'devices', row)
             rows.append(row)
+        from .main import _check_move   # late import: main imports this module
+        _check_move(c, u, [dict(x) for x in rows], data.get('group') or None, data.get('location') or None)
         results = [apply_to(c, tpl, row, u['username'], batch) for row in rows]
     for res in results:
         audit(u, 'template.apply', res['device_id'], {'template': tpl['name'], 'template_id': tid, 'batch': batch,

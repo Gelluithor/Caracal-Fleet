@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = {'fastapi': 'fastapi', 'starlette': 'fastapi', 'uvicorn': 'uvicorn', 'paramiko': 'paramiko',
-        'requests': 'requests', 'segno': 'segno'}
+        'requests': 'requests', 'segno': 'segno', 'smbclient': 'smbprotocol', 'smbprotocol': 'smbprotocol'}
 
 
 def test_hub_imports_are_runtime_requirements():

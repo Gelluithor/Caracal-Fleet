@@ -246,7 +246,7 @@ def test_alpine_raspberry_pi_image(client, admin_headers, monkeypatch, tmp_path)
                                                                 'user': 'admin', 'password': 'secret-pass'})
     assert r.status_code == 200, r.text
     assert client.post('/api/sdcard', headers=admin_headers, json={'os': 'alpine-rpi', 'hub_url': 'https://fleet.example',
-                                                                   'wifi_ssid': 'x', 'wifi_password': '12345678', 'wifi_country': 'CZ'}).json()['detail'] == 'wifi_unsupported'
+                                                                   'wifi_ssid': 'x', 'wifi_password': '12345678', 'wifi_country': 'CZ'}).status_code == 200
     img = gzip.decompress(r.content)
     assert img[510:512] == b'\x55\xaa'
     status, ptype, start, size = struct.unpack('<B3xB3xII', img[446:462])
@@ -263,3 +263,23 @@ def test_alpine_raspberry_pi_image(client, admin_headers, monkeypatch, tmp_path)
     monkeypatch.setattr(requests, 'get', lambda url, **kw: Resp(b'', yaml) if url.endswith('.yaml') else Resp(b'tampered'))
     shutil.rmtree(tmp_path / 'cache')
     assert client.post('/api/sdcard', headers=admin_headers, json={'os': 'alpine-rpi', 'hub_url': 'https://fleet.example'}).json()['detail'] == 'alpine_checksum'
+
+
+def test_alpine_rpi_wifi():
+    """The card's overlay carries the Wi-Fi: the name in hex and the derived key, never the password itself."""
+    import hashlib
+    import io
+    import tarfile
+    from app import sdcard
+    o = sdcard._options({'os': 'alpine-rpi', 'hub_url': 'https://fleet.example', 'wifi_ssid': 'Kancelář "2"',
+                         'wifi_password': 'heslo s mezerou', 'wifi_country': 'CZ'})
+    tar = tarfile.open(fileobj=io.BytesIO(sdcard.alpine_files(o)['caracal.apkovl.tar.gz']))
+    conf = tar.extractfile('etc/wpa_supplicant/wpa_supplicant.conf').read().decode()
+    ssid = 'Kancelář "2"'.encode()
+    assert 'country=CZ' in conf and 'ssid=' + ssid.hex() in conf
+    assert 'psk=' + hashlib.pbkdf2_hmac('sha1', b'heslo s mezerou', ssid, 4096, 32).hex() in conf
+    assert 'heslo' not in conf
+    assert tar.getmember('etc/wpa_supplicant/wpa_supplicant.conf').mode == 0o600
+    assert 'WIFI=1' in tar.extractfile('etc/caracal-firstboot.conf').read().decode().splitlines()
+    plain = tarfile.open(fileobj=io.BytesIO(sdcard.alpine_files({**o, 'wifi_ssid': ''})['caracal.apkovl.tar.gz']))
+    assert 'etc/wpa_supplicant/wpa_supplicant.conf' not in plain.getnames()

@@ -237,11 +237,12 @@ def check(force=False):
     docker = Docker()
     me = own_container(docker) if docker.available() else None
     image = split_ref(me['Config']['Image'])[0] if me else os.getenv('CARACAL_HUB_IMAGE', DEFAULT_IMAGE)
-    data = {'current': HUB_VERSION, 'image': image, 'latest': None, 'newer': [], 'notes': [], 'error': ''}
+    data = {'current': HUB_VERSION, 'image': image, 'latest': None, 'newer': [], 'older': [], 'notes': [], 'error': ''}
     try:
         versions = [t for t in images.sort_versions(images.list_tags(image)) if re.fullmatch(r'\d+\.\d+\.\d+', t)]
         data['latest'] = versions[0] if versions else None
         data['newer'] = [v for v in versions if version_tuple(v) > version_tuple(HUB_VERSION)]
+        data['older'] = [v for v in versions if version_tuple(v) < version_tuple(HUB_VERSION)][:15]
     except Exception as e:   # noqa: BLE001
         data['error'] = f'registry_unavailable: {e}'[:300]
     owner_repo = '/'.join(image.split('/')[1:3]) if image.startswith('ghcr.io/') else ''
@@ -352,18 +353,53 @@ def _run(version, username):
         audit({'username': username}, 'system.update_failed', version, {'error': str(e)[:300]})
 
 
-def start(version, username):
+def backups_of(version):
+    """The stored backups made by a version of Fleet (newest first): its data, for going back to it."""
+    import zipfile
+    from .system import BACKUP_FILE, BACKUPS
+    out = []
+    for p in sorted(BACKUPS.iterdir(), reverse=True) if BACKUPS.is_dir() else []:
+        if not BACKUP_FILE.fullmatch(p.name):
+            continue
+        try:
+            with zipfile.ZipFile(p) as z:
+                manifest = json.loads(z.read('manifest.json'))
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+            continue
+        if manifest.get('hub_version') == version:
+            out.append({'name': p.name, 'created': manifest.get('created') or p.stat().st_mtime, 'size': p.stat().st_size})
+    return out
+
+
+def start(version, username, restore=''):
+    """Update to a newer version, or go back to an older one; going back can also bring back the data of a backup
+    that version made (applied when it starts, see core.apply_pending_restore)."""
     from fastapi import HTTPException
+    from .core import DATA, RESTORE_DIR
     data = check()
-    if version not in data['newer'] and version != data.get('latest'):
+    if version not in data['newer'] and version not in data.get('older', []) and version != data.get('latest'):
         raise HTTPException(400, 'version_required')
     if not data['docker']['available']:
         raise HTTPException(409, 'docker_socket_missing')
+    if restore and restore not in [b['name'] for b in backups_of(version)]:
+        raise HTTPException(400, 'invalid_backup')
     with _lock:
         if _state['job'] and _state['job'].get('state') == 'running':
             raise HTTPException(409, 'update_running')
         _state['job'] = {'state': 'running', 'version': version, 'step': 'start', 'started': time.time()}
+    if restore:
+        from .system import BACKUPS, stage_restore
+        try:
+            stage_restore(BACKUPS / restore)
+            # only the version it is meant for applies it; this one throws it away when it starts again
+            (RESTORE_DIR / RESTORE_FOR).write_text(version)
+        except Exception:
+            _state['job'] = None
+            raise
     threading.Thread(target=_run, args=(version, username), daemon=True).start()
+
+
+RESTORE_FOR = 'for-version'
 
 
 def tick():

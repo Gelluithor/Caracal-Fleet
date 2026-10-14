@@ -26,7 +26,7 @@ import segno
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from .core import ROLES, USERNAME_RE, audit, cfg, check_password, current_user, db, make_session, save_cfg
+from .core import BUILTIN_ROLES, USERNAME_RE, audit, cfg, check_password, current_user, db, make_session, save_cfg
 
 router = APIRouter()
 STEP, DIGITS, WINDOW = 30, 6, 1
@@ -91,7 +91,7 @@ def _qr_svg(uri):
 
 @router.post('/api/me/totp/setup')
 def totp_setup(r: Request):
-    u = current_user(r)
+    u = current_user(r, None)
     if u['password_hash'].startswith(SSO_PASSWORD):
         raise HTTPException(409, 'sso_user')
     secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip('=')
@@ -105,7 +105,7 @@ def totp_setup(r: Request):
 
 @router.post('/api/me/totp/enable')
 async def totp_enable(r: Request):
-    u = current_user(r)
+    u = current_user(r, None)
     d = await _json(r)
     with db() as c:
         row = c.execute('SELECT totp_pending FROM users WHERE id=?', (u['id'],)).fetchone()
@@ -121,7 +121,7 @@ async def totp_enable(r: Request):
 
 @router.post('/api/me/totp/disable')
 async def totp_disable(r: Request):
-    u = current_user(r)
+    u = current_user(r, None)
     d = await _json(r)
     if not check_password(str(d.get('password', '')), u['password_hash']):
         raise HTTPException(401, 'invalid_credentials')
@@ -133,7 +133,7 @@ async def totp_disable(r: Request):
 
 @router.post('/api/users/{uid}/totp/reset')
 def totp_reset(uid: int, r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'users')
     with db() as c:
         row = c.execute('SELECT username FROM users WHERE id=?', (uid,)).fetchone()
         if not row:
@@ -255,7 +255,7 @@ def sso_callback(r: Request, code: str = '', state: str = '', error: str = ''):
         u = c.execute('SELECT * FROM users WHERE sso_subject=?', (subject,)).fetchone() \
             or c.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
         if not u and o['auto_create']:
-            created = o['default_role'] if o['default_role'] in ROLES else 'viewer'
+            created = o['default_role'] if _role_exists(c, o['default_role']) else 'viewer'
             c.execute("INSERT INTO users(username, password_hash, role, language, enabled, created, sso_subject) "
                       "VALUES(?,?,?,'cs',1,?,?)", (username, SSO_PASSWORD + secrets.token_hex(16), created, time.time(), subject))
             u = c.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
@@ -272,19 +272,23 @@ def sso_callback(r: Request, code: str = '', state: str = '', error: str = ''):
     return RedirectResponse('/#sso=' + quote(make_session(dict(u))), status_code=303)
 
 
+def _role_exists(c, key):
+    return key in BUILTIN_ROLES or bool(key and c.execute('SELECT 1 FROM roles WHERE key=?', (key,)).fetchone())
+
+
 def _public_oidc(o):
     return {**o, 'client_secret': '•••' if o['client_secret'] else ''}
 
 
 @router.get('/api/sso/settings')
 def get_sso(r: Request):
-    current_user(r, 'admin')
+    current_user(r, 'users')
     return {**_public_oidc(oidc_conf()), 'redirect_uri': _base(r, oidc_conf()) + '/api/sso/callback'}
 
 
 @router.put('/api/sso/settings')
 async def put_sso(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'users')
     d = await _json(r)
     old = oidc_conf()
     o = {k: d.get(k, old[k]) for k in OIDC_DEFAULTS}
@@ -294,8 +298,9 @@ async def put_sso(r: Request):
     if o['client_secret'] == '•••':
         o['client_secret'] = old['client_secret']
     o['client_secret'] = str(o['client_secret'] or '')[:500]
-    if o['default_role'] not in ROLES:
-        raise HTTPException(400, 'invalid_value')
+    with db() as c:
+        if not _role_exists(c, o['default_role']):
+            raise HTTPException(400, 'invalid_value')
     if o['username_claim'] not in ('preferred_username', 'email', 'upn', 'name', 'sub'):
         raise HTTPException(400, 'invalid_value')
     for k in ('issuer', 'public_url'):

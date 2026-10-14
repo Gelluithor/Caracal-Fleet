@@ -1,5 +1,5 @@
 FROM python:3.13-slim AS base
-RUN apt-get update && apt-get install -y --no-install-recommends curl openssh-client mtools && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl openssh-client mtools rclone && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/caracal-hub
 COPY hub/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

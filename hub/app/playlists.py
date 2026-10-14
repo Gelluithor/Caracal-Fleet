@@ -8,7 +8,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
-from .core import DARK_MODES, audit, current_user, db, new_batch, queue_command, refresh_pin
+from .core import DARK_MODES, audit, current_user, db, new_batch, queue_command, refresh_pin, require_device
 from .devices import COLLECTION_KIND, MEDIA_KINDS, build, grafana_config
 
 router = APIRouter()
@@ -148,6 +148,7 @@ async def playlist_from_device(r: Request):
         row = c.execute('SELECT * FROM devices WHERE id=?', (_text(d.get('device_id'), 64),)).fetchone()
         if not row:
             raise HTTPException(404, 'device_not_found')
+        require_device(u, 'view', row)
         device = build(row, full=True)
         name = _text(d.get('name'), 120) or device['name']
         pid, skipped = playlist_from_assets(c, name, device['assets'], u['username'])
@@ -223,12 +224,16 @@ async def add_item(pid: int, r: Request):
     with db() as c:
         _playlist(c, pid)
         item = _validate_item(c, d, _text(d.get('kind'), 16))
+        from .main import validate_validity   # late import: main imports this module
+        valid = validate_validity(d)
         pos = c.execute('SELECT COALESCE(MAX(position), -1) + 1 FROM global_playlist_items WHERE playlist_id=?',
                         (pid,)).fetchone()[0]
         iid = c.execute('INSERT INTO global_playlist_items(playlist_id, position, kind, name, source, duration, scale, '
                         'file_id, dark) VALUES(?,?,?,?,?,?,?,?,?)', (pid, pos, d['kind'], item['name'], item['source'],
                                                                      item['duration'], item['scale'],
                                                                      item['file_id'], item['dark'])).lastrowid
+        c.execute('UPDATE global_playlist_items SET valid_from=?, valid_until=? WHERE id=?',
+                  (valid.get('valid_from'), valid.get('valid_until'), iid))
         _touch(c, pid, u)
     audit(u, 'global.item_add', str(pid), {'name': item['name'], 'kind': d['kind']})
     return {'id': iid}
@@ -247,6 +252,11 @@ async def edit_item(pid: int, iid: int, r: Request):
         item = _validate_item(c, merged, row['kind'])
         c.execute('UPDATE global_playlist_items SET name=?, source=?, duration=?, scale=?, dark=? WHERE id=?',
                   (item['name'], item['source'], item['duration'], item['scale'], item['dark'], iid))
+        from .main import validate_validity   # late import: main imports this module
+        valid = validate_validity({**{k: row[k] for k in ('valid_from', 'valid_until')},
+                                   **{k: d[k] for k in ('valid_from', 'valid_until') if k in d}})
+        c.execute('UPDATE global_playlist_items SET valid_from=?, valid_until=? WHERE id=?',
+                  (valid.get('valid_from'), valid.get('valid_until'), iid))
         _touch(c, pid, u)
     audit(u, 'global.item_edit', str(pid), {'item': iid, 'name': item['name']})
     return {'ok': True}
@@ -293,6 +303,9 @@ def deploy_items(c, pid, missing_ok=False):
                  'scale': it['scale']}
         if it.get('dark'):   # only a choice of its own: nodes before CARACAL 2026.10.12 do not know it
             entry['dark'] = it['dark']
+        for key in ('valid_from', 'valid_until'):   # likewise: older nodes play the item all the time
+            if it.get(key):
+                entry[key] = it[key]
         if it['kind'] == COLLECTION_KIND:
             entry.update(type='collection', **grafana_config(it['source']))
         elif it['kind'] == 'web':
@@ -327,6 +340,7 @@ async def deploy(pid: int, r: Request):
             row = c.execute('SELECT * FROM devices WHERE id=?', (t,)).fetchone()
             if not row:
                 raise HTTPException(404, 'device_not_found')
+            require_device(u, 'content', row)
             caps = build(row)['capabilities']
             if (has_media and caps.get('upload') is False) or (has_tags and caps.get('add_grafana_tag') is False):
                 warnings.append(row['name'])

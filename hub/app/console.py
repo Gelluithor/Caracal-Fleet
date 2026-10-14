@@ -100,14 +100,14 @@ async def console(ws: WebSocket, did: str):
     except (asyncio.TimeoutError, ValueError, KeyError):
         return await _fail(ws, 'invalid_request')
     try:
-        user = user_from_token(str(hello.get('token') or ''), 'manage')
+        user = user_from_token(str(hello.get('token') or ''), 'console')
     except HTTPException as e:
         return await _fail(ws, e.detail)
 
     with db() as c:
-        row = c.execute('SELECT name, ip, status_json FROM devices WHERE id=?', (did,)).fetchone()
-    if not row:
-        return await _fail(ws, 'device_not_found')
+        row = c.execute('SELECT * FROM devices WHERE id=?', (did,)).fetchone()
+    if not row or not user['access'].on('console', row):
+        return await _fail(ws, 'device_not_found' if not row or not user['access'].on('view', row) else 'forbidden')
     try:
         status = json.loads(row['status_json'] or '{}')
     except ValueError:

@@ -34,7 +34,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.15.0'
+VERSION = '4.16.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -121,10 +121,13 @@ ENDPOINTS = {
     'update_camera': ('PUT', '/api/fleet/v1/assets/camera/{id}'),
     'camera_onvif': ('POST', '/api/fleet/v1/cameras/onvif'),
     'camera_discover': ('POST', '/api/fleet/v1/cameras/discover'),
+    # CARACAL 2026.10.14: a picture of a camera stream, and items shown only from / until a time
+    'camera_preview': ('POST', '/api/fleet/v1/cameras/preview'),
+    'validity': ('PUT', '/api/assets/{id}/validity'),
 }
 # the node's own first-run setup, for CARACAL versions without the Fleet admin endpoint
 SETUP_STATUS, SETUP = '/api/setup-status', '/api/setup'
-GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale', 'dark')
+GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale', 'dark', 'valid_from', 'valid_until')
 # Login profiles of web pages: the credentials are stored encrypted on the node and only travel to it.
 # auth_type: 'form' (log-in form on the page) or 'http' (HTTP Basic/Digest, the browser's pop-up)
 PROFILE_FIELDS = ('name', 'login_url', 'target_url', 'username', 'password', 'user_selector', 'pass_selector',
@@ -150,6 +153,7 @@ COLLECTION_KIND = 'grafana-tag'   # Grafana collections are playlist assets of t
 PLAYER_STALE = 15                 # seconds without a player heartbeat before the player counts as down
 FREEZE_GRACE = 15                 # seconds after a freeze before the live player state may cancel it
 # Keys never sent back to the node when re-creating an item.
+CLEARABLE_KEYS = ('valid_from', 'valid_until')
 VOLATILE_KEYS = ('id', 'type', 'source_asset_id', 'file_id', 'sha256', 'filename', 'size', 'position', 'order',
                  'created', 'updated', 'path', 'file', 'mimetype', 'urls_text')
 
@@ -571,7 +575,8 @@ class Agent:
 
     @staticmethod
     def clean(item):
-        return {k: v for k, v in item.items() if k not in VOLATILE_KEYS and v is not None}
+        # None in a validity removes the limit, so it is kept
+        return {k: v for k, v in item.items() if k not in VOLATILE_KEYS and (v is not None or k in CLEARABLE_KEYS)}
 
     def with_profile(self, p):
         # None in auth_profile_id removes the login from a page, so it is kept although clean() drops None values
@@ -759,6 +764,9 @@ class Agent:
     def do_camera_discover(self, p):
         return self.body(self.local('camera_discover', json={}, timeout=30))
 
+    def do_camera_preview(self, p):
+        return self.body(self.local('camera_preview', json=p, timeout=40))
+
     def do_player_settings(self, p):
         return self.body(self.local('player_settings', json={k: p[k] for k in ('web_dark',) if k in p}))
 
@@ -821,7 +829,7 @@ class Agent:
     @staticmethod
     def grafana_fields(p):
         """Grafana collection fields; the configuration may also come as the node's JSON 'source'."""
-        out = {k: p[k] for k in GRAFANA_FIELDS if p.get(k) is not None}
+        out = {k: p[k] for k in GRAFANA_FIELDS if p.get(k) is not None or (k in CLEARABLE_KEYS and k in p)}
         if 'tag' not in out and p.get('source'):
             try:
                 out = {**json.loads(p['source']), **out}
@@ -867,7 +875,7 @@ class Agent:
     def do_add_media(self, p):
         path = self.download_file(p['file_id'], p.get('sha256'))
         try:
-            fields = {k: str(v) for k, v in self.clean(p).items() if not isinstance(v, (dict, list))}
+            fields = {k: str(v) for k, v in self.clean(p).items() if v is not None and not isinstance(v, (dict, list))}
             fields.setdefault('kind', p.get('kind', 'image'))
             with open(path, 'rb') as f:
                 r = self.local('upload', data=fields, files={'file': (p.get('filename') or p.get('name') or 'file', f)},

@@ -901,3 +901,41 @@ details.onvif .form-actions, details.onvif .row2 { margin-top: 8px; }
 .release-notes h3, .release-notes h4, .release-notes h5 { margin: 14px 0 6px; }
 .release-notes p, .release-notes ul { margin: 6px 0; color: var(--ink-2); }
 .release-notes ul { padding-left: 20px; }
+
+/* ---------- users, roles and user groups */
+.label { display: block; font-size: 13px; font-weight: 500; color: var(--ink-2); margin-bottom: 6px; }
+.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }
+.check-grid .perm-row { align-items: flex-start; }
+.scope-list { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; }
+.scope-list .ic { width: 13px; height: 13px; margin-right: 3px; vertical-align: -2px; color: var(--muted); }
+.scope-pick { display: grid; gap: 8px; }
+.scope-chosen { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--fill); }
+.scope-box summary { cursor: pointer; font-weight: 500; padding: 4px 0; }
+.scope-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 12px; max-height: 220px; overflow: auto; padding: 4px 0 8px; }
+.role-list { display: grid; gap: 1px; background: var(--line); }
+.role-card { padding: 14px 20px; background: var(--panel); display: grid; gap: 6px; }
+.role-card p { margin: 0; }
+.role-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.role-head .grow { flex: 1; }
+.perm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.perm { padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--accent-soft); color: var(--accent); }
+.perm.system { background: var(--frozen-soft); color: var(--frozen); }
+
+/* ---------- backups outside the server */
+.card-pad { padding: 0 20px 4px; }
+.card-pad p { margin-top: 0; }
+.err-line { color: var(--bad); white-space: normal !important; }
+
+/* ---------- camera preview and recorder channels */
+.stream-list { display: grid; gap: 1px; max-height: 320px; overflow: auto; border-radius: 12px; background: var(--line); margin-top: 8px; }
+.stream-pick { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); }
+.stream-pick > div { flex: 1; min-width: 0; display: grid; }
+.stream-pick small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cam-preview { display: block; max-width: 100%; border-radius: 10px; margin-top: 8px; background: #000; }
+.cam-preview-box:empty, .cam-found-preview:empty { display: none; }
+
+/* ---------- validity of playlist items */
+.tag.validity-on { background: var(--ok-soft); color: var(--ok); }
+.tag.validity-waiting { background: var(--info-soft); color: var(--info); }
+.tag.validity-over { background: var(--fill-2); color: var(--muted); text-decoration: line-through; }
+.validity summary { cursor: pointer; font-weight: 500; }

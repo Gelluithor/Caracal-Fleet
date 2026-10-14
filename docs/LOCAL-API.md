@@ -39,7 +39,9 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Web administrator | `POST /admin` | `{username, password}` (password 10 to 200 characters): creates the administrator of the node's web administration, or sets a new name and password of the existing one (its sessions end) → `{created}` |
 | Countdown on the TV | `PUT /player/overlay` | `{enabled, size}` (bar height 4 to 200 px) |
 | Camera | `POST /assets/camera`, `PUT /assets/camera/{id}` | `{name, duration, layout (auto, 2, 2x2, 3x3), audio, streams: [{name, url, username, password}]}` (1-9 streams, rtsp/rtsps/http/https; empty user and password keep the stored ones); CARACAL 2026.10.13 |
-| ONVIF | `POST /cameras/onvif`, `POST /cameras/discover` | `{host, port, username, password, xaddr}` → `{streams: [{name, url}]}`; discovery (WS-Discovery in the node's network) → `{cameras: [{address, name, xaddr, hardware}]}` |
+| ONVIF | `POST /cameras/onvif`, `POST /cameras/discover` | `{host, port, username, password, xaddr}` → `{streams: [{name, url, source}]}` (every profile, up to 64; `source` = the channel of a recorder); discovery (WS-Discovery in the node's network, cameras and recorders) → `{cameras: [{address, name, xaddr, hardware, kind (camera, recorder)}]}` |
+| Camera picture | `POST /cameras/preview` | `{url, username, password}` or `{id, index}` (a stored camera's stream) → `{image (JPEG, base64, at most 640 px wide), type}`; CARACAL 2026.10.14 |
+| Validity | `PUT /assets/{id}/validity` (admin UI), `valid_from` / `valid_until` in the add and update requests (Fleet API) | Unix time or `null` (no limit); the player leaves out an item outside its validity; CARACAL 2026.10.14 |
 | Player settings | `PUT /player/settings` | `{web_dark}`: websites in dark mode, `off`, `dark` (the sites' own dark look) or `force` (also pages without one); CARACAL 2026.10.12 and newer. Web pages and Grafana collections take `dark` as well (`off`, `dark`, `force`, empty = as the node) |
 | Skip notification | `POST /notify/skip` | ends the notification on screen |
 | Remove notification | `DELETE /notify/queue/{id}` | removes a waiting notification |

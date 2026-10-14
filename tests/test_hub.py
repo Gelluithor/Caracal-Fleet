@@ -16,7 +16,7 @@ def test_login_rejects_bad_password(client):
 
 def test_me_and_static(client, admin_headers):
     me = client.get('/api/me', headers=admin_headers).json()
-    assert me['role'] == 'admin' and 'admin' in me['permissions']
+    assert me['role'] == 'admin' and {'users', 'settings', 'view'} <= set(me['permissions']) and not me['scoped']
     page = client.get('/')
     assert page.status_code == 200 and core.HUB_VERSION in page.text
     assert client.get('/static/app.js').status_code == 200

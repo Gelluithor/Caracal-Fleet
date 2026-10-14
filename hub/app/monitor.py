@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import requests
 from fastapi import APIRouter, HTTPException, Request
 
-from .core import REDACTED, audit, cfg, current_user, db, save_cfg
+from .core import REDACTED, audit, cfg, current_user, db, require_device, save_cfg
 from .devices import build
 
 router = APIRouter()
@@ -60,6 +60,8 @@ TEXT = {
         'updated_title': 'CARACAL Fleet aktualizován na {v}', 'updated_body': 'Předchozí verze: {c}.',
         'update_failed_title': 'Aktualizace CARACAL Fleet na {v} selhala',
         'update_failed_body': 'Běží dál předchozí verze {c}. Chyba: {e}',
+        'backup_failed_title': 'CARACAL Fleet: záloha mimo server selhala ({v})',
+        'backup_failed_body': 'Zálohu se nepodařilo uložit do „{v}“: {e}. Zkontrolujte cíl v Nastavení → Záloha a migrace.',
     },
     'en': {
         'offline': 'Offline', 'local_api': 'Local API not responding', 'player': 'Player not running',
@@ -76,6 +78,8 @@ TEXT = {
         'updated_title': 'CARACAL Fleet updated to {v}', 'updated_body': 'Previous version: {c}.',
         'update_failed_title': 'The CARACAL Fleet update to {v} failed',
         'update_failed_body': 'The previous version {c} keeps running. Error: {e}',
+        'backup_failed_title': 'CARACAL Fleet: the backup outside the server failed ({v})',
+        'backup_failed_body': 'The backup could not be stored in "{v}": {e}. Check the destination in Settings → Backup.',
     },
 }
 
@@ -92,13 +96,15 @@ def record_metrics(c, did, status, now=None):
 
 @router.get('/api/devices/{did}/metrics')
 def device_metrics(did: str, r: Request, hours: int = 24):
-    current_user(r)
+    u = current_user(r)
     hours = max(1, min(hours, METRIC_DAYS * 24))
     now = time.time()
     since = int((now - hours * 3600) // BUCKET * BUCKET)
     with db() as c:
-        if not c.execute('SELECT 1 FROM devices WHERE id=?', (did,)).fetchone():
+        row = c.execute('SELECT * FROM devices WHERE id=?', (did,)).fetchone()
+        if not row:
             raise HTTPException(404, 'device_not_found')
+        require_device(u, 'view', row)
         rows = c.execute('SELECT ts, cpu, ram, disk, temp FROM metrics WHERE device_id=? AND ts>=? ORDER BY ts',
                          (did, since)).fetchall()
         created = c.execute('SELECT MIN(ts) m FROM metrics WHERE device_id=?', (did,)).fetchone()['m']
@@ -108,9 +114,10 @@ def device_metrics(did: str, r: Request, hours: int = 24):
 
 @router.get('/api/events')
 def list_events(r: Request, device_id: str = '', hours: int = 168, limit: int = 300):
-    current_user(r)
+    u = current_user(r)
     since = time.time() - max(1, min(hours, EVENT_DAYS * 24)) * 3600
-    sql = ('SELECT e.*, d.name device_name FROM events e LEFT JOIN devices d ON d.id=e.device_id WHERE e.ts>=?')
+    sql = ('SELECT e.*, d.name device_name, d.device_group, d.location FROM events e LEFT JOIN devices d ON d.id=e.device_id '
+           'WHERE e.ts>=?')
     args = [since]
     if device_id:
         sql += ' AND e.device_id=?'
@@ -118,7 +125,13 @@ def list_events(r: Request, device_id: str = '', hours: int = 168, limit: int = 
     sql += ' ORDER BY e.id DESC LIMIT ?'
     args.append(max(1, min(limit, 1000)))
     with db() as c:
-        return [dict(x) for x in c.execute(sql, args)]
+        rows = [dict(x) for x in c.execute(sql, args)]
+    out = []
+    for x in rows:
+        where = {'id': x['device_id'], 'device_group': x.pop('device_group'), 'location': x.pop('location')}
+        if u['access'].on('view', where):
+            out.append(x)
+    return out
 
 
 # ---------------------------------------------------------------- configuration
@@ -220,13 +233,13 @@ def _save(conf):
 
 @router.get('/api/alerts')
 def get_alerts(r: Request):
-    current_user(r, 'admin')
+    current_user(r, 'settings')
     return _public(config())
 
 
 @router.put('/api/alerts')
 async def put_alerts(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     try:
         d = await r.json()
     except ValueError:
@@ -243,7 +256,7 @@ async def put_alerts(r: Request):
 @router.post('/api/alerts/test')
 async def test_alert(r: Request):
     """Sends a test message to one channel as it is in the form (secrets left unchanged come from the saved one)."""
-    current_user(r, 'admin')
+    current_user(r, 'settings')
     try:
         d = await r.json()
     except ValueError:
@@ -264,7 +277,7 @@ async def test_alert(r: Request):
 @router.post('/api/alerts/telegram/chats')
 async def telegram_chats(r: Request):
     """The chats that recently wrote to the bot or added it (getUpdates), so nobody has to look up a chat id."""
-    current_user(r, 'admin')
+    current_user(r, 'settings')
     try:
         d = await r.json()
     except ValueError:
@@ -293,7 +306,7 @@ async def telegram_chats(r: Request):
 @router.post('/api/alerts/mute')
 async def mute_devices(r: Request):
     """Mute alerts of devices for some minutes (0 = unmute); events are still recorded."""
-    u = current_user(r, 'manage')
+    u = current_user(r, 'devices')
     try:
         d = await r.json()
     except ValueError:
@@ -304,8 +317,11 @@ async def mute_devices(r: Request):
     except (TypeError, ValueError):
         raise HTTPException(400, 'invalid_value')
     with db() as c:   # only devices that exist, so the configuration cannot be filled with anything else
-        known = {x['id'] for x in c.execute('SELECT id FROM devices')}
+        rows = {x['id']: x for x in c.execute('SELECT * FROM devices')}
+    known = set(rows)
     ids = [x for x in dict.fromkeys(ids) if x in known]
+    for did in ids:
+        require_device(u, 'devices', rows[did])
     if not ids:
         raise HTTPException(400, 'no_targets')
     with _lock:
@@ -447,18 +463,31 @@ def announce(kind, version, current, error='', send=None):
     """A message about CARACAL Fleet itself to every channel: kind is 'available', 'updated' or 'failed'.
     Returns True when alerts are on and there was a channel to send it to."""
     conf = config()
+    if not conf['fleet_updates']:
+        return False
+    key = {'available': 'update', 'updated': 'updated', 'failed': 'update_failed'}[kind]
+    level = {'available': 'info', 'updated': 'ok', 'failed': 'critical'}[kind]
+    return _system_message(conf, key, 'fleet_' + kind, level, '/#/settings/update', send,
+                           {'version': version, 'current': current}, v=version, c=current, e=error)
+
+
+def backup_failed(name, error, send=None):
+    """A backup could not be copied to a destination outside the server."""
+    return _system_message(config(), 'backup_failed', 'backup_failed', 'critical', '/#/settings/backup', send,
+                           {'destination': name, 'error': error}, v=name, e=error)
+
+
+def _system_message(conf, key, event, level, path, send, extra, **values):
     channels = [ch for ch in conf['channels'] if ch.get('enabled', True)]
-    if not conf['enabled'] or not conf['fleet_updates'] or not channels:
+    if not conf['enabled'] or not channels:
         return False
     tx = TEXT[conf['language']]
-    key = {'available': 'update', 'updated': 'updated', 'failed': 'update_failed'}[kind]
-    fill = lambda s: s.replace('{v}', _text(version, 40)).replace('{c}', _text(current, 40)).replace('{e}', _text(error, 300))
+    fill = lambda s: s.replace('{v}', _text(values.get('v'), 80)).replace('{c}', _text(values.get('c'), 40)).replace('{e}', _text(values.get('e'), 300))
     title, lines = fill(tx[key + '_title']), [fill(tx[key + '_body'])]
-    url = f"{conf['public_url']}/#/settings/update" if conf['public_url'] else ''
+    url = f"{conf['public_url']}{path}" if conf['public_url'] else ''
     if url:
         lines.append(f"{tx['open']}: {url}")
-    level = {'available': 'info', 'updated': 'ok', 'failed': 'critical'}[kind]
-    payload = {'event': 'fleet_' + kind, 'title': title, 'version': version, 'current': current, 'url': url}
+    payload = {'event': event, 'title': title, **extra, 'url': url}
     for ch in channels:
         try:
             (send or _deliver)(ch, conf, title, lines, payload, level)

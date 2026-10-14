@@ -372,14 +372,44 @@ def start():
 
 # ---------------------------------------------------------------- API
 
+# what a scheduled action does with the devices, besides scheduling it
+TASK_PERMISSION = {'restart_player': 'control', 'reboot': 'control', 'screen_on': 'control', 'screen_off': 'control',
+                   'notify': 'control', 'update_agent': 'updates', 'update_caracal': 'updates',
+                   'deploy_playlist': 'content', 'apply_template': 'devices'}
+
+
+def targets_allowed(c, u, perm, targets):
+    """A user with a scope may name only the locations, groups and devices of the scope (groups and locations
+    also hold the devices added to them later)."""
+    access = u['access']
+    if access.everywhere(perm):
+        return True
+    t = targets or {}
+    grants = [s for p, s in access.grants if perm in p]
+    if any(not any(s and loc in s['locations'] for s in grants) for loc in t.get('locations', [])):
+        return False
+    if any(not any(s and g in s['groups'] for s in grants) for g in t.get('groups', [])):
+        return False
+    rows = {r['id']: r for r in c.execute('SELECT * FROM devices')}
+    return all(did in rows and access.on(perm, rows[did]) for did in t.get('devices', []))
+
+
+def _require_targets(c, u, targets, action=None):
+    for perm in ('schedule', TASK_PERMISSION.get(action)):
+        if perm and not targets_allowed(c, u, perm, targets):
+            raise HTTPException(403, 'targets_outside_scope')
+
 @router.get('/api/schedules')
 def list_schedules(r: Request):
-    current_user(r)
+    u = current_user(r)
     now = local_now()
     with db() as c:
         schedules = [_schedule(x) for x in c.execute('SELECT * FROM node_schedules ORDER BY name COLLATE NOCASE')]
         tasks = sorted((_task(x) for x in c.execute('SELECT * FROM scheduled_tasks')), key=lambda t: (t['time'], t['name'].lower()))
         follows = device_schedules(c)
+        # a user with a scope sees what names only the scope
+        schedules = [s for s in schedules if targets_allowed(c, u, 'view', s['targets'])]
+        tasks = [x for x in tasks if targets_allowed(c, u, 'view', x['targets'])]
     for s in schedules:
         pid, slot, screen = current(s, now)
         s['now'] = {'playlist_id': pid, 'slot': slot, 'screen': screen}
@@ -390,7 +420,7 @@ def list_schedules(r: Request):
 
 @router.put('/api/schedules/settings')
 async def schedule_settings(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'settings')
     d = await _json(r)
     name = _text(d.get('timezone'), 64)
     try:
@@ -406,11 +436,12 @@ async def schedule_settings(r: Request):
 
 @router.post('/api/schedules')
 async def create_schedule(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'schedule')
     d = await _json(r)
     now = time.time()
     with db() as c:
         f = _schedule_fields(c, d)
+        _require_targets(c, u, f['targets'])
         sid = c.execute('INSERT INTO node_schedules(name, enabled, data_json, created, updated, updated_by) VALUES(?,?,?,?,?,?)',
                         (f.pop('name'), int(f.pop('enabled')), json.dumps(f), now, now, u['username'])).lastrowid
     audit(u, 'schedule.create', str(sid), {'name': d.get('name')})
@@ -419,13 +450,15 @@ async def create_schedule(r: Request):
 
 @router.patch('/api/schedules/{sid}')
 async def edit_schedule(sid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'schedule')
     d = await _json(r)
     with db() as c:
         row = c.execute('SELECT * FROM node_schedules WHERE id=?', (sid,)).fetchone()
         if not row:
             raise HTTPException(404, 'not_found')
+        _require_targets(c, u, _schedule(row)['targets'])
         f = _schedule_fields(c, d, _schedule(row))
+        _require_targets(c, u, f['targets'])
         c.execute('UPDATE node_schedules SET name=?, enabled=?, data_json=?, updated=?, updated_by=? WHERE id=?',
                   (f.pop('name'), int(f.pop('enabled')), json.dumps(f), time.time(), u['username'], sid))
         # the devices get the playlist of the changed schedule at the next check
@@ -436,11 +469,12 @@ async def edit_schedule(sid: int, r: Request):
 
 @router.delete('/api/schedules/{sid}')
 def delete_schedule(sid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'schedule')
     with db() as c:
-        row = c.execute('SELECT name FROM node_schedules WHERE id=?', (sid,)).fetchone()
+        row = c.execute('SELECT * FROM node_schedules WHERE id=?', (sid,)).fetchone()
         if not row:
             raise HTTPException(404, 'not_found')
+        _require_targets(c, u, _schedule(row)['targets'])
         c.execute('DELETE FROM node_schedules WHERE id=?', (sid,))
         c.execute("UPDATE devices SET schedule_key='' WHERE schedule_key LIKE ?", (f'{sid}:%',))
     audit(u, 'schedule.delete', str(sid), {'name': row['name']})
@@ -449,11 +483,12 @@ def delete_schedule(sid: int, r: Request):
 
 @router.post('/api/scheduled-tasks')
 async def create_task(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'schedule')
     d = await _json(r)
     now = time.time()
     with db() as c:
         f = _task_fields(c, d)
+        _require_targets(c, u, f['targets'], f['action'])
         tid = c.execute('INSERT INTO scheduled_tasks(name, enabled, data_json, created, updated, updated_by) VALUES(?,?,?,?,?,?)',
                         (f.pop('name'), int(f.pop('enabled')), json.dumps(f), now, now, u['username'])).lastrowid
         # a task created after its time today waits for its next day
@@ -467,13 +502,15 @@ async def create_task(r: Request):
 
 @router.patch('/api/scheduled-tasks/{tid}')
 async def edit_task(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'schedule')
     d = await _json(r)
     with db() as c:
         row = c.execute('SELECT * FROM scheduled_tasks WHERE id=?', (tid,)).fetchone()
         if not row:
             raise HTTPException(404, 'not_found')
+        _require_targets(c, u, _task(row)['targets'], _task(row)['action'])
         f = _task_fields(c, d, _task(row))
+        _require_targets(c, u, f['targets'], f['action'])
         c.execute('UPDATE scheduled_tasks SET name=?, enabled=?, data_json=?, updated=?, updated_by=? WHERE id=?',
                   (f.pop('name'), int(f.pop('enabled')), json.dumps(f), time.time(), u['username'], tid))
     audit(u, 'schedule.task_edit', str(tid), {'name': d.get('name')})
@@ -482,11 +519,12 @@ async def edit_task(tid: int, r: Request):
 
 @router.delete('/api/scheduled-tasks/{tid}')
 def delete_task(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'schedule')
     with db() as c:
-        row = c.execute('SELECT name FROM scheduled_tasks WHERE id=?', (tid,)).fetchone()
+        row = c.execute('SELECT * FROM scheduled_tasks WHERE id=?', (tid,)).fetchone()
         if not row:
             raise HTTPException(404, 'not_found')
+        _require_targets(c, u, _task(row)['targets'], _task(row)['action'])
         c.execute('DELETE FROM scheduled_tasks WHERE id=?', (tid,))
     audit(u, 'schedule.task_delete', str(tid), {'name': row['name']})
     return {'ok': True}
@@ -494,12 +532,13 @@ def delete_task(tid: int, r: Request):
 
 @router.post('/api/scheduled-tasks/{tid}/run')
 def run_task_now(tid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'schedule')
     with db() as c:
         row = c.execute('SELECT * FROM scheduled_tasks WHERE id=?', (tid,)).fetchone()
         if not row:
             raise HTTPException(404, 'not_found')
         t = _task(row)
+        _require_targets(c, u, t['targets'], t['action'])
         result = run_task(c, t, u['username'])
         c.execute('UPDATE scheduled_tasks SET last_run=?, last_result=? WHERE id=?', (time.time(), json.dumps(result), tid))
     audit(u, 'schedule.task_run', str(tid), {'name': t['name'], 'action': t['action'], 'queued': result['queued'],

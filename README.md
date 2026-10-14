@@ -23,7 +23,7 @@ zero-touch USB stick](docs/fleet.gif)
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations
 - **Zero-touch installation:** prepare an SD card for a Raspberry Pi (Raspberry Pi OS, DietPi, or a ready Alpine Linux
-  card image) or a USB stick for a PC (Alpine Linux fully hands-off, Ubuntu Server autoinstall), install any running Debian, Ubuntu or Alpine with one command, or find a
+  card image, also over Wi-Fi) or a USB stick for a PC (Alpine Linux fully hands-off, Ubuntu Server autoinstall), install any running Debian, Ubuntu or Alpine with one command, or find a
   fresh Raspberry Pi in the network and install it over SSH; every installation can create the administrator of the
   node's own web administration
 - **Node templates:** the playlist, notification settings and look (with picture), the countdown bar, group and
@@ -37,7 +37,10 @@ zero-touch USB stick](docs/fleet.gif)
   outputs, the X server, containers and system log, with the usual causes pointed out), and *Reinstall CARACAL*
   from scratch – optionally as a factory reset with a new administrator and a template
 - **Cameras:** RTSP and HTTP streams of IP cameras and recorders as playlist items, up to 9 in a grid; ONVIF cameras
-  are found in the node's network and asked for their streams; their passwords stay on the node, encrypted
+  and recorders (NVR, every channel) are found in the node's network and asked for their streams, with a picture of
+  each stream before it goes on the screen; their passwords stay on the node, encrypted
+- **Content with a validity:** any item (also in global playlists) can play only from / until a time – a weekend
+  offer goes on and off the screens by itself
 - **Schedules:** global playlists by time of day and day of the week, screen hours (screens off outside them through
   HDMI power saving and HDMI-CEC) and actions at a given time (restarts, screens off/on, a playlist, a template, a
   notification, updates), in the hub's time zone
@@ -53,7 +56,18 @@ zero-touch USB stick](docs/fleet.gif)
   CARACAL go through the hub), chosen for the SD card, the SSH installation or per device; trusted mirrors of your
   own (a company or national apt/apk mirror) can be added
 - **Fast control:** agents wait for commands (long polling), so a command reaches the screen within a second
-- **Administration:** users with the roles admin, manager, operator and viewer; command history, audit log,
+- **Permissions:** twelve permissions (view, control, content, schedule, device management, updates, terminal,
+  installation, notification API, audit, users, settings) in built-in and custom roles, each for a scope – all
+  devices or chosen locations, device groups and devices; user groups give their members a role too (e.g. "Brno
+  reception": operator for Brno); nobody can grant more than they have
+- **Backups outside the server:** every stored backup is copied to S3-compatible storage (Amazon S3, Backblaze B2,
+  Cloudflare R2, Wasabi, MinIO…), WebDAV (Nextcloud), SFTP, SMB, NFS, any cloud of rclone (Google Drive, OneDrive,
+  Dropbox…) or a mounted folder, checked there, the oldest removed; optionally encrypted with a passphrase
+  (AES-256-GCM); a backup can be restored straight from a destination, also on a new server
+- **Fleet updates itself:** a newer version is shown with its release notes and installed in one click (with the
+  Docker socket), with automatic rollback when it does not start; going back to an older version, optionally with the
+  data of a backup that version made
+- **Administration:** users, roles and user groups; command history, audit log,
   Czech and English UI, custom logo, full backup and restore for server migrations, daily backups on the hub;
   one-time passwords (the user sets their own at the first sign-in), two-factor sign-in (TOTP with recovery codes) and single sign-on through OpenID Connect (Microsoft Entra ID,
   Google, Keycloak, Authentik…)
@@ -213,14 +227,35 @@ Your own node image (a fork, a private registry): build it with the workflow in 
 the image in *CARACAL updates*. Fleet reads versions from any Docker registry v2 (GHCR, Docker Hub, GitLab,
 Harbor…) anonymously, so the image must be public or reachable without credentials.
 
-## Roles
+## Permissions and roles
 
-| Role | Permissions |
+A user has a role for a scope: all devices, or chosen locations, device groups and devices (locations and groups
+include devices added later). User groups give their members another role with its own scope; a user has everything
+the user and the user's groups give. Device permissions hold for the devices of the scope, system permissions only
+with the whole fleet. Whoever manages users can grant only their own permissions, and the last full administrator
+cannot be removed or limited.
+
+| Permission | What it allows |
 |---|---|
-| viewer | read: state, content, command history |
-| operator | + playback control, player and node restart, playlists, media, collections, website logins, copying |
-| manager | + devices, groups, locations, node templates, installation and updates, audit |
-| admin | + users, system settings, enrollment token, SD cards and USB sticks, one-command installation, backup |
+| view | state, playlists, schedule, screens (every role has it) |
+| control | playback, show/freeze, screens on/off, restarts, notifications on the screens |
+| content | playlists, media, websites, cameras, website logins, global playlists |
+| schedule | screen routines and actions at a set time |
+| devices | names, groups and locations, templates, muting alerts, the node's web administration |
+| updates | agent and CARACAL updates, reinstallation (staged updates and the node image: whole fleet) |
+| console | the SSH terminal of a node |
+| install | SSH installation, finding new devices |
+| notify_api | tokens of the notification API |
+| audit | the audit log |
+| users | users, roles, user groups, single sign-on |
+| settings | alerts, enrollment token and SD cards, appearance, backups, Fleet updates |
+
+| Built-in role | Permissions |
+|---|---|
+| viewer | view |
+| operator | view, control, content |
+| manager | all device permissions, install, notify_api, audit |
+| admin | everything |
 
 ## How commands work
 
@@ -236,6 +271,13 @@ old items are deleted only after all new ones were added.
 locations, global playlists, history, audit), `config.json`, the logo and the media of global playlists. Restore it
 on the new server in the same place. On the same domain the agents reconnect by themselves; for a new domain,
 select the devices on the old hub and use *Redirect to another hub*. The backup contains secrets – store it safely.
+
+*Backups outside the server* copies every stored backup (daily or *Back up now*) to S3-compatible storage, WebDAV,
+SFTP, SMB, NFS (written directly, without mounting), any rclone remote (paste its part of `rclone.conf`) or a folder
+mounted into the container, checks the size of the copy and keeps the newest N there. With a backup passphrase the
+copies are encrypted (AES-256-GCM, key from scrypt) – keep the passphrase somewhere else too. A failed copy goes to
+the alert channels. A backup can be restored straight from a destination: on a new server, add the same destination
+and choose the backup.
 
 ## Security
 
@@ -253,8 +295,9 @@ select the devices on the old hub and use *Redirect to another hub*. The backup 
 - Passwords of the nodes' web administrators and the credentials of login profiles and watchers only travel to the
   node; the hub removes them from a command once the agent fetched it.
 
-Known limitations: the hub container runs as root and backups are not encrypted. Whoever controls the hub controls
-the nodes (through agent and CARACAL updates), so protect admin and manager accounts.
+Known limitations: the hub container runs as root, and the backups it keeps in its own data folder are not encrypted
+(the copies outside the server can be). Whoever controls the hub controls the nodes (through agent and CARACAL
+updates), so protect accounts with the updates and users permissions.
 
 ## Repository layout
 

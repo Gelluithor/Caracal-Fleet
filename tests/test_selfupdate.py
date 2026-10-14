@@ -118,3 +118,41 @@ def test_check_and_start(client, admin_headers, monkeypatch):
     assert client.post('/api/system/update', headers=admin_headers, json={'version': '99.0.0'}).json()['detail'] == 'docker_socket_missing'
     assert client.post('/api/system/update', headers=admin_headers, json={'version': '9.9.9'}).json()['detail'] == 'version_required'
     selfupdate._state.update(checked=0, data=None, job=None)
+
+
+def test_going_back_with_the_data_of_that_version(client, admin_headers, monkeypatch, tmp_path):
+    """An older version can be chosen; its own backup is staged and applied only by that version."""
+    import io
+    import zipfile
+    from app import core, images, system
+    from app.core import HUB_VERSION
+    selfupdate._state.update(checked=0, data=None, job=None)
+    monkeypatch.setattr(images, 'list_tags', lambda image: ['4.16.1', '4.17.0', HUB_VERSION])
+    monkeypatch.setattr(selfupdate.Docker, 'available', lambda self: True)
+    monkeypatch.setattr(selfupdate, 'own_container', lambda docker: {'Config': {'Image': 'ghcr.io/o/caracal-fleet:' + HUB_VERSION, 'Labels': {}}})
+    started = []
+    monkeypatch.setattr(selfupdate, '_run', lambda version, username: started.append(version))
+    data = client.get('/api/system/update?refresh=1', headers=admin_headers).json()
+    assert data['older'] == ['4.17.0', '4.16.1'] and data['newer'] == []
+    # a backup "made by 4.17.0": the manifest names the version
+    system.BACKUPS.mkdir(parents=True, exist_ok=True)
+    made = system.BACKUPS / 'caracal-fleet-backup-20261013-0200.zip'
+    system._build_backup(made)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(made) as src, zipfile.ZipFile(buf, 'w') as dst:
+        for item in src.infolist():
+            body = src.read(item.filename)
+            if item.filename == 'manifest.json':
+                body = body.replace(HUB_VERSION.encode(), b'4.17.0')
+            dst.writestr(item, body)
+    made.write_bytes(buf.getvalue())
+    assert [b['name'] for b in client.get('/api/system/update/backups?version=4.17.0', headers=admin_headers).json()['backups']] == [made.name]
+    assert client.get('/api/system/update/backups?version=4.16.1', headers=admin_headers).json()['backups'] == []
+    assert client.post('/api/system/update', headers=admin_headers, json={'version': '4.16.1', 'restore': made.name}).json()['detail'] == 'invalid_backup'
+    assert client.post('/api/system/update', headers=admin_headers, json={'version': '4.17.0', 'restore': made.name}).status_code == 200
+    assert started == ['4.17.0']
+    assert (core.RESTORE_DIR / 'hub.db').exists() and (core.RESTORE_DIR / 'for-version').read_text() == '4.17.0'
+    # this version starts again (the update failed): the data meant for 4.17.0 are dropped, not applied
+    assert core.apply_pending_restore() is None and not core.RESTORE_DIR.exists()
+    made.unlink()
+    selfupdate._state.update(checked=0, data=None, job=None)

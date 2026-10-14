@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.18.0'
+HUB_VERSION = '4.19.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -27,18 +27,37 @@ SETUP_CODE = DATA / 'setup-code'            # one-time code for creating the fir
 ONLINE_TIMEOUT = 35            # seconds without heartbeat before a node is offline
 DELIVERY_TIMEOUT = 900         # delivered command without result -> timeout
 FILE_RETENTION = 7 * 86400     # uploaded media are kept for a week
-ROLES = ('admin', 'manager', 'operator', 'viewer')
 LANGUAGES = ('cs', 'en')
 USERNAME_RE = re.compile(r'^[A-Za-z0-9._@-]{2,64}$')
 
-# Permission name -> roles allowed.
-PERMS = {
-    'view': {'admin', 'manager', 'operator', 'viewer'},
-    'control': {'admin', 'manager', 'operator'},   # playback, show/freeze, restart player/node
-    'content': {'admin', 'manager', 'operator'},   # playlists, media, collections, copying
-    'manage': {'admin', 'manager'},                # devices, groups, locations, SSH install, audit
-    'admin': {'admin'},                            # users and system settings
+# Permissions. A user gets them from a role, for a scope: all devices, or chosen locations, device groups and
+# devices. User groups give their members a role with a scope too; a user has everything the user and the groups
+# give. The device permissions hold for the devices of the scope; the system ones only with the whole fleet.
+DEVICE_PERMISSIONS = (
+    'view',       # devices, playlists, schedules, screens
+    'control',    # playback, show/freeze, screens on/off, restarts, notifications on the screens
+    'content',    # playlists, media, websites, cameras, global playlists
+    'schedule',   # screen routines and actions at a set time
+    'devices',    # device settings, names, groups and locations, templates, muting alerts
+    'updates',    # agent and CARACAL updates (staged updates and the node image need the whole fleet)
+    'console',    # the remote terminal of a node
+)
+SYSTEM_PERMISSIONS = (
+    'install',    # adding devices: SSH installation, SD cards, the enrollment token
+    'notify_api', # tokens of the notification API
+    'audit',      # the audit log
+    'users',      # users, roles and user groups
+    'settings',   # alerts, single sign-on, download source, appearance, backups, Fleet updates
+)
+PERMISSIONS = DEVICE_PERMISSIONS + SYSTEM_PERMISSIONS
+BUILTIN_ROLES = {
+    'admin': set(PERMISSIONS),
+    'manager': set(DEVICE_PERMISSIONS) | {'install', 'notify_api', 'audit'},
+    'operator': {'view', 'control', 'content'},
+    'viewer': {'view'},
 }
+ROLES = tuple(BUILTIN_ROLES)
+ROLE_KEY_RE = re.compile(r'^r[0-9a-f]{8}$')   # custom roles
 
 # Command action -> (permission, ttl seconds for queued state or None = no expiry).
 ACTIONS = {
@@ -64,13 +83,13 @@ ACTIONS = {
     'delete_profile': ('content', None),
     'import_playlist': ('content', None),
     'export_assets': ('content', None),
-    'update_agent': ('manage', None),
-    'set_hub': ('manage', None),
-    'update_caracal': ('manage', 600),
-    'convert_to_docker': ('manage', 600),
+    'update_agent': ('updates', None),
+    'set_hub': ('devices', None),
+    'update_caracal': ('updates', 600),
+    'convert_to_docker': ('updates', 600),
     # agents from 4.13: install CARACAL again (optionally without its data) and a report of the node's state
-    'reinstall_node': ('manage', 600),
-    'diagnostics': ('manage', 600),
+    'reinstall_node': ('updates', 600),
+    'diagnostics': ('devices', 600),
     # agents from 4.13 with CARACAL 2026.10.12 and newer: websites in dark mode
     'player_settings': ('content', None),
     # agents from 4.14: switch the screen off / on (DPMS, HDMI-CEC)
@@ -80,6 +99,7 @@ ACTIONS = {
     'update_camera': ('content', None),
     'camera_onvif': ('content', 600),
     'camera_discover': ('content', 600),
+    'camera_preview': ('content', 120),   # agents from 4.16 with CARACAL 2026.10.14
     # on-screen notifications of the nodes
     'notify': ('control', 600),
     'notify_clear': ('control', 600),
@@ -89,17 +109,17 @@ ACTIONS = {
     'delete_watcher': ('content', None),
     'check_watcher': ('content', 600),
     'notify_sound': ('content', None),
-    'set_download_source': ('manage', None),
+    'set_download_source': ('devices', None),
     # what else the node's web administration offers (CARACAL 2026.10.10 and newer)
-    'set_admin': ('manage', None),
+    'set_admin': ('devices', None),
     'overlay_settings': ('content', None),
     'notify_skip': ('control', 600),
     'notify_remove': ('control', 600),
     'notify_log': ('view', 600),
     'notify_history_clear': ('content', None),
-    'notify_audit_clear': ('manage', None),
-    'update_notify_token': ('manage', None),
-    'delete_notify_token': ('manage', None),
+    'notify_audit_clear': ('devices', None),
+    'update_notify_token': ('devices', None),
+    'delete_notify_token': ('devices', None),
     'preview_watcher': ('content', 600),
     'grafana_discover': ('content', 600),
     # agents from 4.11 with CARACAL 2026.10.10.4 and newer
@@ -112,7 +132,7 @@ ACTIONS = {
 SECRET_KEYS = ('username', 'password', 'secret', 'client_secret', 'refresh_token')
 SECRET_ACTIONS = ('add_profile', 'update_profile', 'add_watcher', 'update_watcher', 'preview_watcher', 'set_admin',
                   'convert_to_docker', 'reinstall_node',   # optionally with the node's web administrator
-                  'add_camera', 'update_camera', 'camera_onvif')   # credentials of camera streams
+                  'add_camera', 'update_camera', 'camera_onvif', 'camera_preview')   # credentials of camera streams
 # installing CARACAL (apt, pip, image downloads) takes much longer than other commands
 INSTALL_ACTIONS = ('update_caracal', 'convert_to_docker', 'reinstall_node')
 DARK_MODES = ('off', 'dark', 'force')
@@ -226,6 +246,12 @@ CREATE TABLE IF NOT EXISTS node_schedules(id INTEGER PRIMARY KEY AUTOINCREMENT, 
 CREATE TABLE IF NOT EXISTS rollouts(id INTEGER PRIMARY KEY AUTOINCREMENT, version TEXT, image TEXT, state TEXT,
   stages_json TEXT DEFAULT '[]', current INTEGER DEFAULT 0, wait INTEGER DEFAULT 30, auto INTEGER DEFAULT 0, username TEXT,
   created REAL, updated REAL, log_json TEXT DEFAULT '[]');
+-- custom roles (the built-in ones are in BUILTIN_ROLES) and user groups with a role for a scope
+CREATE TABLE IF NOT EXISTS roles(key TEXT PRIMARY KEY, name TEXT, description TEXT DEFAULT '', permissions_json TEXT DEFAULT '[]',
+  created REAL, updated REAL);
+CREATE TABLE IF NOT EXISTS user_groups(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT DEFAULT '',
+  role TEXT DEFAULT '', scope_json TEXT DEFAULT '', created REAL);
+CREATE TABLE IF NOT EXISTS user_group_members(group_id INTEGER, user_id INTEGER, PRIMARY KEY(group_id, user_id));
 CREATE TABLE IF NOT EXISTS scheduled_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER DEFAULT 1,
   data_json TEXT DEFAULT '{}', last_run REAL, last_day TEXT DEFAULT '', last_result TEXT DEFAULT '', created REAL,
   updated REAL, updated_by TEXT DEFAULT '');
@@ -254,7 +280,10 @@ COLUMNS = [
     ('users', 'totp_recovery', "TEXT DEFAULT ''"),
     ('users', 'totp_last', 'INTEGER DEFAULT 0'),
     ('users', 'sso_subject', "TEXT DEFAULT ''"),
-    ('users', 'must_change_password', 'INTEGER DEFAULT 0'),   # a one-time password set by an administrator   # '<schedule id>:<playlist id>' deployed by a schedule
+    ('users', 'must_change_password', 'INTEGER DEFAULT 0'),   # a one-time password set by an administrator
+    ('users', 'scope_json', "TEXT DEFAULT ''"),   # the devices the user's role holds for ('' = all)
+    ('global_playlist_items', 'valid_from', 'REAL'),    # shown only from / until (Unix time), CARACAL 2026.10.14
+    ('global_playlist_items', 'valid_until', 'REAL'),
 ]
 
 
@@ -385,6 +414,12 @@ def apply_pending_restore():
     """
     if not (RESTORE_DIR / 'hub.db').exists():
         return None
+    meant_for = RESTORE_DIR / 'for-version'
+    if meant_for.exists() and meant_for.read_text().strip() != HUB_VERSION:
+        # data for going back to an older version: this version started instead (the update failed)
+        print(f'Pending restore for {meant_for.read_text().strip()} dropped', flush=True)
+        shutil.rmtree(RESTORE_DIR, ignore_errors=True)
+        return None
     keep = DATA / time.strftime('pre-restore-%Y%m%d-%H%M%S')
     keep.mkdir()
     for name in ('hub.db', 'hub.db-wal', 'hub.db-shm', 'config.json'):
@@ -456,24 +491,108 @@ def user_from_token(raw, perm='view', path=None):
             raise ValueError
         with db() as c:
             u = c.execute('SELECT * FROM users WHERE username=? AND enabled=1', (name,)).fetchone()
-        if not u or not hmac.compare_digest(fp, _pw_fingerprint(u['password_hash'])):
-            raise ValueError
+            if not u or not hmac.compare_digest(fp, _pw_fingerprint(u['password_hash'])):
+                raise ValueError
+            u = dict(u)
+            u['access'] = load_access(c, u)
     except (ValueError, TypeError):
         raise HTTPException(401, 'session_expired')
-    u = dict(u)
     if u.get('must_change_password') and path not in PASSWORD_CHANGE_PATHS:
         raise HTTPException(403, 'password_change_required')
-    if u['role'] not in PERMS[perm]:
+    if perm and not u['access'].has(perm):   # perm None: any signed-in user (the own account)
         raise HTTPException(403, 'forbidden')
     return u
 
 
 def public_user(u):
     x = dict(u)
-    return {'id': x['id'], 'username': x['username'], 'role': x['role'], 'language': x['language'] or 'cs',
-            'permissions': sorted(p for p, roles in PERMS.items() if x['role'] in roles),
+    with db() as c:
+        access = x.get('access') or load_access(c, x)
+        named = c.execute('SELECT name FROM roles WHERE key=?', (x['role'],)).fetchone() if x['role'] not in BUILTIN_ROLES else None
+    return {'id': x['id'], 'username': x['username'], 'role': x['role'], 'role_name': named['name'] if named else '',
+            'language': x['language'] or 'cs',
+            'permissions': access.permissions(), 'everywhere': access.everywhere_list(), 'scoped': access.scoped(),
             'totp': bool(x.get('totp_secret')), 'sso': str(x.get('password_hash') or '').startswith('sso$'),
             'must_change_password': bool(x.get('must_change_password'))}
+
+
+# ---------------------------------------------------------------- roles, scopes and what a user may do
+
+def parse_scope(raw):
+    """None = all devices, otherwise {'locations': [...], 'groups': [...], 'devices': [...]}."""
+    try:
+        s = json.loads(raw) if isinstance(raw, str) and raw else raw
+    except ValueError:
+        return {'locations': [], 'groups': [], 'devices': []}   # unreadable: nothing rather than everything
+    if not s or not isinstance(s, dict) or s.get('all'):
+        return None
+    return {k: [str(x) for x in s.get(k) or [] if isinstance(x, (str, int))] for k in ('locations', 'groups', 'devices')}
+
+
+def in_scope(scope, d):
+    if scope is None:
+        return True
+    group = d.get('device_group') if 'device_group' in d.keys() else d.get('group')
+    return (d.get('id') in scope['devices'] or (d.get('location') or '') in scope['locations']
+            or (group or '') in scope['groups'])
+
+
+def role_permissions(c, key):
+    if key in BUILTIN_ROLES:
+        return set(BUILTIN_ROLES[key])
+    row = c.execute('SELECT permissions_json FROM roles WHERE key=?', (key,)).fetchone() if key else None
+    try:
+        return {p for p in json.loads(row['permissions_json'] or '[]') if p in PERMISSIONS} if row else set()
+    except ValueError:
+        return set()
+
+
+class Access:
+    """What one user may do: grants of (permissions, scope) from the user and the user's groups."""
+
+    def __init__(self, grants):
+        self.grants = [(frozenset(p), s) for p, s in grants if p]
+
+    def has(self, perm):
+        """The permission somewhere (system permissions: with the whole fleet)."""
+        if perm in SYSTEM_PERMISSIONS:
+            return self.everywhere(perm)
+        return any(perm in p for p, _ in self.grants)
+
+    def everywhere(self, perm):
+        return any(perm in p and s is None for p, s in self.grants)
+
+    def on(self, perm, device):
+        """The permission for one device (a database row or a built device)."""
+        if perm in SYSTEM_PERMISSIONS:
+            return self.everywhere(perm)
+        d = dict(device) if not isinstance(device, dict) else device
+        return any(perm in p and in_scope(s, d) for p, s in self.grants)
+
+    def permissions(self):
+        return [p for p in PERMISSIONS if self.has(p)]
+
+    def everywhere_list(self):
+        return [p for p in PERMISSIONS if self.everywhere(p)]
+
+    def scoped(self):
+        """True when the user sees only some of the devices."""
+        return not any(s is None and 'view' in p for p, s in self.grants)
+
+
+def load_access(c, u):
+    grants = [(role_permissions(c, u.get('role') or ''), parse_scope(u.get('scope_json') or ''))]
+    for g in c.execute('SELECT g.role, g.scope_json FROM user_groups g JOIN user_group_members m ON m.group_id=g.id '
+                       'WHERE m.user_id=?', (u['id'],)):
+        grants.append((role_permissions(c, g['role'] or ''), parse_scope(g['scope_json'] or '')))
+    return Access(grants)
+
+
+def require_device(u, perm, device):
+    """403 for a device the user sees but may not do this with, 404 for one outside the user's scope."""
+    if not u['access'].on(perm, device):
+        raise HTTPException(403 if u['access'].on('view', device) else 404,
+                            'forbidden' if u['access'].on('view', device) else 'device_not_found')
 
 
 def audit(u, action, target='', detail=''):

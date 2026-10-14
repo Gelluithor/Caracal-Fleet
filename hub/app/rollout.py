@@ -219,7 +219,9 @@ def list_rollouts(r: Request):
 
 @router.post('/api/rollouts')
 async def start_rollout(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
+    if not u['access'].everywhere('updates'):   # staged updates take the whole fleet
+        raise HTTPException(403, 'forbidden')
     d = await _json(r)
     ids = [str(x) for x in d.get('device_ids') or []]
     pilots = [str(x) for x in d.get('pilot_ids') or []]
@@ -233,7 +235,9 @@ async def start_rollout(r: Request):
 
 @router.post('/api/rollouts/{rid}/{action}')
 def control_rollout(rid: int, action: str, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
+    if not u['access'].everywhere('updates'):   # staged updates take the whole fleet
+        raise HTTPException(403, 'forbidden')
     if action not in ('pause', 'resume', 'cancel'):
         raise HTTPException(404, 'not_found')
     with db() as c:
@@ -259,7 +263,9 @@ def control_rollout(rid: int, action: str, r: Request):
 
 @router.put('/api/rollouts/auto')
 async def auto_settings(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
+    if not u['access'].everywhere('updates'):   # staged updates take the whole fleet
+        raise HTTPException(403, 'forbidden')
     d = await _json(r)
     conf = {'enabled': bool(d.get('enabled')), 'hour': _int(d.get('hour'), 0, 23, 3),
             'pilot_group': str(d.get('pilot_group') or '').strip()[:120], 'pilot_count': _int(d.get('pilot_count'), 0, 50, 1),

@@ -65,7 +65,9 @@ def list_releases(r: Request):
 
 @router.post('/api/node-releases')
 async def upload_release(r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
+    if not u['access'].everywhere('updates'):
+        raise HTTPException(403, 'forbidden')
     data = bytearray()
     async for chunk in r.stream():
         data += chunk
@@ -95,7 +97,9 @@ async def upload_release(r: Request):
 
 @router.delete('/api/node-releases/{rid}')
 def delete_release(rid: int, r: Request):
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
+    if not u['access'].everywhere('updates'):
+        raise HTTPException(403, 'forbidden')
     with db() as c:
         rel = c.execute('SELECT * FROM node_releases WHERE id=?', (rid,)).fetchone()
         if not rel:
@@ -110,7 +114,7 @@ def delete_release(rid: int, r: Request):
 async def deploy_release(rid: int, r: Request):
     """Queue the CARACAL update on the selected online nodes."""
     from .main import body, validate_command   # late import: main imports this module
-    u = current_user(r, 'manage')
+    u = current_user(r, 'updates')
     d = await body(r)
     ids = list(dict.fromkeys(str(x) for x in d.get('device_ids') or []))
     if not ids:
@@ -119,8 +123,8 @@ async def deploy_release(rid: int, r: Request):
     with db() as c:
         for did in ids:
             row = c.execute('SELECT * FROM devices WHERE id=?', (did,)).fetchone()
-            if not row:
-                skipped.append({'device_id': did, 'reason': 'device_not_found'})
+            if not row or not u['access'].on('updates', row):
+                skipped.append({'device_id': did, 'reason': 'device_not_found' if not row else 'forbidden'})
                 continue
             try:
                 payload = validate_command(c, row, 'update_caracal', {'release_id': rid})

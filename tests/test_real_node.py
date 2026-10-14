@@ -3,6 +3,7 @@
 Runs when the node repository is available next to this one (../caracal) or at CARACAL_NODE_REPO and its
 Python dependencies are installed; skipped otherwise (e.g. in CI). Grafana discovery is replaced by a stub.
 """
+import base64
 import importlib.util
 import json
 import os
@@ -823,3 +824,45 @@ def test_cameras_from_fleet(env):
                       json={'action': 'add_camera', 'payload': {'name': 'x', 'streams': [{'url': 'file:///etc/passwd'}]}})
     assert r.json()['detail'] == 'invalid_stream_url'
     run(env, 'delete_asset', {'id': cam['id']})
+
+
+def test_validity_from_fleet(env):
+    """Items shown only from / until a time: set from Fleet, carried by global playlists, left out by the player."""
+    now = time.time()
+    assert device(env)['capabilities']['validity'] is True
+    run(env, 'add_web', {'name': 'Akce', 'source': 'https://example.com/akce', 'valid_from': now + 3600})
+    item = next(a for a in node_assets(env) if a['name'] == 'Akce')
+    assert item['valid_from'] == now + 3600 and item['valid_until'] is None
+    played = [x['id'] for x in env['local'].get(f"{env['node']}/api/player/playlist-expanded").json()]
+    assert item['id'] not in played
+    run(env, 'update_asset', {'id': item['id'], 'valid_from': None, 'valid_until': now + 7200})
+    item = next(a for a in node_assets(env) if a['name'] == 'Akce')
+    assert item['valid_from'] is None and item['valid_until'] == now + 7200
+    assert item['id'] in [x['id'] for x in env['local'].get(f"{env['node']}/api/player/playlist-expanded").json()]
+    r = requests.post(f"{env['hub']}/api/devices/{env['id']}/commands", headers=env['h'],
+                      json={'action': 'update_asset', 'payload': {'id': item['id'], 'valid_from': now, 'valid_until': now - 10}})
+    assert r.json()['detail'] == 'invalid_validity'
+    run(env, 'delete_asset', {'id': item['id']})
+    # a global playlist keeps the validity of its items
+    pid = requests.post(f"{env['hub']}/api/global-playlists", headers=env['h'], json={'name': 'Víkend'}).json()['id']
+    requests.post(f"{env['hub']}/api/global-playlists/{pid}/items", headers=env['h'],
+                  json={'kind': 'web', 'name': 'Sobota', 'source': 'https://example.com/so', 'valid_until': now + 600})
+    requests.post(f"{env['hub']}/api/global-playlists/{pid}/deploy", headers=env['h'], json={'target_ids': [env['id']], 'mode': 'append'})
+    env['agent'].run_commands()
+    env['agent'].heartbeat()
+    item = next(a for a in node_assets(env) if a['name'] == 'Sobota')
+    assert item['valid_until'] == now + 600
+    run(env, 'delete_asset', {'id': item['id']})
+    requests.delete(f"{env['hub']}/api/global-playlists/{pid}", headers=env['h'])
+
+
+def test_camera_preview_from_fleet(env, tmp_path, monkeypatch):
+    """A picture of a stream through the agent (mpv replaced by a script writing a JPEG)."""
+    fake = tmp_path / 'mpv'
+    fake.write_text('#!/bin/sh\nfor a; do case "$a" in --vo-image-outdir=*) d="${a#*=}";; esac; done\nprintf "\\377\\330jpeg" > "$d/00000001.jpg"\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv('PATH', f"{tmp_path}:{os.environ['PATH']}")
+    assert device(env)['capabilities']['camera_preview'] is True
+    row = run(env, 'camera_preview', {'url': 'rtsp://10.0.0.5/live', 'username': 'admin', 'password': 'cam-secret-9'})
+    assert 'cam-secret-9' not in row['payload_json']
+    assert base64.b64decode(json.loads(row['result'])['image']).startswith(b'\xff\xd8')

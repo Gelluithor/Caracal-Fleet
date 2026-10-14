@@ -16,7 +16,8 @@
 #          (retried every minute, like the systemd service of the SD cards).
 #
 # Settings: /etc/caracal-firstboot.conf (HUB, TOKEN, NAME_PREFIX, DISK, TIMEZONE, LOGIN_USER, LOGIN_PASSWORD, SSH_KEY,
-# STATIC_IP, GATEWAY, DNS, NTP, DOWNLOAD_SOURCE, TEMPLATE...). Log: /var/log/caracal-firstboot.log
+# STATIC_IP, GATEWAY, DNS, NTP, DOWNLOAD_SOURCE, TEMPLATE, WIFI...). Log: /var/log/caracal-firstboot.log
+# Wi-Fi (Raspberry Pi): /etc/wpa_supplicant/wpa_supplicant.conf from the card; wpa_supplicant is on the card too.
 set -u
 
 DIR=${CARACAL_ALPINE_DIR:-/etc/caracal}
@@ -61,9 +62,38 @@ first_interface() {   # the interface with a cable plugged in, otherwise the fir
   interfaces | head -n 1
 }
 
+wifi_interface() {   # the first Wi-Fi interface
+  for i in /sys/class/net/*; do
+    [ -d "$i/wireless" ] && { echo "${i##*/}"; return; }
+  done
+}
+
+wifi_up() {   # Wi-Fi from the card: wpa_supplicant (from the card's packages) and the firmware of the Pi
+  [ "${WIFI:-}" = 1 ] && [ -f /etc/wpa_supplicant/wpa_supplicant.conf ] || return 0
+  say 'connecting to the Wi-Fi'
+  apk add -q wpa_supplicant wpa_supplicant-openrc >> "$LOG" 2>&1 || say 'wpa_supplicant could not be installed'
+  modprobe brcmfmac 2>/dev/null
+  i=0
+  while [ -z "$(wifi_interface)" ] && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+  w=$(wifi_interface)
+  [ -n "$w" ] || { say 'no Wi-Fi interface found'; return 1; }
+  echo "wpa_supplicant_args=\"-i $w\"" > /etc/conf.d/wpa_supplicant
+  rc-update add wpa_supplicant boot >/dev/null 2>&1
+  rc-service wpa_supplicant restart >/dev/null 2>&1 || rc-service wpa_supplicant start >/dev/null 2>&1
+}
+
 network_interfaces() {   # contents of /etc/network/interfaces
   printf 'auto lo\niface lo inet loopback\n'
-  if [ -n "${STATIC_IP:-}" ]; then
+  w=''
+  [ "${WIFI:-}" = 1 ] && w=$(wifi_interface)
+  if [ -n "$w" ]; then   # Wi-Fi: the fixed address there; a cable still works with DHCP
+    if [ -n "${STATIC_IP:-}" ]; then
+      printf '\nauto %s\niface %s inet static\n\taddress %s\n\tgateway %s\n' "$w" "$w" "$STATIC_IP" "$GATEWAY"
+    else
+      printf '\nauto %s\niface %s inet dhcp\n' "$w" "$w"
+    fi
+    for n in $(interfaces); do printf '\nauto %s\niface %s inet dhcp\n' "$n" "$n"; done
+  elif [ -n "${STATIC_IP:-}" ]; then
     n=$(first_interface)
     printf '\nauto %s\niface %s inet static\n\taddress %s\n\tgateway %s\n' "$n" "$n" "$STATIC_IP" "$GATEWAY"
   else
@@ -72,6 +102,7 @@ network_interfaces() {   # contents of /etc/network/interfaces
 }
 
 setup_network() {
+  wifi_up
   network_interfaces > /etc/network/interfaces
   if [ -n "${STATIC_IP:-}" ]; then
     : > /etc/resolv.conf
@@ -196,6 +227,9 @@ rpi_live() {
   write_repositories keep-media
   apk update -q >> "$LOG" 2>&1
   apk add -q parted e2fsprogs >> "$LOG" 2>&1 || fail 'the partition tools could not be installed'
+  if [ "${WIFI:-}" = 1 ]; then   # the installed system needs the Wi-Fi firmware as a package (the live one has it in modloop)
+    apk add -q linux-firmware-brcm linux-firmware-cypress >> "$LOG" 2>&1 || say 'the Wi-Fi firmware packages could not be installed'
+  fi
   if [ ! -b "$root" ]; then
     say "creating the system partition on the SD card ($disk)"
     start=$(parted -ms "$disk" unit MiB print 2>>"$LOG" | awk -F: '$1 == "1" {sub("MiB", "", $3); print int($3) + 1}')
@@ -227,55 +261,10 @@ rpi_live() {
 }
 
 live() {
-  bootdev=$(awk '$2 ~ /^\/media\/mmcblk[0-9]+p1$/ {print $1; exit}' /proc/mounts)
-  bootdir=$(awk '$2 ~ /^\/media\/mmcblk[0-9]+p1$/ {print $2; exit}' /proc/mounts)
-  [ -n "$bootdev" ] || fail 'the boot partition of the SD card was not found'
-  disk=${bootdev%p1}
-  root=${disk}p2
-  hostname "${NAME_PREFIX:-caracal}"
-  echo "${NAME_PREFIX:-caracal}" > /etc/hostname
-  write_repositories keep-media
-  apk update -q >> "$LOG" 2>&1
-  apk add -q parted e2fsprogs >> "$LOG" 2>&1 || fail 'the partition tools could not be installed'
-  if [ ! -b "$root" ]; then
-    say "creating the system partition on the SD card ($disk)"
-    start=$(parted -ms "$disk" unit MiB print 2>>"$LOG" | awk -F: '$1 == "1" {sub("MiB", "", $3); print int($3) + 1}')
-    [ -n "$start" ] || fail 'the partition table of the SD card could not be read'
-    parted -s "$disk" mkpart primary ext4 "${start}MiB" 100% >> "$LOG" 2>&1 || fail 'the system partition could not be created'
-    i=0
-    while [ ! -b "$root" ] && [ "$i" -lt 10 ]; do mdev -s 2>/dev/null; sleep 1; i=$((i + 1)); done
-    [ -b "$root" ] || fail "the new partition $root did not appear"
-  fi
-  say "installing Alpine Linux on $root"
-  mkfs.ext4 -F -q -L caracal "$root" >> "$LOG" 2>&1 || fail 'the system partition could not be formatted'
-  mount "$root" /mnt || fail 'the system partition could not be mounted'
-  date -u '+%Y-%m-%dT%H:%M:%SZ' > "$MARKER"
-  setup-disk -m sys /mnt >> "$LOG" 2>&1 || fail 'setup-disk failed'
-  mount -o remount,rw "$bootdir" || fail 'the boot partition could not be written'
-  # the kernel and the initramfs of the installed system replace the live ones on the FAT partition
-  rm -f "$bootdir"/boot/*
-  rm -f /mnt/boot/boot
-  mv /mnt/boot/* "$bootdir/boot/" || fail 'the kernel could not be moved to the boot partition'
-  rm -rf /mnt/boot
-  mkdir -p "/mnt$bootdir"
-  ln -s "${bootdir#/}/boot" /mnt/boot
-  echo "$bootdev $bootdir vfat defaults 0 0" >> /mnt/etc/fstab
-  sed -i '/cdrom/d; /floppy/d' /mnt/etc/fstab
-  sed -i "s#^#root=$root rootfstype=ext4 #" "$bootdir/cmdline.txt"
-  # the overlay is not needed any more (the installed system has its /etc); kept renamed for troubleshooting
-  mv "$bootdir/caracal.apkovl.tar.gz" "$bootdir/caracal.apkovl.tar.gz.installed" 2>/dev/null
-  sync
-  umount /mnt
-  say 'Alpine Linux installed on the SD card, rebooting into the new system'
-  sleep 5
-  reboot
-}
-
-live() {
   load_conf
   say 'zero-touch installation of Alpine Linux and CARACAL started'
   setup_network
-  wait_for_hub 90 || { say "the hub $HUB is not reachable: check the network cable and the hub address"; exit 1; }
+  wait_for_hub 90 || { say "the hub $HUB is not reachable: check the network (cable or Wi-Fi) and the hub address"; exit 1; }
   sync_clock
   if is_rpi; then rpi_live; exit 0; fi
   disk=$(pick_disk)

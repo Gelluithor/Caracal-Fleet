@@ -378,7 +378,7 @@ def _size(path):
 
 @router.get('/api/proxy/status')
 def proxy_status(r: Request):
-    current_user(r, 'manage')
+    current_user(r, 'updates')
     archives = [{'name': p.name.replace('__', ' · ').removesuffix('.tar'), 'size': p.stat().st_size,
                  'updated': p.stat().st_mtime} for p in sorted(IMAGE_CACHE.glob('*.tar'))] if IMAGE_CACHE.exists() else []
     with _jobs_lock:
@@ -389,7 +389,7 @@ def proxy_status(r: Request):
 
 @router.get('/api/proxy/mirrors')
 def get_mirrors(r: Request):
-    current_user(r, 'manage')
+    current_user(r, 'updates')
     return {'mirrors': mirrors(), 'builtin': list(DEFAULT_APT_HOSTS + APK_HOSTS)}
 
 
@@ -398,7 +398,7 @@ async def put_mirrors(r: Request):
     """The trusted mirrors: one per line, a host name (https) or http://host for a mirror without TLS. apt and apk
     check the repository signatures themselves, so a mirror cannot change packages."""
     from .core import save_cfg
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     try:
         d = await r.json()
     except ValueError:
@@ -422,7 +422,7 @@ async def put_mirrors(r: Request):
 
 @router.post('/api/proxy/cache/clear')
 def proxy_clear(r: Request):
-    u = current_user(r, 'admin')
+    u = current_user(r, 'settings')
     freed = _size(CACHE)
     shutil.rmtree(CACHE, ignore_errors=True)
     audit(u, 'proxy.cache_clear', '', {'bytes': freed})
