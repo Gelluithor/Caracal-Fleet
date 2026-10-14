@@ -379,3 +379,34 @@ def test_dietpi_first_login_without_internet(env, tmp_path):
     # another login later does nothing (stage 1); a hub that cannot be reached keeps stage 0 (no GitHub detour)
     stage.write_text('1\n')
     assert run(script, 'dietpi-offline').stdout == ''
+
+
+def test_trusted_mirrors(client, admin_headers):
+    """An administrator's mirrors are served like the built-in repositories and reach the agents."""
+    from app import proxy
+    h = admin_headers
+    assert client.put('/api/proxy/mirrors', headers=h, json={'mirrors': ['not a host!']}).json()['detail'] == 'invalid_mirror'
+    r = client.put('/api/proxy/mirrors', headers=h, json={'mirrors': ['Mirror.Example.cz', 'http://apt.lan:8080/', 'deb.debian.org', 'mirror.example.cz']})
+    assert r.json()['mirrors'] == [{'host': 'mirror.example.cz', 'scheme': 'https'}, {'host': 'apt.lan:8080', 'scheme': 'http'}]
+    assert 'apt.lan:8080' in proxy.apt_hosts() and proxy.scheme_of('apt.lan:8080') == 'http'
+    assert proxy.scheme_of('deb.debian.org') == 'https'
+    dev = client.post('/api/device/enroll', json={'enroll_token': 'enroll-test-token', 'fingerprint': 'mirror-node', 'name': 'M'}).json()
+    beat = client.post(f"/api/device/{dev['device_id']}/heartbeat", headers={'X-Device-Token': dev['device_token']}, json={'version': '4.15.0'})
+    assert beat.json()['mirrors'] == ['https://mirror.example.cz', 'http://apt.lan:8080']
+    client.put('/api/proxy/mirrors', headers=h, json={'mirrors': []})
+    assert 'apt.lan:8080' not in proxy.apt_hosts()
+
+
+def test_agent_points_sources_to_mirrors():
+    mod = load_agent()
+    src = 'deb http://apt.lan:8080/debian bookworm main\ndeb https://deb.debian.org/debian bookworm main\n'
+    mirrors = {'apt.lan:8080': 'http'}
+    through = mod.apt_rewrite(src, 'https://hub', mirrors, mirrors)
+    assert 'https://hub/apt/apt.lan:8080/debian' in through and 'https://hub/apt/deb.debian.org/debian' in through
+    # the hub dropped the mirror: back to its own address, with its own scheme
+    back = mod.apt_rewrite(through, 'https://hub', {}, mirrors)
+    assert 'deb http://apt.lan:8080/debian' in back and 'https://hub/apt/deb.debian.org' in back
+    assert mod.apt_rewrite(through, None, {}, mirrors) == src
+    apk = 'https://mirror.cz/alpine/v3.20/main\n'
+    m = {'mirror.cz': 'https'}
+    assert mod.apk_rewrite(apk, 'https://hub', 'dev', 'tok', m, m) == 'https://dev:tok@hub/apt/mirror.cz/alpine/v3.20/main\n'

@@ -124,3 +124,29 @@ def test_single_sign_on(client, admin_headers):
     assert client.get('/api/sso/callback?code=anna&state=forged', follow_redirects=False).headers['location'] == '/#sso_error=sso_state'
     client.put('/api/sso/settings', headers=h, json={'enabled': False})
     assert client.get('/api/sso/login', follow_redirects=False).status_code == 404
+
+
+def test_one_time_password(client, admin_headers):
+    h = admin_headers
+    assert client.post('/api/users', headers=h, json={'username': 'newbie', 'password': 'one-time-pass-1', 'role': 'operator',
+                                                     'must_change': True}).status_code == 200
+    r = login(client, 'newbie', 'one-time-pass-1')
+    assert r.status_code == 200 and r.json()['user']['must_change_password'] is True
+    uh = {'Authorization': 'Bearer ' + r.json()['token']}
+    assert client.get('/api/me', headers=uh).json()['must_change_password'] is True
+    assert client.get('/api/devices', headers=uh).json()['detail'] == 'password_change_required'   # nothing else
+    assert client.patch('/api/me', headers=uh, json={'current_password': 'one-time-pass-1', 'new_password': 'one-time-pass-1'}).json()['detail'] == 'password_same'
+    r = client.patch('/api/me', headers=uh, json={'current_password': 'one-time-pass-1', 'new_password': 'my-own-password-9'})
+    uh = {'Authorization': 'Bearer ' + r.json()['token']}
+    assert client.get('/api/devices', headers=uh).status_code == 200
+    assert client.get('/api/me', headers=uh).json()['must_change_password'] is False
+    # an administrator resets the password as a one-time password again
+    uid = next(x['id'] for x in client.get('/api/users', headers=h).json() if x['username'] == 'newbie')
+    client.patch(f'/api/users/{uid}', headers=h, json={'password': 'reset-pass-12', 'must_change': True})
+    assert next(x for x in client.get('/api/users', headers=h).json() if x['username'] == 'newbie')['must_change_password'] == 1
+    r = login(client, 'newbie', 'reset-pass-12')
+    assert client.get('/api/devices', headers={'Authorization': 'Bearer ' + r.json()['token']}).status_code == 403
+    # without the choice a reset password is the user's password
+    client.patch(f'/api/users/{uid}', headers=h, json={'password': 'plain-reset-12'})
+    r = login(client, 'newbie', 'plain-reset-12')
+    assert client.get('/api/devices', headers={'Authorization': 'Bearer ' + r.json()['token']}).status_code == 200

@@ -196,3 +196,70 @@ def test_install_node_writes_docker_networks(tmp_path):
     assert run('192.168.0.0/23').returncode == 0
     assert json.loads((tmp_path / 'daemon.json').read_text())['default-address-pools'] == [{'base': '192.168.1.0/24', 'size': 24}]
     assert run('8.8.0.0/16').returncode != 0 and run('10.0.0.0/24').returncode != 0
+
+
+def test_alpine_raspberry_pi_image(client, admin_headers, monkeypatch, tmp_path):
+    """The card image: a DOS partition table with one FAT32 partition holding Alpine, the overlay and usercfg.txt."""
+    import gzip
+    import hashlib
+    import io
+    import shutil
+    import struct
+    import tarfile
+    import pytest
+    from app import images, sdcard
+    if not shutil.which('mformat'):
+        pytest.skip('mtools not installed')
+    # a small stand-in for Alpine's tarball (the real one is downloaded from Alpine's mirror)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+        for name, data in (('config.txt', b'kernel=boot/vmlinuz-rpi\ninclude usercfg.txt\n'), ('cmdline.txt', b'modules=loop quiet console=tty1\n'),
+                           ('boot/vmlinuz-rpi', b'K' * 1000), ('overlays/vc4-kms-v3d.dtbo', b'D' * 10)):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    blob = buf.getvalue()
+    sha = hashlib.sha256(blob).hexdigest()
+    yaml = f'---\n-\n  title: "Raspberry Pi"\n  desc: |\n    Pi 3 to Pi 5 (aarch64).\n  version: 3.24.2\n  flavor: alpine-rpi\n  file: alpine-rpi-3.24.2-aarch64.tar.gz\n  sha256: {sha}\n-\n  flavor: alpine-rpi\n  file: alpine-rpi-3.24.2-aarch64.img.gz\n  sha256: {"0" * 64}\n'
+
+    class Resp:
+        def __init__(self, data, text=''):
+            self.data, self.text, self.status_code = data, text, 200
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, n):
+            yield self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+    import requests
+    monkeypatch.setattr(requests, 'get', lambda url, **kw: Resp(b'', yaml) if url.endswith('.yaml') else Resp(blob))
+    monkeypatch.setattr(sdcard, 'ALPINE_CACHE', tmp_path / 'cache')
+    monkeypatch.setattr(images, 'node_image', lambda: 'ghcr.io/o/caracal-node')
+    assert sdcard.alpine_rpi_release()['sha256'] == sha
+    r = client.post('/api/sdcard', headers=admin_headers, json={'os': 'alpine-rpi', 'hub_url': 'https://fleet.example', 'name_prefix': 'pi',
+                                                                'user': 'admin', 'password': 'secret-pass'})
+    assert r.status_code == 200, r.text
+    assert client.post('/api/sdcard', headers=admin_headers, json={'os': 'alpine-rpi', 'hub_url': 'https://fleet.example',
+                                                                   'wifi_ssid': 'x', 'wifi_password': '12345678', 'wifi_country': 'CZ'}).json()['detail'] == 'wifi_unsupported'
+    img = gzip.decompress(r.content)
+    assert img[510:512] == b'\x55\xaa'
+    status, ptype, start, size = struct.unpack('<B3xB3xII', img[446:462])
+    assert ptype == 0x0C and start == 2048 and size == 512 * 2048 and len(img) == (2048 + size) * 512
+    part = img[2048 * 512:]
+    assert part[82:90] == b'FAT32   '
+    (tmp_path / 'p.img').write_bytes(img)
+    import subprocess
+    listing = subprocess.run(['mdir', '-i', f"{tmp_path / 'p.img'}@@1M", '-b', '-/', '::'], capture_output=True, text=True,
+                             env={**__import__('os').environ, 'MTOOLS_SKIP_CHECK': '1'}).stdout
+    for name in ('caracal.apkovl.tar.gz', 'usercfg.txt', 'config.txt', 'boot/vmlinuz-rpi', 'CARACAL-README.txt'):
+        assert f'::/{name}' in listing, name
+    # a wrong checksum is refused
+    monkeypatch.setattr(requests, 'get', lambda url, **kw: Resp(b'', yaml) if url.endswith('.yaml') else Resp(b'tampered'))
+    shutil.rmtree(tmp_path / 'cache')
+    assert client.post('/api/sdcard', headers=admin_headers, json={'os': 'alpine-rpi', 'hub_url': 'https://fleet.example'}).json()['detail'] == 'alpine_checksum'

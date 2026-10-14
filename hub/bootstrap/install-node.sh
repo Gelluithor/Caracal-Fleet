@@ -271,8 +271,10 @@ fi
 # is converted, so a node is never left without CARACAL. Exit code 5 = run again after the reboot.
 if grep -qi raspberry /proc/device-tree/model 2>/dev/null; then
   CONFIG_TXT=''
-  for f in /boot/firmware/config.txt /boot/config.txt; do [ -f "$f" ] && { CONFIG_TXT=$f; break; }; done
-  if [ -n "$CONFIG_TXT" ] && ! grep -Eq '^[[:blank:]]*dtoverlay=vc4-f?kms-v3d' "$CONFIG_TXT"; then
+  # Raspberry Pi OS, DietPi (older), Alpine (the FAT partition stays mounted at /media/mmcblk0p1)
+  for f in /boot/firmware/config.txt /boot/config.txt /media/mmcblk0p1/config.txt; do [ -f "$f" ] && { CONFIG_TXT=$f; break; }; done
+  # Alpine's image from CARACAL Fleet sets it in usercfg.txt (included by config.txt)
+  if [ -n "$CONFIG_TXT" ] && ! grep -Eqs '^[[:blank:]]*dtoverlay=vc4-f?kms-v3d' "$CONFIG_TXT" "${CONFIG_TXT%/*}/usercfg.txt"; then
     if [ -x /boot/dietpi/func/dietpi-set_hardware ]; then
       /boot/dietpi/func/dietpi-set_hardware rpi-opengl vc4-kms-v3d
     else

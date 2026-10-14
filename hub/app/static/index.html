@@ -45,6 +45,17 @@
         <button class="btn primary block" data-i="setupCreate"></button>
         <div id="setupError" class="form-error"></div>
       </form>
+      <form id="changeForm" class="login-card" hidden>
+        <span class="step-note" data-i="pwChangeKicker"></span>
+        <h2 data-i="pwChangeTitle"></h2>
+        <p class="muted" data-i="pwChangeSub"></p>
+        <label><span data-i="pwChangeOld"></span><input id="chOld" type="password" autocomplete="current-password" required></label>
+        <label><span data-i="newPassword"></span><input id="chNew" type="password" minlength="10" autocomplete="new-password" required></label>
+        <label><span data-i="pwChangeAgain"></span><input id="chNew2" type="password" minlength="10" autocomplete="new-password" required></label>
+        <button class="btn primary block" data-i="pwChangeSave"></button>
+        <button type="button" class="btn ghost block" id="chLogout" data-i="signOut"></button>
+        <div id="changeError" class="form-error"></div>
+      </form>
     </div>
   </div>
 

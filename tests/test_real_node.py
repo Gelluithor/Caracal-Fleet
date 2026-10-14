@@ -803,3 +803,23 @@ def test_black_screen_watch(env):
     env['local'].post(url, json={'black': False})
     beat(env)
     assert device(env)['black_since'] is None
+
+
+def test_cameras_from_fleet(env):
+    """A camera added from Fleet: the node keeps the passwords, Fleet keeps neither them in the command nor sees them."""
+    assert device(env)['capabilities']['add_camera'] is True
+    row = run(env, 'add_camera', {'name': 'Brána', 'duration': 15, 'layout': '2', 'streams': [
+        {'name': 'A', 'url': 'rtsp://10.0.0.5/s1', 'username': 'admin', 'password': 'cam-secret-1'},
+        {'url': 'rtsp://10.0.0.6/s1', 'username': 'admin', 'password': 'cam-secret-2'}]})
+    assert 'cam-secret' not in row['payload_json'] and '•••' in row['payload_json']
+    cam = next(a for a in node_assets(env) if a['kind'] == 'camera')
+    assert 'cam-secret' not in json.dumps(device(env)['assets'])
+    played = env['local'].get(f"{env['node']}/api/player/camera/{cam['id']}").json()
+    assert played['streams'][1]['url'] == 'rtsp://admin:cam-secret-2@10.0.0.6/s1' and played['layout'] == '2'
+    run(env, 'update_camera', {'id': cam['id'], 'name': 'Brána 2', 'streams': [{'url': 'rtsp://10.0.0.5/s2'}]})
+    played = env['local'].get(f"{env['node']}/api/player/camera/{cam['id']}").json()
+    assert played['streams'] == [{'name': '', 'url': 'rtsp://admin:cam-secret-1@10.0.0.5/s2'}]
+    r = requests.post(f"{env['hub']}/api/devices/{env['id']}/commands", headers=env['h'],
+                      json={'action': 'add_camera', 'payload': {'name': 'x', 'streams': [{'url': 'file:///etc/passwd'}]}})
+    assert r.json()['detail'] == 'invalid_stream_url'
+    run(env, 'delete_asset', {'id': cam['id']})

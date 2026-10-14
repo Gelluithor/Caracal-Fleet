@@ -16,6 +16,9 @@ services:
       - "${CARACAL_HUB_PORT:-8090}:8090"
     volumes:
       - hub-data:/var/lib/caracal-hub
+      # Updates from the web UI (Settings -> Fleet update): the hub replaces its own container. Whoever controls the
+      # Docker socket controls the server, so this is opt-in; without it the UI shows the commands to run.
+      # - /var/run/docker.sock:/var/run/docker.sock
     environment:
       CARACAL_NODE_IMAGE: ${CARACAL_NODE_IMAGE:-ghcr.io/gelluithor/caracal-node}
       CARACAL_HUB_ADMIN_PASSWORD: ${CARACAL_HUB_ADMIN_PASSWORD:-}

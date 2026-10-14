@@ -353,6 +353,8 @@ def tick(now_ts=None):
     rollout.tick(now_ts)   # staged updates advance in the same loop
     from .system import backup_tick
     backup_tick(now_ts)    # and the daily backup
+    from . import selfupdate
+    selfupdate.tick()      # and the daily check for a new version of Fleet
 
 
 def _loop():

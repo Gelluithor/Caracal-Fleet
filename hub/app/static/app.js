@@ -93,6 +93,7 @@ const ICONS = {
   global: 'M3 7h18v13H3zM6 4h12M9 11h6M9 15h4',
   templates: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM16.5 13v7M13 16.5h7',
   wall: 'M3 4h8v6H3zM13 4h8v6h-8zM3 14h8v6H3zM13 14h8v6h-8z',
+  camera: 'M3 8h4l2-3h6l2 3h4v12H3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
   schedule: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
   updates: 'M12 3v12M7 10l5 5 5-5M5 21h14',
   upload: 'M12 21V9M7 14l5-5 5 5M5 3h14',
@@ -144,7 +145,7 @@ const ICONS = {
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[n] || ICONS.web}"/></svg>`;
 const isTag = k => k === 'grafana-tag';
 const kindLabel = k => t((k || '').includes('grafana') ? 'kind_grafana' : 'kind_' + k);
-const kindIcon = k => icon(k === 'image' ? 'image' : k === 'video' ? 'video' : (k || '').includes('grafana') ? 'grafana' : 'web');
+const kindIcon = k => icon(k === 'image' ? 'image' : k === 'video' ? 'video' : k === 'camera' ? 'camera' : (k || '').includes('grafana') ? 'grafana' : 'web');
 
 function bar(v, warn, crit, unit = '%') {
   v = num(v);
@@ -252,11 +253,26 @@ function logout() {
   $('#login').hidden = false;
   $('#loginForm').hidden = !!PUBLIC.setup_required;
   $('#setupForm').hidden = !PUBLIC.setup_required;
+  $('#changeForm').hidden = true;
   $('#loginCodeRow').hidden = true;
   applyStatic();
   const sso = PUBLIC.sso || {};
   $('#ssoBtn').hidden = !sso.enabled;
   $('#ssoBtn').textContent = t('ssoSignIn', { name: sso.label || 'SSO' });
+}
+
+async function doChangePassword(e) {
+  e.preventDefault();
+  $('#changeError').textContent = '';
+  try {
+    if ($('#chNew').value !== $('#chNew2').value) throw new Error('admin_password_mismatch');
+    const r = await api('/api/me', { method: 'PATCH', json: { current_password: $('#chOld').value, new_password: $('#chNew').value } });
+    S.token = r.token;
+    store.set('caracalToken', S.token);
+    $$('#changeForm input').forEach(i => { i.value = ''; });
+    toast(t('pwChanged'));
+    await start();
+  } catch (err) { $('#changeError').textContent = errText(err); }
 }
 
 async function doSetup(e) {
@@ -281,6 +297,17 @@ async function start() {
   } catch { logout(); return; }
   if (!store.get('caracalLang')) S.lang = S.me.language || 'cs';
   S.agentVersion = S.me.agent_version;
+  if (S.me.must_change_password) {
+    // a one-time password from an administrator: a password of one's own first, nothing else
+    $('#shell').hidden = true;
+    $('#login').hidden = false;
+    $('#loginForm').hidden = $('#setupForm').hidden = true;
+    $('#changeForm').hidden = false;
+    applyStatic();
+    $('#chOld').focus();
+    return;
+  }
+  $('#changeForm').hidden = true;
   $('#login').hidden = true;
   $('#shell').hidden = false;
   applyStatic();
@@ -414,7 +441,7 @@ function setTitle(title, crumb = '', href = '') {
 VIEWS.overview = {
   mount(root) {
     setTitle(t('nav_overview'));
-    root.innerHTML = `<div id="ovWelcome"></div><div class="stats" id="ovStats"></div>
+    root.innerHTML = `<div id="ovUpdate"></div><div id="ovWelcome"></div><div class="stats" id="ovStats"></div>
       <div class="grid two" id="ovRow">
         <section class="card"><div class="card-head"><h2>${t('needsAttention')}</h2><a href="#/attention" class="link">${t('showAll')}</a></div><div id="ovAtt"></div></section>
         <section class="card"><div class="card-head"><h2>${t('recentEvents')}</h2><span class="muted">${t('last24h')}</span></div><div id="ovEvents"><div class="empty">…</div></div></section>
@@ -427,6 +454,7 @@ VIEWS.overview = {
     const ds = S.devices;
     const first = !ds.length;
     patch($('#ovWelcome', root), first ? welcomeCard() : '');
+    fleetUpdateNotice($('#ovUpdate', root));
     for (const id of ['#ovStats', '#ovRow', '#ovWall']) $(id, root).hidden = first;
     const online = ds.filter(d => d.online).length;
     const outdated = ds.filter(d => d.attention.some(a => a.code === 'agent_outdated')).length;
@@ -903,7 +931,7 @@ VIEWS.device = {
     if (!d) { setTitle(t('device')); root.innerHTML = `<div class="card empty">${t('err_device_not_found')}</div>`; return; }
     setTitle(d.name, t('nav_devices'), '#/devices');
     root.innerHTML = `<section class="card device-hero"><div id="devHero"></div><div id="devActions"></div></section>
-      <div id="devAtt"></div>
+      <div id="devFreeze"></div><div id="devAtt"></div>
       <nav class="tabs" id="devTabs"></nav>
       <div id="devTab"></div>`;
   },
@@ -916,6 +944,7 @@ VIEWS.device = {
       ${d.caracal_version || d.runtime ? `<span>CARACAL ${esc(d.caracal_version || '?')} · ${runtimeLabel(d)}</span>` : ''}
       ${d.muted_until ? `<span class="chip-muted">${icon('bell')}${t('mutedUntil', { time: clock(d.muted_until) })}</span>` : ''}<span>${t('agent')} ${esc(d.version || '—')}</span>${d.model ? `<span>${esc(d.model)}</span>` : ''}<span>${d.online ? t('uptime') + ' ' + dur(d.uptime) : t('lastSeen') + ' ' + ago(d.last_seen)}</span></div></div>`);
     patch($('#devActions', root), actionBar(d));
+    patch($('#devFreeze', root), freezeBanner(d));
     patch($('#devTabs', root), deviceTabs(d, tab));
     slideThumb($('#devTabs', root));
     patch($('#devAtt', root), d.attention.length ? `<div class="alert-list">${d.attention.map(a => `<div class="alert ${a.level}"><b>${esc(attText(a))}</b><span>${esc(t('hint_' + a.code))}</span>${quickFix(d, a, true)}</div>`).join('')}</div>` : '');
@@ -1064,6 +1093,14 @@ async function openConsole(d, data, root) {
     if (document.fullscreenElement) document.exitFullscreen();
     else box.requestFullscreen().then(() => term.focus()).catch(() => {});
   };
+}
+
+// A frozen screen is said loud and clear, with the way back to the playlist right next to it.
+function freezeBanner(d) {
+  if (!d.frozen || !d.online) return '';
+  const until = d.frozen_until ? t('frozenUntil', { time: dt(d.frozen_until) }) : t('frozenIndef');
+  return `<div class="freeze-banner"><span class="freeze-ic">${icon('snow')}</span><div><b>${t('frozenOn', { name: esc(d.current_name || t('nothingPlaying')) })}</b><small>${until}</small></div>
+    ${can('control') ? `<button class="btn primary" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze">${icon('play')}${t('resumePlayback')}</button>` : ''}</div>`;
 }
 
 function deviceOverview(d) {
@@ -1843,8 +1880,8 @@ function watcherPayload(data) {
 }
 
 // "Try" buttons in dialogs: runs a command on the node and shows its result below the button.
-async function tryCommand(form, btn, run, show) {
-  const out = $('.try-result', form);
+async function tryCommand(form, btn, run, show, target = '.try-result') {
+  const out = $(target, form);
   btn.disabled = true;
   btn.classList.add('busy');
   out.innerHTML = `<div class="note">${t('loadingFromNode')}</div>`;
@@ -1999,7 +2036,7 @@ VIEWS.playlists = {
     if (!S.route.id || !d) return;
     let ed = $('#pEditor', root);
     if (!ed.dataset.ready) { ed.innerHTML = '<div id="pHead"></div><div id="pPl"></div><div id="pCol"></div><div id="pLog"></div>'; ed.dataset.ready = 1; }
-    patch($('#pHead', ed), `<section class="card dev-hero slim"><div class="hero-main"><div class="hero-title">${statusBadge(d)}<h2><a href="#/device/${encodeURIComponent(d.id)}">${esc(d.name)}</a></h2></div>
+    patch($('#pHead', ed), freezeBanner(d) + `<section class="card dev-hero slim"><div class="hero-main"><div class="hero-title">${statusBadge(d)}<h2><a href="#/device/${encodeURIComponent(d.id)}">${esc(d.name)}</a></h2></div>
       <div class="chips"><span>${t('nowPlaying')}: ${esc(d.current_name || '—')}${d.frozen ? ' (' + t('frozen') + ')' : ''}</span></div></div><div class="hero-actions">${can('control') ? `
       ${d.frozen ? `<button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze" ${d.online ? '' : 'disabled'}>${icon('play')}${t('act_unfreeze')}</button>` : ''}
       <button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="next" ${d.online ? '' : 'disabled'}>${icon('next')}${t('act_next')}</button>` : ''}</div></section>`);
@@ -2099,7 +2136,7 @@ VIEWS.users = {
     S.users = users;
     patch($('#uTable', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('username')}</th><th>${t('role')}</th><th>${t('language')}</th><th>${t('state')}</th><th>${t('created')}</th><th></th></tr></thead>
       <tbody>${users.map(u => `<tr><td><b>${esc(u.username)}</b>${u.username === S.me.username ? ` <span class="tag">${t('you')}</span>` : ''}</td><td><span class="badge role">${t('role_' + u.role)}</span></td>
-      <td>${u.language === 'en' ? 'English' : 'Čeština'}</td><td>${u.enabled ? `<span class="tag ok">${t('active')}</span>` : `<span class="tag">${t('disabled')}</span>`}${u.totp ? ` <span class="tag info">2FA</span>` : ''}${u.sso ? ` <span class="tag">SSO</span>` : ''}</td><td class="nowrap">${dt(u.created)}</td>
+      <td>${u.language === 'en' ? 'English' : 'Čeština'}</td><td>${u.enabled ? `<span class="tag ok">${t('active')}</span>` : `<span class="tag">${t('disabled')}</span>`}${u.totp ? ` <span class="tag info">2FA</span>` : ''}${u.must_change_password ? ` <span class="tag frozen">${t('pwOneTime')}</span>` : ''}${u.sso ? ` <span class="tag">SSO</span>` : ''}</td><td class="nowrap">${dt(u.created)}</td>
       <td class="actions-cell">${u.totp ? `<button class="btn sm ghost" data-do="totpReset" data-uid="${u.id}" data-name="${esc(u.username)}">${t('totpReset')}</button>` : ''}<button class="icon-btn" data-do="userEdit" data-uid="${u.id}" title="${t('edit')}">${icon('edit')}</button>
       ${u.username !== S.me.username ? `<button class="icon-btn danger" data-do="userDelete" data-uid="${u.id}" data-name="${esc(u.username)}" title="${t('delete')}">${icon('trash')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`);
   },
@@ -2109,7 +2146,7 @@ VIEWS.users = {
 
 // Settings are split into sections with their own navigation (#/settings/<section>).
 const SETTINGS = [
-  ['account', 'view', 'users'], ['alerts', 'admin', 'bell'], ['install', 'admin', 'plus'], ['notifyapi', 'manage', 'web'],
+  ['account', 'view', 'users'], ['update', 'admin', 'updates'], ['alerts', 'admin', 'bell'], ['install', 'admin', 'plus'], ['notifyapi', 'manage', 'web'],
   ['proxy', 'manage', 'download'], ['sso', 'admin', 'lock'], ['branding', 'admin', 'image'], ['backup', 'admin', 'upload'],
 ];
 
@@ -2123,6 +2160,74 @@ VIEWS.settings = {
     SETTINGS_VIEW[cur]($('#setBody', root));
   },
 };
+
+// ---------- updates of Fleet itself
+
+// a little Markdown for release notes: headings, lists, bold, code, links (everything escaped first)
+function mdLite(text) {
+  const inline = x => esc(x).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  let html = '', list = false;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const li = /^\s*[-*] (.*)/.exec(line), h = /^(#{1,4}) (.*)/.exec(line);
+    if (!li && list) { html += '</ul>'; list = false; }
+    if (li) { if (!list) { html += '<ul>'; list = true; } html += `<li>${inline(li[1])}</li>`; }
+    else if (h) html += `<h${Math.min(5, h[1].length + 2)}>${inline(h[2])}</h${Math.min(5, h[1].length + 2)}>`;
+    else if (line.trim()) html += `<p>${inline(line)}</p>`;
+  }
+  return html + (list ? '</ul>' : '');
+}
+async function fleetUpdateNotice(el) {
+  if (!el || !can('admin')) return;
+  if (!S.fleetUpdate) S.fleetUpdate = api('/api/system/update').catch(() => null);
+  const u = await S.fleetUpdate;
+  if (!u || !el.isConnected) return;
+  patch(el, u.newer && u.newer.length ? `<div class="note info update-note"><div>${icon('updates')}<b>${t('fleetUpdateAvailable', { version: esc(u.newer[0]) })}</b> <span class="muted">${t('fleetUpdateCurrent', { version: esc(u.current) })}</span></div>
+    <a class="btn sm primary" href="#/settings/update">${t('fleetUpdateShow')}</a></div>` : '');
+}
+async function fleetUpdateCard(root, refresh = false) {
+  const u = await api('/api/system/update' + (refresh ? '?refresh=1' : '')).catch(e => ({ error: errText(e) }));
+  if (!root.isConnected) return;
+  S.fleetUpdate = Promise.resolve(u);
+  const newest = (u.newer || [])[0], job = u.job, last = u.last, d = u.docker || {};
+  const running = job && job.state === 'running';
+  const manual = d.swarm ? `docker service update --image ${u.image}:${newest || 'latest'} <service>`
+    : `cd <folder with compose.yml>\ndocker compose pull\ndocker compose up -d`;
+  root.innerHTML = `<section class="card"><div class="card-head"><h2>${t('fleetUpdate')}</h2><button class="btn sm ghost" id="updCheck">${icon('refresh')}${t('fleetUpdateCheck')}</button></div>
+    <dl class="kv"><dt>${t('fleetUpdateVersion')}</dt><dd><b>${esc(u.current || S.me.hub_version)}</b> ${newest ? `<span class="tag info">${t('outdated')}</span>` : u.latest ? `<span class="tag ok">${t('latest')}</span>` : ''}</dd>
+      <dt>${t('fleetUpdateLatest')}</dt><dd>${esc(u.latest || '—')}</dd><dt>${t('imageName')}</dt><dd><code>${esc(u.image || '')}</code></dd></dl>
+    ${u.error ? `<div class="note warn">${esc(errText(new Error(String(u.error).split(':')[0])))}</div>` : ''}
+    ${last && last.state === 'failed' ? `<div class="note warn"><div><b>${t('fleetUpdateFailed', { version: esc(String(last.to).split(':').pop()) })}</b><br><small>${esc(last.error || '')}</small></div></div>` : ''}
+    ${last && last.state === 'done' && Date.now() / 1000 - last.at < 86400 ? `<div class="note ok">${t('fleetUpdateDone', { version: esc(String(last.to).split(':').pop()) })}</div>` : ''}
+    ${running ? `<div class="note info"><div><b>${t('fleetUpdateRunning', { version: esc(job.version) })}</b><br><small>${t('fleetUpdateStep_' + job.step)}</small></div></div>` : ''}
+    ${job && job.state === 'failed' ? `<div class="note warn">${esc(job.error || '')}</div>` : ''}
+    ${newest && !running ? (d.available ? `<p class="muted">${t('fleetUpdateHow')}</p><div class="form-actions start"><button class="btn primary" id="updRun" data-version="${esc(newest)}">${icon('updates')}${t('fleetUpdateNow', { version: esc(newest) })}</button></div>`
+      : `<p class="muted">${t('fleetUpdateManual')}</p><pre class="code" id="updCmd">${esc(manual)}</pre><div class="form-actions start"><button class="btn sm" id="updCopy">${icon('copy')}${t('copy')}</button></div>
+        <details><summary>${t('fleetUpdateSocket')}</summary><p class="muted">${t('fleetUpdateSocketHint')}</p><pre class="code">volumes:\n  - /var/run/docker.sock:/var/run/docker.sock</pre></details>`) : ''}</section>
+    ${(u.notes || []).map(n => `<section class="card release-notes"><div class="card-head"><h2>${esc(n.name)}</h2><span class="muted">${n.published ? esc(String(n.published).slice(0, 10)) : ''}</span></div>${mdLite(n.body)}
+      ${n.url ? `<p><a href="${esc(n.url)}" target="_blank" rel="noopener">${t('fleetUpdateOnGithub')}</a></p>` : ''}</section>`).join('')}`;
+  $('#updCheck', root).onclick = () => fleetUpdateCard(root, true);
+  const copy = $('#updCopy', root);
+  if (copy) copy.onclick = () => navigator.clipboard.writeText($('#updCmd', root).textContent).then(() => toast(t('copied')));
+  const run = $('#updRun', root);
+  if (run) run.onclick = async () => {
+    if (!await confirmBox(t('fleetUpdateConfirm', { version: esc(run.dataset.version) }), false, t('fleetUpdateNow', { version: esc(run.dataset.version) }))) return;
+    try { await api('/api/system/update', { method: 'POST', json: { version: run.dataset.version } }); } catch (e) { return toast(errText(e), 'err'); }
+    fleetUpdateCard(root);
+    waitForNewVersion(run.dataset.version);
+  };
+  if (running) setTimeout(() => root.isConnected && fleetUpdateCard(root), 3000);
+}
+// the hub restarts during the update: the page waits for the new version and reloads itself
+function waitForNewVersion(version) {
+  const until = Date.now() + 15 * 60000;
+  const poll = async () => {
+    const p = await fetch('/api/public', { cache: 'no-store' }).then(r => r.json()).catch(() => null);
+    if (p && p.version === version) { toast(t('fleetUpdateDone', { version })); setTimeout(() => location.reload(), 1500); return; }
+    if (Date.now() < until) setTimeout(poll, 3000);
+  };
+  setTimeout(poll, 5000);
+}
 
 // Backups the hub makes itself every day, kept in its data folder.
 async function backupScheduleCard(el) {
@@ -2162,6 +2267,7 @@ async function backupScheduleCard(el) {
 }
 
 const SETTINGS_VIEW = {
+  update(root) { root.innerHTML = '<section class="card"><div class="empty">…</div></section>'; fleetUpdateCard(root); },
   async sso(root) {
     root.innerHTML = `<section class="card"><div class="empty">…</div></section>`;
     const o = await api('/api/sso/settings').catch(() => null);
@@ -2566,7 +2672,7 @@ const versionField = img => `<label>${t('releaseVersion')}<input name="version" 
 function reportQueued(r, action) {
   toast(t('bulkQueued', { n: r.command_ids.length, action }));
   if (r.skipped.length) toast(t('bulkSkipped', { n: r.skipped.length, list: r.skipped.map(s => (dev(s.device_id)?.name || s.device_id) + ' (' + errText(new Error(s.reason)) + ')').join(', ') }), 'warn');
-  setTimeout(tick, 1500);
+  burst();
 }
 
 // Update Docker nodes to an image version.
@@ -2671,7 +2777,8 @@ async function sdCardDialog(template = '') {
     body: `<div class="form"><p class="muted">${t('sdCardHint')}</p>
       ${img.image ? '' : `<div class="note warn">${t('err_node_image_missing')} <a href="#/updates">${t('nav_updates')}</a></div>`}
       <h3>${t('sdBoardPi')}</h3><div class="mode-pick"><label class="check"><input type="radio" name="os" value="raspios" checked><span><b>${t('osRaspios')}</b><small>${t('osRaspiosHint')}</small></span></label>
-      <label class="check"><input type="radio" name="os" value="dietpi"><span><b>${t('osDietpi')}</b><small>${t('osDietpiHint')}</small></span></label></div>
+      <label class="check"><input type="radio" name="os" value="dietpi"><span><b>${t('osDietpi')}</b><small>${t('osDietpiHint')}</small></span></label>
+      <label class="check"><input type="radio" name="os" value="alpine-rpi"><span><b>${t('osAlpineRpi')}</b><small>${t('osAlpineRpiHint')}</small></span></label></div>
       <h3>${t('sdBoardPc')}</h3><div class="mode-pick"><label class="check"><input type="radio" name="os" value="alpine"><span><b>${t('osAlpine')}</b><small>${t('osAlpineHint')}</small></span></label>
       <label class="check"><input type="radio" name="os" value="ubuntu"><span><b>${t('osUbuntu')}</b><small>${t('osUbuntuHint')}</small></span></label></div>
       <p class="muted pc-only">${t('sdPcOther')} <button type="button" class="link" data-do="oneCommand">${t('oneCommand')}</button></p>
@@ -2706,7 +2813,7 @@ async function sdCardDialog(template = '') {
         $$('.dietpi-only', form).forEach(x => { x.hidden = os !== 'dietpi'; });
         $$('.user-field', form).forEach(x => { x.hidden = os === 'dietpi'; });
         $$('.alpine-only', form).forEach(x => { x.hidden = os !== 'alpine'; });
-        $$('.no-alpine', form).forEach(x => { x.hidden = os === 'alpine'; });
+        $$('.no-alpine', form).forEach(x => { x.hidden = os === 'alpine' || os === 'alpine-rpi'; });
         $$('.pc-only', form).forEach(x => { x.hidden = !pc; });
       };
       $$('input[name=os]', form).forEach(x => { x.onchange = sync; });
@@ -2722,10 +2829,12 @@ async function sdCardDialog(template = '') {
         if (!f) throw new Error('invalid_dietpi_txt');
         body.dietpi_txt = await f.text();
       }
+      if (data.os.startsWith('alpine')) delete body.wifi_ssid;
+      // the Raspberry Pi image is built on the hub (the first time it downloads Alpine): it takes a moment
+      if (data.os === 'alpine-rpi') toast(t('sdImagePreparing'));
       const r = await fetch('/api/sdcard', { method: 'POST', body: JSON.stringify(body), headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/json' } });
-      if (data.os === 'alpine') delete body.wifi_ssid;
-      await downloadResponse(r, `caracal-sdcard-${data.os}.zip`);
-      const steps = { dietpi: 'sdCardStepsDietpi', alpine: 'usbStepsAlpine', ubuntu: 'usbStepsUbuntu' }[data.os] || 'sdCardSteps';
+      await downloadResponse(r, data.os === 'alpine-rpi' ? 'caracal-alpine-rpi.img.gz' : `caracal-sdcard-${data.os}.zip`);
+      const steps = { dietpi: 'sdCardStepsDietpi', alpine: 'usbStepsAlpine', ubuntu: 'usbStepsUbuntu', 'alpine-rpi': 'sdCardStepsAlpineRpi' }[data.os] || 'sdCardSteps';
       setTimeout(() => modal({ title: t(['alpine', 'ubuntu'].includes(data.os) ? 'usbTitle' : 'sdCardTitle'), body: `<ol class="steps">${t(steps)}</ol>` }), 50);
     },
   });
@@ -3042,7 +3151,19 @@ async function proxyCard(el) {
       <dt>${t('proxyCache')}</dt><dd>${fmtSize(p.cache_bytes)} / ${fmtSize(p.cache_limit)} (${t('proxyAptPart', { size: fmtSize(p.apt_bytes) })})</dd>
       <dt>${t('proxyImages')}</dt><dd>${p.images.map(x => `<div>${esc(x.name)} <span class="muted">${fmtSize(x.size)}</span></div>`).join('') || '—'}</dd>
       ${p.jobs.length ? `<dt>${t('proxyPreparing')}</dt><dd>${p.jobs.map(j => `<div>${esc(j.image)} · ${esc(j.arch)} ${j.state === 'error' ? `<span class="tag critical">${esc(j.error)}</span>` : `<span class="tag info">${t('proxyDownloading')}</span>`}</div>`).join('')}</dd>` : ''}
-      <dt>${t('proxyAptHosts')}</dt><dd><small>${p.apt_hosts.map(esc).join(', ')}</small></dd></dl>`;
+      <dt>${t('proxyAptHosts')}</dt><dd><small>${p.apt_hosts.map(esc).join(', ')}</small></dd></dl>
+    <div id="mirrorBox"></div>`;
+  const m = await api('/api/proxy/mirrors').catch(() => null);
+  if (!m || !el.isConnected) return;
+  $('#mirrorBox', el).innerHTML = `<h3>${t('mirrorsTitle')}</h3><p class="muted">${t('mirrorsHint')}</p>
+    <form class="form" id="mirrorForm"><label>${t('mirrorsLabel')}<textarea name="mirrors" rows="4" spellcheck="false" placeholder="mirror.example.cz\nhttp://apt.firma.lan:8080" ${can('admin') ? '' : 'readonly'}>${esc(m.mirrors.map(x => (x.scheme === 'http' ? 'http://' : '') + x.host).join('\n'))}</textarea>
+      <small class="muted">${t('mirrorsFormat')}</small></label>
+    ${can('admin') ? `<div class="form-actions"><button class="btn primary">${t('save')}</button></div>` : ''}</form>`;
+  $('#mirrorForm', el).onsubmit = async e => {
+    e.preventDefault();
+    const lines = e.target.mirrors.value.split(/\s+/).map(x => x.trim()).filter(Boolean);
+    try { await api('/api/proxy/mirrors', { method: 'PUT', json: { mirrors: lines } }); toast(t('saved')); proxyCard(el); } catch (err) { toast(errText(err), 'err'); }
+  };
 }
 
 // ------------------------------------------------------------------ modals
@@ -3118,14 +3239,14 @@ const pickedTargets = data => Object.keys(data).filter(k => k.startsWith('t:')).
 async function sendCommand(id, action, payload = {}) {
   await api(`/api/devices/${encodeURIComponent(id)}/commands`, { method: 'POST', json: { action, payload } });
   toast(t('commandQueued', { action: t('act_' + action) }));
-  setTimeout(tick, 1500);
+  burst();
 }
 
 async function sendBulk(ids, action, payload = {}) {
   const r = await api('/api/bulk/commands', { method: 'POST', json: { device_ids: ids, action, payload } });
   toast(t('bulkQueued', { n: r.command_ids.length, action: t('act_' + action) }));
   if (r.skipped.length) toast(t('bulkSkipped', { n: r.skipped.length, list: r.skipped.map(s => (dev(s.device_id)?.name || s.device_id) + ' (' + errText(new Error(s.reason)) + ')').join(', ') }), 'warn');
-  setTimeout(tick, 1500);
+  burst();
 }
 
 function uploadFile(file, onProgress) {
@@ -3295,6 +3416,77 @@ function collectionDialog(deviceId, col = null, targets = null) {
   });
 }
 
+// A camera: 1-9 streams (RTSP, HTTP) as a grid, played by the node with mpv. ONVIF cameras are found by the node.
+const camStreamRow = (st = {}, edit = false) => `<div class="stream-row" data-stream>
+  <input data-f="name" placeholder="${esc(t('camStreamName'))}" value="${esc(st.name || '')}">
+  <input data-f="url" placeholder="rtsp://192.168.1.20:554/stream1" value="${esc(st.url || '')}" required spellcheck="false">
+  <input data-f="username" placeholder="${esc(edit ? t('camUnchanged') : t('username'))}" value="${esc(st.username || '')}" autocomplete="off">
+  <input data-f="password" type="password" placeholder="${esc(edit ? t('camUnchanged') : t('password'))}" autocomplete="new-password">
+  <button type="button" class="icon-btn danger" data-del-stream title="${t('delete')}">${icon('x')}</button></div>`;
+function cameraDialog(deviceId, cam = null, targets = null) {
+  let src = { streams: [{}], layout: 'auto' };
+  if (cam) { try { src = { ...src, ...JSON.parse(cam.source || '{}') }; } catch { /* ignore */ } }
+  const layouts = [['auto', t('camLayoutAuto')], ['2', t('camLayout2')], ['2x2', '2 × 2'], ['3x3', '3 × 3']];
+  modal({
+    title: cam ? t('camEdit') : t('add_camera'), wide: true, submit: cam ? t('save') : t('add'),
+    body: `<div class="form"><p class="muted">${t('camHint')}</p>
+      <div class="row2"><label>${t('name')}<input name="name" required value="${esc(cam ? cam.name : '')}"></label>
+      <label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(cam ? cam.duration : 30)}" required></label></div>
+      <div class="row2"><label>${t('camLayout')}<select name="layout">${layouts.map(([v, l]) => `<option value="${v}" ${src.layout === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="check"><input type="checkbox" name="audio" ${src.audio ? 'checked' : ''}>${t('camAudio')}</label></div>
+      <h3>${t('camStreams')}</h3>${cam ? `<p class="muted">${t('camEditHint')}</p>` : ''}<div id="camRows">${src.streams.map(x => camStreamRow(x, !!cam)).join('')}</div>
+      <div class="form-actions start"><button type="button" class="btn sm" data-add-stream>${icon('plus')}${t('camAddStream')}</button></div>
+      ${targets ? '' : `<details class="onvif"><summary>${t('camOnvif')}</summary><p class="muted">${t('camOnvifHint')}</p>
+        <div class="form-actions start"><button type="button" class="btn sm" data-discover>${icon('search')}${t('camDiscover')}</button></div><div class="cam-found"></div>
+        <div class="row2"><label>${t('camHost')}<input data-onvif="host" placeholder="192.168.1.20"></label><label>Port<input data-onvif="port" type="number" value="80"></label></div>
+        <div class="row2"><label>${t('username')}<input data-onvif="username" autocomplete="off"></label><label>${t('password')}<input data-onvif="password" type="password" autocomplete="new-password"></label></div>
+        <input type="hidden" data-onvif="xaddr"><div class="form-actions start"><button type="button" class="btn sm primary" data-onvif-load>${icon('camera')}${t('camLoad')}</button></div><div class="cam-streams"></div></details>`}
+      ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : cam ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], d => (d.capabilities || {}).add_camera === true)}</details>`}</div>`,
+    onOpen: form => {
+      bindTargetPicker(form);
+      const rows = $('#camRows', form), ov = k => $(`[data-onvif="${k}"]`, form);
+      form.addEventListener('click', async e => {
+        if (e.target.closest('[data-add-stream]')) rows.insertAdjacentHTML('beforeend', camStreamRow());
+        const del = e.target.closest('[data-del-stream]');
+        if (del && $$('[data-stream]', form).length > 1) del.closest('[data-stream]').remove();
+        const disc = e.target.closest('[data-discover]');
+        if (disc) {
+          tryCommand(form, disc, () => commandResult(deviceId, 'camera_discover'), r => (r.cameras || []).length
+            ? `<div class="cam-list">${r.cameras.map(x => `<button type="button" class="btn sm" data-pick-cam="${esc(x.address)}" data-xaddr="${esc(x.xaddr)}">${icon('camera')}${esc(x.name || x.hardware || x.address)} <small class="muted">${esc(x.address)}</small></button>`).join('')}</div>`
+            : `<div class="note">${t('camNoneFound')}</div>`, '.cam-found');
+        }
+        const pick = e.target.closest('[data-pick-cam]');
+        if (pick) { ov('host').value = pick.dataset.pickCam; ov('xaddr').value = pick.dataset.xaddr; ov('username').focus(); }
+        const load = e.target.closest('[data-onvif-load]');
+        if (load) {
+          tryCommand(form, load, () => commandResult(deviceId, 'camera_onvif', { host: ov('host').value.trim(), port: Number(ov('port').value) || 80,
+            username: ov('username').value, password: ov('password').value, xaddr: ov('xaddr').value }), r => {
+            setTimeout(() => $$('[data-use-stream]', form).forEach(b => {
+              b.onclick = () => {
+                const x = r.streams[Number(b.dataset.useStream)], empty = $$('[data-stream]', form).find(row => !$('[data-f=url]', row).value);
+                const html = camStreamRow({ name: x.name, url: x.url, username: ov('username').value });
+                if (empty) empty.outerHTML = html; else rows.insertAdjacentHTML('beforeend', html);
+                const added = $$('[data-stream]', form).find(row => $('[data-f=url]', row).value === x.url);
+                if (added) $('[data-f=password]', added).value = ov('password').value;
+                if (!form.name.value) form.name.value = x.name || ov('host').value;
+                b.disabled = true;
+              };
+            }));
+            return `<div class="cam-list">${(r.streams || []).map((x, i) => `<button type="button" class="btn sm" data-use-stream="${i}">${icon('plus')}${esc(x.name || x.url)}</button>`).join('')}</div>`;
+          }, '.cam-streams');
+        }
+      });
+    },
+    onSubmit: data => {
+      const streams = $$('#camRows [data-stream]').map(row => Object.fromEntries($$('[data-f]', row).map(i => [i.dataset.f, i.value.trim()])));
+      const payload = { name: data.name.trim(), duration: Number(data.duration || 30), layout: data.layout, audio: !!data.audio, streams };
+      if (cam) return sendCommand(deviceId, 'update_camera', { id: cam.id, ...payload });
+      const ids = targets || [deviceId, ...pickedTargets(data)];
+      return ids.length === 1 ? sendCommand(ids[0], 'add_camera', payload) : sendBulk(ids, 'add_camera', payload);
+    },
+  });
+}
+
 function freezeDialog(deviceId, item, col, name) {
   modal({
     title: t('freezeTitle', { name: esc(name) }), submit: t('freezeItem'),
@@ -3433,17 +3625,33 @@ function userDialog(uid) {
   modal({
     title: u ? t('editUser') + ': ' + esc(u.username) : t('newUser'),
     body: `<div class="form">${u ? '' : `<label>${t('username')}<input name="username" required pattern="[A-Za-z0-9._@\\-]{2,64}"></label>`}
-      <label>${u ? t('resetPassword') : t('password')}<input name="password" type="password" minlength="10" autocomplete="new-password" ${u ? `placeholder="${t('leaveEmpty')}"` : 'required'}></label>
+      <label>${u ? t('resetPassword') : t('password')}<span class="pw-row"><input name="password" type="password" minlength="10" autocomplete="new-password" ${u ? `placeholder="${t('leaveEmpty')}"` : 'required'}>
+        <button type="button" class="btn sm" data-gen-pw>${icon('refresh')}${t('pwGenerate')}</button></span></label>
+      <label class="check must-change" ${u ? 'hidden' : ''}><input type="checkbox" name="must_change" ${u ? '' : 'checked'}><span>${t('pwMustChange')}<br><small class="muted">${t('pwMustChangeHint')}</small></span></label>
       <div class="row2"><label>${t('role')}<select name="role">${roles.map(r => `<option value="${r}" ${(u ? u.role : 'viewer') === r ? 'selected' : ''}>${t('role_' + r)}</option>`).join('')}</select></label>
       <label>${t('language')}<select name="language"><option value="cs" ${u?.language === 'en' ? '' : 'selected'}>Čeština</option><option value="en" ${u?.language === 'en' ? 'selected' : ''}>English</option></select></label></div>
       ${u ? `<label class="check"><input type="checkbox" name="enabled" ${u.enabled ? 'checked' : ''}>${t('accountEnabled')}</label>` : ''}</div>`,
+    onOpen: form => {
+      const pw = form.password, must = $('.must-change', form);
+      // a new password for an existing user: the one-time choice appears (checked)
+      pw.oninput = () => { if (u) { must.hidden = !pw.value; if (pw.value && !must.dataset.touched) form.must_change.checked = true; } };
+      form.must_change.onchange = () => { must.dataset.touched = '1'; };
+      $('[data-gen-pw]', form).onclick = () => {
+        const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        const rnd = crypto.getRandomValues(new Uint32Array(14));
+        pw.value = Array.from(rnd, x => chars[x % chars.length]).join('');
+        pw.type = 'text';
+        pw.select();
+        pw.oninput();
+      };
+    },
     onSubmit: async data => {
       if (u) {
         const body = { role: data.role, language: data.language, enabled: !!data.enabled };
-        if (data.password) body.password = data.password;
+        if (data.password) Object.assign(body, { password: data.password, must_change: !!data.must_change });
         await api('/api/users/' + u.id, { method: 'PATCH', json: body });
       } else {
-        await api('/api/users', { method: 'POST', json: data });
+        await api('/api/users', { method: 'POST', json: { ...data, must_change: !!data.must_change } });
       }
       toast(t('saved'));
       render();
@@ -3474,7 +3682,8 @@ const ACTIONS_UI = {
       body: `<div class="radios">${bulkKinds(ids).map((k, i) => `<label class="check"><input type="radio" name="kind" value="${k}" ${i ? '' : 'checked'}>${t('add_' + k)}</label>`).join('')}</div>`,
       onSubmit: data => {
         setTimeout(() => {
-          if (one) data.kind === 'collection' ? collectionDialog(one) : data.kind === 'profile' ? profileDialog(one) : assetDialog(one, data.kind);
+          if (data.kind === 'camera') cameraDialog(ids[0], null, one ? null : ids);
+          else if (one) data.kind === 'collection' ? collectionDialog(one) : data.kind === 'profile' ? profileDialog(one) : assetDialog(one, data.kind);
           else if (data.kind === 'collection') bulkCollection(ids);
           else if (data.kind === 'profile') profileDialog(ids[0], null, ids);
           else assetDialog(ids[0], data.kind, null, ids);
@@ -3760,6 +3969,7 @@ const ACTIONS_UI = {
   editAsset(b) {
     const a = S.detail.assets.find(x => String(x.id) === b.dataset.item);
     if (a && isTag(a.kind)) collectionDialog(b.dataset.id, a);
+    else if (a && a.kind === 'camera') cameraDialog(b.dataset.id, a);
     else if (a) assetDialog(b.dataset.id, ['image', 'video'].includes(a.kind) ? a.kind : 'web', a);
   },
   async deleteAsset(b) {
@@ -3849,7 +4059,8 @@ function bulkKinds(ids = [...S.selected]) {
   const sel = ids.map(dev).filter(Boolean);
   const all = cap => sel.every(d => (d.capabilities || {})[cap] !== false);
   const logins = sel.length && sel.every(d => loginSupport(d) === 'ok');
-  return ['web', ...(all('upload') ? ['image', 'video'] : []), ...(all('add_grafana_tag') ? ['collection'] : []), ...(logins ? ['profile'] : [])];
+  const cams = sel.length && sel.every(d => (d.capabilities || {}).add_camera === true);
+  return ['web', ...(all('upload') ? ['image', 'video'] : []), ...(all('add_grafana_tag') ? ['collection'] : []), ...(cams ? ['camera'] : []), ...(logins ? ['profile'] : [])];
 }
 
 function bulkCollection(ids) { collectionDialog(ids[0], null, ids); }
@@ -3901,6 +4112,14 @@ document.addEventListener('submit', async e => {
 
 // ------------------------------------------------------------------ boot
 
+// After a command the page follows the device every second for a while, so its result shows up right away.
+let burstTimer = null;
+function burst(seconds = 12) {
+  clearInterval(burstTimer);
+  let n = 0;
+  burstTimer = setInterval(() => { tick(); if (++n >= seconds) clearInterval(burstTimer); }, 1000);
+}
+
 async function tick() {
   if (!S.me || document.hidden) return;
   await refresh();
@@ -3910,6 +4129,8 @@ async function tick() {
 }
 
 $('#loginForm').addEventListener('submit', doLogin);
+$('#changeForm').addEventListener('submit', doChangePassword);
+$('#chLogout').onclick = () => logout();
 $$('[data-lang]').forEach(b => { b.onclick = () => setLang(b.dataset.lang); });
 $('#themeToggle').onclick = () => {
   S.theme = { auto: 'light', light: 'dark', dark: 'auto' }[S.theme];

@@ -34,7 +34,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.14.0'
+VERSION = '4.15.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -53,6 +53,8 @@ DISPLAY_CHECK_EVERY, DISPLAY_GRACE, DISPLAY_RESTART_EVERY, DISPLAY_RESTARTS = 60
 NODE_DIR = Path(os.getenv('CARACAL_NODE_DIR', '/opt/caracal-node'))
 DATA_DIR = Path(os.getenv('CARACAL_DATA_DIR', '/var/lib/caracal'))
 COMPOSE_SERVICES = {'caracal.service': 'app', 'caracal-player.service': 'player', 'caracal-overlay.service': 'overlay'}
+LONG_POLL = 20            # seconds the agent waits for a command in one request
+AFTER_COMMAND = 1.5       # seconds from a command to the heartbeat that reports its result
 INSTALL_TIMEOUT = 3000   # apt + pip on a Raspberry Pi can take a while
 # Download source "fleet": apt and CARACAL images come through the hub (no internet access needed). The apt sources
 # of these repositories point to <hub>/apt/<host>/...; keep the list in sync with DEFAULT_APT_HOSTS of the hub.
@@ -114,6 +116,11 @@ ENDPOINTS = {
     'screenshot': ('POST', '/api/fleet/v1/screenshot'),
     # settings of the player: websites in dark mode (CARACAL 2026.10.12 and newer)
     'player_settings': ('PUT', '/api/fleet/v1/player/settings'),
+    # cameras: RTSP / HTTP streams, ONVIF (CARACAL 2026.10.13 and newer)
+    'add_camera': ('POST', '/api/fleet/v1/assets/camera'),
+    'update_camera': ('PUT', '/api/fleet/v1/assets/camera/{id}'),
+    'camera_onvif': ('POST', '/api/fleet/v1/cameras/onvif'),
+    'camera_discover': ('POST', '/api/fleet/v1/cameras/discover'),
 }
 # the node's own first-run setup, for CARACAL versions without the Fleet admin endpoint
 SETUP_STATUS, SETUP = '/api/setup-status', '/api/setup'
@@ -200,6 +207,7 @@ class Agent:
         self._caps, self._caps_at = None, 0
         self.maintenance = ''      # e.g. 'caracal_update' while CARACAL is being updated
         self.reboot_pending = False
+        self.long_poll = False     # the hub holds the command request until a command arrives
         self.display = None        # {'state': 'ok'|'down', 'since', 'restarts'} of the display watch
         self.display_bad_since, self.display_restart_at, self.display_restarts, self.display_checked = None, 0, 0, 0
 
@@ -441,11 +449,19 @@ class Agent:
             set_clock(float(r.json()['server_time']))
         except (ValueError, KeyError, TypeError):
             pass
+        try:
+            self.use_mirrors(r.json().get('mirrors'))
+        except (ValueError, AttributeError, OSError) as e:
+            log('mirrors:', e)
 
     # ------------------------------------------------------------ commands
 
-    def run_commands(self):
-        commands = self.hub('GET', '/commands').json()
+    def run_commands(self, wait=0):
+        """Fetch and carry out the queued commands. With wait > 0 the hub (4.17 and newer) holds the request until a
+        command arrives or the time is up, so commands are carried out within a moment."""
+        r = self.hub('GET', '/commands', params={'wait': wait} if wait else None, timeout=wait + 20)
+        self.long_poll = r.headers.get('X-Long-Poll') == '1'
+        commands = r.json()
         for cmd in commands:
             try:
                 result, ok = self.execute(cmd['action'], dict(cmd.get('payload') or {})), True
@@ -729,6 +745,19 @@ class Agent:
             restart_display()
             self.display_restart_at, self.display_restarts = now, self.display_restarts + 1
         self.display = {'state': 'down', 'since': self.display_bad_since, 'restarts': self.display_restarts}
+
+    def do_add_camera(self, p):
+        return self.body(self.local('add_camera', json=self.clean(p)))
+
+    def do_update_camera(self, p):
+        ident = p.pop('id')
+        return self.body(self.local('update_camera', {'id': ident}, json=self.clean(p)))
+
+    def do_camera_onvif(self, p):
+        return self.body(self.local('camera_onvif', json=p, timeout=60))
+
+    def do_camera_discover(self, p):
+        return self.body(self.local('camera_discover', json={}, timeout=30))
 
     def do_player_settings(self, p):
         return self.body(self.local('player_settings', json={k: p[k] for k in ('web_dark',) if k in p}))
@@ -1073,7 +1102,26 @@ class Agent:
     def apply_download_source(self):
         """Point apt to the hub (fleet) or back to the repositories (internet); returns the changed source files."""
         fleet = self.download_source() == 'fleet'
-        return apt_use(self.hub_url if fleet else None, self.conf['device_id'], self.conf['device_token'])
+        return apt_use(self.hub_url if fleet else None, self.conf['device_id'], self.conf['device_token'],
+                       dict(self.state.get('mirrors') or {}), dict(self.state.get('mirrors_seen') or {}))
+
+    def use_mirrors(self, hosts):
+        """The hub's trusted mirrors (sent with every heartbeat): repositories of these hosts go through the hub too.
+        A mirror the hub no longer has is pointed back to its own address."""
+        if not isinstance(hosts, list):
+            return
+        found = {}   # host -> scheme of its own address
+        for h in hosts:
+            m = re.fullmatch(r'(https?)://([a-z0-9.-]+(?::\d+)?)', h) if isinstance(h, str) else None
+            if m:
+                found[m.group(2)] = m.group(1)
+        if found == (self.state.get('mirrors') or {}):
+            return
+        self.state['mirrors'] = found
+        self.state['mirrors_seen'] = {**(self.state.get('mirrors_seen') or {}), **found}
+        self.save_state()
+        if self.download_source() == 'fleet':
+            log('mirrors:', ', '.join(found) or 'none', '- sources changed:', ', '.join(self.apply_download_source()) or 'none')
 
     def do_set_download_source(self, p):
         source = 'fleet' if p.get('source') == 'fleet' else 'internet'
@@ -1323,8 +1371,14 @@ class Agent:
                 if self.reboot_pending:
                     self.reboot_pending = False
                     reboot()
-                if self.run_commands():
-                    next_hb = 0  # report the new state immediately after changes
+                # wait for commands until the next heartbeat is due (a hub without long polling answers at once)
+                wait = max(1, min(LONG_POLL, round(next_hb - time.time()))) if self.long_poll else 0
+                if self.run_commands(wait):
+                    # report the new state right after changes; the player takes its command within a second
+                    next_hb = time.time() + AFTER_COMMAND
+                    continue
+                if self.long_poll:
+                    continue
             except requests.exceptions.SSLError as e:
                 # a clock far behind makes the hub's certificate look "not yet valid"
                 log('hub TLS error:', e)
@@ -1451,22 +1505,31 @@ def apt_source_files():
     return [f for f in files if f.is_file()]
 
 
-def apt_rewrite(text, hub=None):
-    """apt source URIs of the known repositories: through the hub (<hub>/apt/<host>/...) or, with hub=None,
-    directly again. Addresses of an earlier hub are replaced too."""
-    hosts = '|'.join(re.escape(h) for h in APT_HOSTS)
-    text = re.sub(rf'https?://[^\s/]+(?:/[^\s]*?)?/apt/({hosts})(?=[/\s]|$)', r'https://\1', text)
+def apt_rewrite(text, hub=None, mirrors=None, seen=None):
+    """apt source URIs of the known repositories and the hub's mirrors: through the hub (<hub>/apt/<host>/...) or,
+    with hub=None, directly again. Addresses of an earlier hub (and of mirrors the hub dropped) are replaced too."""
+    return _rewrite(text, APT_HOSTS, hub, mirrors, seen, lambda host: f'{hub}/apt/{host}')
+
+
+def _rewrite(text, builtin, hub, mirrors, seen, through):
+    """mirrors / seen: {host: scheme} of the hub's mirrors now and of every mirror the agent has known (to point a
+    dropped one back to its own address with its own scheme)."""
+    mirrors, seen = dict(mirrors or {}), {**dict(seen or {}), **dict(mirrors or {})}
+    back = '|'.join(re.escape(h) for h in dict.fromkeys(builtin + tuple(seen)))
+    text = re.sub(rf'https?://[^\s/]+(?:/[^\s]*?)?/apt/({back})(?=[/\s]|$)',
+                  lambda m: f"{seen.get(m.group(1), 'https')}://{m.group(1)}", text)
     if hub:
-        text = re.sub(rf'https?://({hosts})(?=[/\s]|$)', lambda m: f'{hub}/apt/{m.group(1)}', text)
+        hosts = '|'.join(re.escape(h) for h in dict.fromkeys(builtin + tuple(mirrors)))
+        text = re.sub(rf'https?://({hosts})(?=[/\s]|$)', lambda m: through(m.group(1)), text)
     return text
 
 
-def apt_use(hub=None, user='', password=''):
+def apt_use(hub=None, user='', password='', mirrors=None, seen=None):
     """Point apt to the hub (credentials in auth.conf.d, readable by root only) or back to the repositories."""
     changed = []
     for f in apt_source_files():
         old = f.read_text()
-        new = apt_rewrite(old, hub)
+        new = apt_rewrite(old, hub, mirrors, seen)
         if new != old:
             write_text_file(f, new)
             changed.append(f.name)
@@ -1483,7 +1546,7 @@ def apt_use(hub=None, user='', password=''):
         auth.unlink(missing_ok=True)
     if APK_REPOSITORIES.is_file():
         old = APK_REPOSITORIES.read_text()
-        new = apk_rewrite(old, hub, user, password)
+        new = apk_rewrite(old, hub, user, password, mirrors, seen)
         if new != old:
             write_text_file(APK_REPOSITORIES, new)
             changed.append(APK_REPOSITORIES.name)
@@ -1491,16 +1554,12 @@ def apt_use(hub=None, user='', password=''):
     return changed
 
 
-def apk_rewrite(text, hub=None, user='', password=''):
+def apk_rewrite(text, hub=None, user='', password='', mirrors=None, seen=None):
     """Alpine repositories through the hub (https://user:password@hub/apt/<host>/...) or, with hub=None, directly."""
     from urllib.parse import quote
-    hosts = '|'.join(re.escape(h) for h in APK_HOSTS)
-    text = re.sub(rf'https?://[^\s/]+(?:/[^\s]*?)?/apt/({hosts})(?=[/\s]|$)', r'https://\1', text)
-    if hub:
-        scheme, _, rest = hub.partition('://')
-        base = f'{scheme}://{quote(user, safe="")}:{quote(password, safe="")}@{rest}'
-        text = re.sub(rf'https?://({hosts})(?=[/\s]|$)', lambda m: f'{base}/apt/{m.group(1)}', text)
-    return text
+    scheme, _, rest = (hub or '').partition('://')
+    base = f'{scheme}://{quote(user, safe="")}:{quote(password, safe="")}@{rest}'
+    return _rewrite(text, APK_HOSTS, hub, mirrors, seen, lambda host: f'{base}/apt/{host}')
 
 
 def create_group(name):

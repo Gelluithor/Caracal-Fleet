@@ -1,5 +1,5 @@
 FROM python:3.13-slim AS base
-RUN apt-get update && apt-get install -y --no-install-recommends curl openssh-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl openssh-client mtools && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/caracal-hub
 COPY hub/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -19,8 +19,10 @@ RUN for f in hub/bootstrap/*.sh; do bash -n "$f"; done \
 
 FROM base AS runtime
 ARG NODE_IMAGE=ghcr.io/gelluithor/caracal-node
+ARG HUB_IMAGE=ghcr.io/gelluithor/caracal-fleet
 # CARACAL_NODE_IMAGE: default image of the CARACAL nodes (can be changed in the UI)
-ENV CARACAL_HUB_DATA=/var/lib/caracal-hub CARACAL_NODE_IMAGE=$NODE_IMAGE
+# CARACAL_HUB_IMAGE: where Fleet looks for its own new versions (also read from Docker when the socket is mounted)
+ENV CARACAL_HUB_DATA=/var/lib/caracal-hub CARACAL_NODE_IMAGE=$NODE_IMAGE CARACAL_HUB_IMAGE=$HUB_IMAGE
 EXPOSE 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD curl -fsS http://127.0.0.1:8090/api/health || exit 1
 CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8090","--proxy-headers","--forwarded-allow-ips","*"]

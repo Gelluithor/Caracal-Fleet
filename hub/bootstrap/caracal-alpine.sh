@@ -1,6 +1,6 @@
 #!/bin/sh
-# Zero-touch installation of a CARACAL node on a PC with Alpine Linux (x86_64 or arm64), POSIX sh: the live system
-# of the Alpine ISO has no bash.
+# Zero-touch installation of a CARACAL node on a PC with Alpine Linux (x86_64 or arm64) or on a Raspberry Pi, POSIX
+# sh: the live system of Alpine has no bash.
 #
 # CARACAL Fleet generates caracal.apkovl.tar.gz, an Alpine overlay that the live system of the Alpine ISO (Standard
 # or Extended) loads from the root of any FAT/ext4 USB stick or partition when it boots. The overlay starts this script
@@ -9,6 +9,8 @@
 #   live   (from the USB stick, root on tmpfs) sets up the network and the package repositories, installs Alpine on
 #          the internal disk (ERASES it) with setup-disk, and reboots. The overlay's /etc is copied to the new system
 #          (lbu), so the installed system runs this script again.
+#          Raspberry Pi (the card image from CARACAL Fleet): the system partition is created in the free space of the
+#          SD card, Alpine is installed on it (sys mode, the kernel stays on the FAT partition) and the card boots it.
 #   boot   (the installed system, at every boot until CARACAL is installed) creates the login, sets the time zone,
 #          the time server and SSH, installs bash and curl, then runs "caracal-firstboot.sh run" in the background
 #          (retried every minute, like the systemd service of the SD cards).
@@ -90,6 +92,17 @@ wait_for_hub() {   # $1 = attempts of 10 s
   return 1
 }
 
+# A Raspberry Pi has no clock battery: it starts with the date of the image, and TLS certificates look "not yet
+# valid" to it. The clock is set from the hub's answer (also without internet access), then from NTP when it is set.
+sync_clock() {
+  d=$(wget -q -S --no-check-certificate -O /dev/null "$HUB/api/health" 2>&1 | sed -n 's/^ *[Dd]ate: *//p' | head -n 1 | tr -d '\r')
+  if [ -n "$d" ] && date -u -D '%a, %d %b %Y %H:%M:%S GMT' -s "$d" >/dev/null 2>&1; then
+    say "clock set from the hub: $(date -u '+%Y-%m-%d %H:%M') UTC"
+  fi
+  [ -n "${NTP:-}" ] && ntpd -n -q -p "$NTP" >/dev/null 2>&1
+  return 0
+}
+
 repositories() {   # Alpine's repositories of this release: the internet or the hub
   release=$(cut -d. -f1,2 /etc/alpine-release)
   base=https://dl-cdn.alpinelinux.org/alpine/v$release
@@ -155,11 +168,116 @@ already_installed() {   # a partition of the disk holds a CARACAL node installed
   return 1
 }
 
+is_rpi() { grep -qi raspberry /proc/device-tree/model 2>/dev/null; }
+
+fail() {
+  say "$1, see $LOG"
+  tail -n 20 "$LOG" > /dev/tty1 2>/dev/null
+  # the log also on the FAT partition of the card: it can be read on any computer
+  if [ -n "${bootdir:-}" ]; then
+    mount -o remount,rw "$bootdir" 2>/dev/null
+    cp "$LOG" "$bootdir/caracal-install.log" 2>/dev/null
+    sync
+  fi
+  exit 1
+}
+
+# Raspberry Pi: Alpine's "sys" installation on the SD card it runs from. A second partition in the free space becomes
+# the root; setup-disk (Alpine 3.20 and newer) puts the kernel and the boot configuration on the FAT partition, which
+# is mounted as /boot of the new system.
+rpi_live() {
+  bootdev=$(awk '$2 ~ /^\/media\/mmcblk[0-9]+p1$/ {print $1; exit}' /proc/mounts)
+  bootdir=$(awk '$2 ~ /^\/media\/mmcblk[0-9]+p1$/ {print $2; exit}' /proc/mounts)
+  [ -n "$bootdev" ] || fail 'the boot partition of the SD card was not found'
+  disk=${bootdev%p1}
+  root=${disk}p2
+  hostname "${NAME_PREFIX:-caracal}"
+  echo "${NAME_PREFIX:-caracal}" > /etc/hostname
+  write_repositories keep-media
+  apk update -q >> "$LOG" 2>&1
+  apk add -q parted e2fsprogs >> "$LOG" 2>&1 || fail 'the partition tools could not be installed'
+  if [ ! -b "$root" ]; then
+    say "creating the system partition on the SD card ($disk)"
+    start=$(parted -ms "$disk" unit MiB print 2>>"$LOG" | awk -F: '$1 == "1" {sub("MiB", "", $3); print int($3) + 1}')
+    [ -n "$start" ] || fail 'the partition table of the SD card could not be read'
+    parted -s "$disk" mkpart primary ext4 "${start}MiB" 100% >> "$LOG" 2>&1 || fail 'the system partition could not be created'
+    i=0
+    while [ ! -b "$root" ] && [ "$i" -lt 10 ]; do mdev -s 2>/dev/null; sleep 1; i=$((i + 1)); done
+    [ -b "$root" ] || fail "the new partition $root did not appear"
+  fi
+  say "installing Alpine Linux on $root"
+  mkfs.ext4 -F -q -L caracal "$root" >> "$LOG" 2>&1 || fail 'the system partition could not be formatted'
+  mount "$root" /mnt || fail 'the system partition could not be mounted'
+  mount -o remount,rw "$bootdir" || fail 'the boot partition could not be written'
+  mkdir -p /mnt/boot
+  mount --bind "$bootdir" /mnt/boot || fail 'the boot partition could not be mounted for the new system'
+  date -u '+%Y-%m-%dT%H:%M:%SZ' > "$MARKER"
+  setup-disk -m sys /mnt >> "$LOG" 2>&1 || fail 'setup-disk failed'
+  # setup-disk sets the root of the new system in cmdline.txt; older versions did not
+  grep -q 'root=' "$bootdir/cmdline.txt" || sed -i "s#^#root=$root rootfstype=ext4 #" "$bootdir/cmdline.txt"
+  grep -q "[[:space:]]/boot[[:space:]]" /mnt/etc/fstab || echo "$bootdev /boot vfat defaults 0 0" >> /mnt/etc/fstab
+  # the overlay is not needed any more (the installed system has its /etc); kept renamed for troubleshooting
+  mv "$bootdir/caracal.apkovl.tar.gz" "$bootdir/caracal.apkovl.tar.gz.installed" 2>/dev/null
+  cp "$LOG" "$bootdir/caracal-install.log" 2>/dev/null
+  sync
+  umount /mnt/boot /mnt 2>/dev/null
+  say 'Alpine Linux installed on the SD card, rebooting into the new system'
+  sleep 5
+  reboot
+}
+
+live() {
+  bootdev=$(awk '$2 ~ /^\/media\/mmcblk[0-9]+p1$/ {print $1; exit}' /proc/mounts)
+  bootdir=$(awk '$2 ~ /^\/media\/mmcblk[0-9]+p1$/ {print $2; exit}' /proc/mounts)
+  [ -n "$bootdev" ] || fail 'the boot partition of the SD card was not found'
+  disk=${bootdev%p1}
+  root=${disk}p2
+  hostname "${NAME_PREFIX:-caracal}"
+  echo "${NAME_PREFIX:-caracal}" > /etc/hostname
+  write_repositories keep-media
+  apk update -q >> "$LOG" 2>&1
+  apk add -q parted e2fsprogs >> "$LOG" 2>&1 || fail 'the partition tools could not be installed'
+  if [ ! -b "$root" ]; then
+    say "creating the system partition on the SD card ($disk)"
+    start=$(parted -ms "$disk" unit MiB print 2>>"$LOG" | awk -F: '$1 == "1" {sub("MiB", "", $3); print int($3) + 1}')
+    [ -n "$start" ] || fail 'the partition table of the SD card could not be read'
+    parted -s "$disk" mkpart primary ext4 "${start}MiB" 100% >> "$LOG" 2>&1 || fail 'the system partition could not be created'
+    i=0
+    while [ ! -b "$root" ] && [ "$i" -lt 10 ]; do mdev -s 2>/dev/null; sleep 1; i=$((i + 1)); done
+    [ -b "$root" ] || fail "the new partition $root did not appear"
+  fi
+  say "installing Alpine Linux on $root"
+  mkfs.ext4 -F -q -L caracal "$root" >> "$LOG" 2>&1 || fail 'the system partition could not be formatted'
+  mount "$root" /mnt || fail 'the system partition could not be mounted'
+  date -u '+%Y-%m-%dT%H:%M:%SZ' > "$MARKER"
+  setup-disk -m sys /mnt >> "$LOG" 2>&1 || fail 'setup-disk failed'
+  mount -o remount,rw "$bootdir" || fail 'the boot partition could not be written'
+  # the kernel and the initramfs of the installed system replace the live ones on the FAT partition
+  rm -f "$bootdir"/boot/*
+  rm -f /mnt/boot/boot
+  mv /mnt/boot/* "$bootdir/boot/" || fail 'the kernel could not be moved to the boot partition'
+  rm -rf /mnt/boot
+  mkdir -p "/mnt$bootdir"
+  ln -s "${bootdir#/}/boot" /mnt/boot
+  echo "$bootdev $bootdir vfat defaults 0 0" >> /mnt/etc/fstab
+  sed -i '/cdrom/d; /floppy/d' /mnt/etc/fstab
+  sed -i "s#^#root=$root rootfstype=ext4 #" "$bootdir/cmdline.txt"
+  # the overlay is not needed any more (the installed system has its /etc); kept renamed for troubleshooting
+  mv "$bootdir/caracal.apkovl.tar.gz" "$bootdir/caracal.apkovl.tar.gz.installed" 2>/dev/null
+  sync
+  umount /mnt
+  say 'Alpine Linux installed on the SD card, rebooting into the new system'
+  sleep 5
+  reboot
+}
+
 live() {
   load_conf
   say 'zero-touch installation of Alpine Linux and CARACAL started'
   setup_network
   wait_for_hub 90 || { say "the hub $HUB is not reachable: check the network cable and the hub address"; exit 1; }
+  sync_clock
+  if is_rpi; then rpi_live; exit 0; fi
   disk=$(pick_disk)
   if [ -z "$disk" ]; then
     say 'no internal disk found (at least 4 GB); set the disk on the card in CARACAL Fleet'
@@ -240,6 +358,7 @@ boot() {
     exit 0
   fi
   load_conf
+  wait_for_hub 30 && sync_clock
   until setup_system; do
     say 'system packages not available yet, retrying in a minute'
     sleep 60

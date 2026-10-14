@@ -352,3 +352,24 @@ def delete_backup(name: str, r: Request):
     _backup_path(name).unlink()
     audit(u, 'system.backup_delete', name)
     return {'ok': True}
+
+
+# ---------------------------------------------------------------- updates of CARACAL Fleet itself (app/selfupdate.py)
+
+@router.get('/api/system/update')
+async def update_info(r: Request, refresh: bool = False):
+    from . import selfupdate
+    current_user(r, 'admin')
+    data = await run_in_threadpool(selfupdate.check, refresh)
+    return {**data, **selfupdate.status()}
+
+
+@router.post('/api/system/update')
+async def update_start(r: Request):
+    from . import selfupdate
+    u = current_user(r, 'admin')
+    d = await _json(r)
+    version = str(d.get('version') or '').strip()
+    await run_in_threadpool(selfupdate.start, version, u['username'])
+    audit(u, 'system.update', version, {'from': HUB_VERSION})
+    return {'ok': True}

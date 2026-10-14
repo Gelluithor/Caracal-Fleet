@@ -38,6 +38,8 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Default sound | `DELETE /notify/sounds/{level}` | the generated chime again |
 | Web administrator | `POST /admin` | `{username, password}` (password 10 to 200 characters): creates the administrator of the node's web administration, or sets a new name and password of the existing one (its sessions end) → `{created}` |
 | Countdown on the TV | `PUT /player/overlay` | `{enabled, size}` (bar height 4 to 200 px) |
+| Camera | `POST /assets/camera`, `PUT /assets/camera/{id}` | `{name, duration, layout (auto, 2, 2x2, 3x3), audio, streams: [{name, url, username, password}]}` (1-9 streams, rtsp/rtsps/http/https; empty user and password keep the stored ones); CARACAL 2026.10.13 |
+| ONVIF | `POST /cameras/onvif`, `POST /cameras/discover` | `{host, port, username, password, xaddr}` → `{streams: [{name, url}]}`; discovery (WS-Discovery in the node's network) → `{cameras: [{address, name, xaddr, hardware}]}` |
 | Player settings | `PUT /player/settings` | `{web_dark}`: websites in dark mode, `off`, `dark` (the sites' own dark look) or `force` (also pages without one); CARACAL 2026.10.12 and newer. Web pages and Grafana collections take `dark` as well (`off`, `dark`, `force`, empty = as the node) |
 | Skip notification | `POST /notify/skip` | ends the notification on screen |
 | Remove notification | `DELETE /notify/queue/{id}` | removes a waiting notification |

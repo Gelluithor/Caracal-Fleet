@@ -12,6 +12,11 @@ dietpi.txt (patched copy of the one from the card), dietpi-wifi.txt and Automati
 PCs (x86_64, arm64):
 - Alpine Linux: caracal.apkovl.tar.gz, an overlay the live system of the Alpine ISO loads from a USB stick; it
   installs Alpine on the internal disk and then CARACAL (hub/bootstrap/caracal-alpine.sh).
+
+Raspberry Pi with Alpine Linux: a whole SD card image (.img.gz for Raspberry Pi Imager or balenaEtcher). Its only
+partition (FAT32, 512 MiB) holds Alpine for the Raspberry Pi (downloaded from Alpine's mirror and checked against its
+SHA-256), the overlay and usercfg.txt (KMS graphics). The live system creates the system partition in the free space
+of the card, installs Alpine on it (sys mode) and continues like on a PC.
 - Ubuntu Server: user-data and meta-data of the autoinstall for a USB stick named CIDATA; the installed system runs
   caracal-firstboot.sh through cloud-init.
 A node template (hub/app/templates.py) chosen for the card is applied by the hub once the new node reports.
@@ -32,7 +37,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 
 from . import images, templates
-from .core import ADMIN_USER_RE, BOOT, audit, cfg, current_user, save_cfg
+from .core import ADMIN_USER_RE, BOOT, DATA, audit, cfg, current_user, save_cfg
 
 router = APIRouter()
 
@@ -44,8 +49,11 @@ COUNTRY_RE = re.compile(r'^[A-Z]{2}$')
 SSH_KEY_RE = re.compile(r'^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-[a-z0-9@.-]+) [A-Za-z0-9+/=]{16,}( [^\r\n]{0,200})?$')
 RESERVED_USERS = {'root', 'caracal', 'daemon', 'nobody'}
 DIETPI_TXT_MAX = 256 * 1024
-OS_NAMES = ('raspios', 'dietpi', 'alpine', 'ubuntu')
+OS_NAMES = ('raspios', 'dietpi', 'alpine', 'ubuntu', 'alpine-rpi')
 PC_OS = ('alpine', 'ubuntu')
+ALPINE_MIRROR = 'https://dl-cdn.alpinelinux.org/alpine'
+ALPINE_CACHE = DATA / 'proxy-cache' / 'alpine-rpi'
+IMAGE_MIB, PART_START = 512, 2048          # the FAT32 partition: 512 MiB from sector 2048 (1 MiB)
 DISK_RE = re.compile(r'^(auto|/dev/[a-z][a-z0-9]{1,15})$')
 
 
@@ -128,7 +136,7 @@ def _options(d):
          'admin_password_short'),
         (DISK_RE.match(o['disk']), 'invalid_disk'),
         # Alpine's live system has no Wi-Fi setup here: the installation needs a network cable
-        (not (o['os'] == 'alpine' and o['wifi_ssid']), 'wifi_unsupported'),
+        (not (o['os'] in ('alpine', 'alpine-rpi') and o['wifi_ssid']), 'wifi_unsupported'),
     )
     for ok, error in checks:
         if not ok:
@@ -236,6 +244,115 @@ def alpine_files(o):
             _tar_add(tar, f'etc/caracal/{name}', (BOOT / name).read_text(encoding='utf-8').replace('\r\n', '\n'), 0o755)
         _tar_add(tar, 'etc/caracal-firstboot.conf', firstboot_conf(o) + alpine_conf(o), 0o600)
     return {'caracal.apkovl.tar.gz': buf.getvalue()}
+
+
+# ---------------------------------------------------------------- Raspberry Pi with Alpine Linux: a card image
+
+def alpine_rpi_release():
+    """The newest stable Alpine for the Raspberry Pi (aarch64): {'version', 'file', 'sha256', 'url'}."""
+    import requests
+    base = f'{ALPINE_MIRROR}/latest-stable/releases/aarch64'
+    try:
+        text = requests.get(f'{base}/latest-releases.yaml', timeout=20).text
+    except requests.RequestException as e:
+        raise HTTPException(502, f'alpine_unavailable: {e}'[:200])
+    for entry in text.split('\n-'):
+        fields = dict(re.findall(r'^\s*([a-z0-9_]+):\s*(\S+)\s*$', entry, re.M))
+        if fields.get('flavor') == 'alpine-rpi' and fields.get('file', '').endswith('.tar.gz') and re.fullmatch(r'[0-9a-f]{64}', fields.get('sha256', '')):
+            if not re.fullmatch(r'alpine-rpi-[0-9.]+-aarch64\.tar\.gz', fields['file']):
+                break
+            return {'version': fields.get('version', ''), 'file': fields['file'], 'sha256': fields['sha256'], 'url': f"{base}/{fields['file']}"}
+    raise HTTPException(502, 'alpine_unavailable')
+
+
+def alpine_rpi_tarball(release):
+    """The Alpine tarball for the Raspberry Pi, downloaded once and checked against its SHA-256."""
+    import hashlib
+    import requests
+    ALPINE_CACHE.mkdir(parents=True, exist_ok=True)
+    path = ALPINE_CACHE / release['file']
+    if path.is_file():
+        return path
+    tmp = path.with_suffix('.part')
+    h = hashlib.sha256()
+    try:
+        with requests.get(release['url'], stream=True, timeout=(15, 600)) as r, tmp.open('wb') as f:
+            r.raise_for_status()
+            for chunk in r.iter_content(1024 * 1024):
+                h.update(chunk)
+                f.write(chunk)
+        if h.hexdigest() != release['sha256']:
+            raise HTTPException(502, 'alpine_checksum')
+        tmp.replace(path)
+    except requests.RequestException as e:
+        raise HTTPException(502, f'alpine_unavailable: {e}'[:200])
+    finally:
+        tmp.unlink(missing_ok=True)
+    for old in ALPINE_CACHE.glob('alpine-rpi-*.tar.gz'):   # only the newest one is kept
+        if old != path:
+            old.unlink(missing_ok=True)
+    return path
+
+
+USERCFG = """# CARACAL: KMS graphics (needed by the display of CARACAL), the whole screen, HDMI even when the TV starts later
+dtoverlay=vc4-kms-v3d
+disable_overscan=1
+hdmi_force_hotplug=1
+"""
+
+
+def _mbr(sectors):
+    """A DOS partition table with one FAT32 (LBA) partition from PART_START."""
+    import struct
+    mbr = bytearray(512)
+    mbr[440:444] = secrets.token_bytes(4)                 # disk signature
+    mbr[446:462] = struct.pack('<B3sB3sII', 0x00, b'\xfe\xff\xff', 0x0C, b'\xfe\xff\xff', PART_START, sectors)
+    mbr[510:512] = b'\x55\xaa'
+    return bytes(mbr)
+
+
+def build_rpi_image(o, workdir):
+    """caracal-alpine-rpi.img.gz in workdir: the card image with Alpine for the Raspberry Pi and the overlay."""
+    import gzip
+    import shutil
+    import subprocess
+    from pathlib import Path
+    if not shutil.which('mformat') or not shutil.which('mcopy'):
+        raise HTTPException(500, 'mtools_missing')
+    release = alpine_rpi_release()
+    tarball = alpine_rpi_tarball(release)
+    work = Path(workdir)
+    files = work / 'card'
+    files.mkdir()
+    with tarfile.open(tarball) as tar:
+        members = [m for m in tar.getmembers() if (m.isfile() or m.isdir()) and not m.name.startswith('/') and '..' not in m.name.split('/')]
+        try:
+            tar.extractall(files, members=members, filter='data')
+        except TypeError:   # Python before 3.12
+            tar.extractall(files, members=members)
+    for name, data in alpine_files(o).items():
+        (files / name).write_bytes(data)
+    (files / 'usercfg.txt').write_text(USERCFG)
+    (files / 'CARACAL-README.txt').write_text(README['alpine-rpi'].format(prefix=o['prefix'], version=release['version']))
+    sectors = IMAGE_MIB * 1024 * 1024 // 512
+    img = work / 'caracal-alpine-rpi.img'
+    with img.open('wb') as f:
+        f.write(_mbr(sectors))
+        f.truncate((PART_START + sectors) * 512)
+    target = f'{img}@@{PART_START * 512}'
+    run = lambda *cmd: subprocess.run(cmd, check=True, capture_output=True, timeout=300, env={**os.environ, 'MTOOLS_SKIP_CHECK': '1'})
+    try:
+        run('mformat', '-i', target, '-F', '-v', 'CARACAL', '-T', str(sectors), '-H', str(PART_START), '-h', '64', '-s', '32', '-c', '8', '::')
+        for entry in sorted(files.iterdir()):
+            run('mcopy', '-i', target, '-s', '-Q', str(entry), '::/')
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(500, f'image_failed: {e.stderr.decode(errors="replace")[:200]}')
+    out = work / 'caracal-alpine-rpi.img.gz'
+    with img.open('rb') as src, gzip.open(out, 'wb', compresslevel=6) as dst:
+        shutil.copyfileobj(src, dst, 1024 * 1024)
+    img.unlink()
+    shutil.rmtree(files, ignore_errors=True)
+    return out, release
 
 
 def ubuntu_files(o):
@@ -464,6 +581,16 @@ the display and CARACAL ({minutes_caracal}). The progress is shown on the screen
 again, it finds CARACAL already installed and powers off: remove the stick and power it on.
 The node then appears in CARACAL Fleet as "{prefix}-xxxxxx". Log on the device: /var/log/caracal-firstboot.log
 """,
+    'alpine-rpi': """CARACAL zero-touch SD card - Alpine Linux {version} on a Raspberry Pi (3, 4, 5, Zero 2 W; 64-bit)
+
+1. Write caracal-alpine-rpi.img.gz to the SD card with Raspberry Pi Imager ("Use custom") or balenaEtcher.
+   Do not change settings in the imager: the card is configured by CARACAL Fleet.
+2. Insert the card, connect the screen and the network cable, power on the Raspberry Pi.
+
+Alpine starts, creates the system partition in the free space of the card and installs itself (5-15 minutes),
+reboots, then installs Docker, the display and CARACAL (15-30 minutes). The progress is shown on the screen.
+The node then appears in CARACAL Fleet as "{prefix}-xxxxxx". Log on the device: /var/log/caracal-firstboot.log
+""",
     'ubuntu': """CARACAL zero-touch USB stick - Ubuntu Server on a PC (24.04 LTS or newer)
 
 WARNING: the installation ERASES the largest disk of the PC.
@@ -487,6 +614,24 @@ reach the hub (no internet access). Without a time server on the card the clock 
 """
 
 
+async def _rpi_image(u, o):
+    import shutil
+    import tempfile
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+    from starlette.concurrency import run_in_threadpool
+    work = tempfile.mkdtemp(prefix='caracal-rpi-', dir=DATA)
+    try:
+        path, release = await run_in_threadpool(build_rpi_image, o, work)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    audit(u, 'sdcard.create', o['os'], {'hub_url': o['hub_url'], 'prefix': o['prefix'], 'alpine': release['version'],
+                                        'download_source': o['download_source'], 'static_ip': o['static_ip'], 'template': o['template']})
+    return FileResponse(path, media_type='application/gzip', filename='caracal-alpine-rpi.img.gz',
+                        background=BackgroundTask(shutil.rmtree, work, ignore_errors=True))
+
+
 @router.post('/api/sdcard')
 async def sd_card(r: Request):
     u = current_user(r, 'admin')     # the files contain the enrollment token
@@ -499,6 +644,8 @@ async def sd_card(r: Request):
     o = _options(d)
     if not images.node_image():
         raise HTTPException(400, 'node_image_missing')
+    if o['os'] == 'alpine-rpi':
+        return await _rpi_image(u, o)
     if o['os'] == 'dietpi':
         dietpi_txt = str(d.get('dietpi_txt') or '')
         if not dietpi_txt or len(dietpi_txt) > DIETPI_TXT_MAX:

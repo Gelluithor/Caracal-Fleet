@@ -1,4 +1,5 @@
 """CARACAL Fleet Controller - central management of CARACAL signage nodes."""
+import asyncio
 import base64
 import hashlib
 import json
@@ -10,7 +11,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -18,7 +19,7 @@ from . import console, images, monitor, notify, playlists, provisioning, proxy, 
 from .core import (ACTIONS, AGENT_VERSION, BOOT, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, PERMS, ROLES, USERNAME_RE, APP_DIR,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
-                   sweep_commands, token_hash, validate_admin, version_tuple, DARK_MODES)
+                   sweep_commands, token_hash, validate_admin, version_tuple, DARK_MODES, COMMAND_SEQ)
 from .devices import COLLECTION_KIND, MEDIA_KINDS, SCREENSHOTS, build, collections_of, dashboards_of, grafana_config, notifications_of
 
 @asynccontextmanager
@@ -200,8 +201,10 @@ async def edit_me(r: Request):
                 raise HTTPException(400, 'wrong_password')
             if len(str(d['new_password'])) < 10:
                 raise HTTPException(400, 'password_too_short')
+            if check_password(str(d['new_password']), u['password_hash']):
+                raise HTTPException(400, 'password_same')
             u['password_hash'] = hash_password(str(d['new_password']))
-            c.execute('UPDATE users SET password_hash=? WHERE id=?', (u['password_hash'], u['id']))
+            c.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?', (u['password_hash'], u['id']))
             token = make_session(u)
     if d.get('new_password'):
         audit(u, 'user.password', u['username'])
@@ -459,6 +462,17 @@ def validate_command(c, row, action, payload):
         payload = {'web_dark': payload['web_dark']}
     if action == 'diagnostics':
         payload = {}
+    if action in ('add_camera', 'update_camera'):
+        payload = validate_camera(payload, action == 'update_camera')
+    if action == 'camera_onvif':
+        host = text(payload.get('host'), 255)
+        if not re.fullmatch(r'[A-Za-z0-9.\-:\[\]]{1,255}', host):
+            raise HTTPException(400, 'invalid_value')
+        payload = {'host': host, 'port': int(payload.get('port') or 80) if str(payload.get('port') or '80').isdigit() else 80,
+                   'username': text(payload.get('username'), 200), 'password': str(payload.get('password') or '')[:200],
+                   'xaddr': text(payload.get('xaddr'), 500)}
+    if action == 'camera_discover':
+        payload = {}
     if action == 'screen':
         if payload.get('state') not in ('on', 'off'):
             raise HTTPException(400, 'invalid_value')
@@ -576,7 +590,10 @@ NOTIFY_CAPABILITY = {'notify': 'notify', 'notify_clear': 'notify_clear', 'notify
                      'delete_notify_token': 'notify_token_delete', 'preview_watcher': 'preview_watcher'}
 SOUND_MAX = 5 * 1024 ** 2
 # command -> local endpoint of the node, for commands that old agents do not know at all
-NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot', 'player_settings': 'player_settings'}
+NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot', 'player_settings': 'player_settings',
+                  'add_camera': 'add_camera', 'update_camera': 'update_camera', 'camera_onvif': 'camera_onvif',
+                  'camera_discover': 'camera_discover'}
+CAMERA_SCHEMES, CAMERA_LAYOUTS, CAMERA_MAX = ('rtsp://', 'rtsps://', 'http://', 'https://'), ('auto', '2', '2x2', '3x3'), 9
 # what only newer agents can do (they report their version in every heartbeat)
 AGENT_FEATURES = {'reinstall_node': (4, 13, 0), 'diagnostics': (4, 13, 0), 'player_settings': (4, 13, 0),
                   'screen': (4, 14, 0)}
@@ -587,6 +604,32 @@ SCREENSHOT_MAX = 8 * 1024 ** 2
 
 def flag(v):
     return v not in (False, 0, '0', 'false', 'off', 'no', '', None)
+
+
+def validate_camera(d, edit=False):
+    """A camera item: name, display time, layout and 1-9 streams (rtsp/rtsps/http/https) with optional credentials."""
+    out = {'name': text(d.get('name'), 200), 'layout': d.get('layout') if d.get('layout') in CAMERA_LAYOUTS else 'auto',
+           'audio': bool(d.get('audio'))}
+    if edit:
+        if d.get('id') in (None, ''):
+            raise HTTPException(400, 'item_required')
+        out['id'] = d['id']
+    if not out['name']:
+        raise HTTPException(400, 'name_required')
+    if d.get('duration') not in (None, ''):
+        out.update(validate_timing({'duration': d['duration']}))
+    streams = d.get('streams')
+    if not isinstance(streams, list) or not 1 <= len(streams) <= CAMERA_MAX:
+        raise HTTPException(400, 'invalid_streams')
+    out['streams'] = []
+    for st in streams:
+        st = st if isinstance(st, dict) else {}
+        url = text(st.get('url'), 2000)
+        if not url.lower().startswith(CAMERA_SCHEMES) or any(ch.isspace() for ch in url):
+            raise HTTPException(400, 'invalid_stream_url')
+        out['streams'].append({'name': text(st.get('name'), 80), 'url': url, 'username': text(st.get('username'), 200),
+                               'password': str(st.get('password') or '')[:200]})
+    return out
 
 
 def validate_dark(v):
@@ -1041,7 +1084,7 @@ def list_users(r: Request):
     current_user(r, 'admin')
     with db() as c:
         return [dict(x) for x in c.execute(
-            "SELECT id, username, role, language, enabled, created, totp_secret != '' AS totp, "
+            "SELECT id, username, role, language, enabled, created, totp_secret != '' AS totp, must_change_password, "
             "password_hash LIKE 'sso$%' AS sso FROM users ORDER BY username COLLATE NOCASE")]
 
 
@@ -1060,9 +1103,9 @@ async def create_user(r: Request):
     with db() as c:
         if c.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
             raise HTTPException(409, 'already_exists')
-        c.execute('INSERT INTO users(username, password_hash, role, language, enabled, created) VALUES(?,?,?,?,1,?)',
-                  (username, hash_password(password), role, language, time.time()))
-    audit(u, 'user.create', username, {'role': role})
+        c.execute('INSERT INTO users(username, password_hash, role, language, enabled, created, must_change_password) '
+                  'VALUES(?,?,?,?,1,?,?)', (username, hash_password(password), role, language, time.time(), int(bool(d.get('must_change')))))
+    audit(u, 'user.create', username, {'role': role, 'must_change': bool(d.get('must_change'))})
     return {'ok': True}
 
 
@@ -1089,9 +1132,11 @@ async def edit_user(uid: int, r: Request):
         if d.get('password'):
             if len(str(d['password'])) < 10:
                 raise HTTPException(400, 'password_too_short')
-            c.execute('UPDATE users SET password_hash=? WHERE id=?', (hash_password(str(d['password'])), uid))
+            c.execute('UPDATE users SET password_hash=?, must_change_password=? WHERE id=?',
+                      (hash_password(str(d['password'])), int(bool(d.get('must_change'))), uid))
     audit(u, 'user.edit', target['username'],
-          {'role': role, 'language': language, 'enabled': bool(enabled), 'password_reset': bool(d.get('password'))})
+          {'role': role, 'language': language, 'enabled': bool(enabled), 'password_reset': bool(d.get('password')),
+           'must_change': bool(d.get('password') and d.get('must_change'))})
     return {'ok': True}
 
 
@@ -1273,12 +1318,35 @@ async def heartbeat(did: str, r: Request):
                    json.dumps(d, ensure_ascii=False), did))
         monitor.record_metrics(c, did, d)
         templates.apply_pending(c, did)
-    return {'ok': True, 'agent_version': AGENT_VERSION, 'server_time': time.time()}
+    # the trusted mirrors of the hub: agents (4.15) point their apt/apk sources to them through the hub as well
+    return {'ok': True, 'agent_version': AGENT_VERSION, 'server_time': time.time(), 'mirrors': [f"{m['scheme']}://{m['host']}" for m in proxy.mirrors()]}
+
+
+LONG_POLL_MAX = 25
 
 
 @app.get('/api/device/{did}/commands')
-def pull_commands(did: str, r: Request):
+async def pull_commands(did: str, r: Request, wait: int = 0):
+    """The commands queued for a device. With ?wait=N (agents from 4.15) the request waits up to N seconds for a
+    command, so the agent gets it within a fraction of a second instead of at its next poll."""
     device_auth(r, did)
+    deadline = time.time() + max(0, min(wait, LONG_POLL_MAX))
+    seq, recheck_until = COMMAND_SEQ.get(did, 0), 0.0
+    while True:
+        out = await run_in_threadpool(_take_commands, did)
+        if out or time.time() >= deadline:
+            return JSONResponse(out, headers={'X-Long-Poll': '1'})
+        while time.time() < deadline:
+            await asyncio.sleep(0.25)
+            if COMMAND_SEQ.get(did, 0) != seq:
+                # a new command; its transaction may still be open, so the queue is read again for a moment
+                seq, recheck_until = COMMAND_SEQ.get(did, 0), time.time() + 3
+                break
+            if time.time() < recheck_until:
+                break
+
+
+def _take_commands(did):
     with db() as c:
         sweep_commands(c)
         rows = c.execute("SELECT * FROM commands WHERE device_id=? AND state='queued' ORDER BY id", (did,)).fetchall()

@@ -21,8 +21,8 @@ zero-touch USB stick](docs/fleet.gif)
   lets other apps reach many screens with one request
 - **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
   and locations
-- **Zero-touch installation:** prepare an SD card for a Raspberry Pi or a USB stick for a PC (Alpine Linux fully
-  hands-off, Ubuntu Server autoinstall), install any running Debian, Ubuntu or Alpine with one command, or find a
+- **Zero-touch installation:** prepare an SD card for a Raspberry Pi (Raspberry Pi OS, DietPi, or a ready Alpine Linux
+  card image) or a USB stick for a PC (Alpine Linux fully hands-off, Ubuntu Server autoinstall), install any running Debian, Ubuntu or Alpine with one command, or find a
   fresh Raspberry Pi in the network and install it over SSH; every installation can create the administrator of the
   node's own web administration
 - **Node templates:** the playlist, notification settings and look (with picture), the countdown bar, group and
@@ -35,6 +35,8 @@ zero-touch USB stick](docs/fleet.gif)
 - **Diagnostics and reinstallation:** a report of a node whose screen stays black (disk, memory, power, display
   outputs, the X server, containers and system log, with the usual causes pointed out), and *Reinstall CARACAL*
   from scratch – optionally as a factory reset with a new administrator and a template
+- **Cameras:** RTSP and HTTP streams of IP cameras and recorders as playlist items, up to 9 in a grid; ONVIF cameras
+  are found in the node's network and asked for their streams; their passwords stay on the node, encrypted
 - **Schedules:** global playlists by time of day and day of the week, screen hours (screens off outside them through
   HDMI power saving and HDMI-CEC) and actions at a given time (restarts, screens off/on, a playlist, a template, a
   notification, updates), in the hub's time zone
@@ -47,10 +49,12 @@ zero-touch USB stick](docs/fleet.gif)
   dark for every page
 - **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
 - **Nodes without internet access:** Fleet can be the only download source of a node (system packages, Docker and
-  CARACAL go through the hub), chosen for the SD card, the SSH installation or per device
+  CARACAL go through the hub), chosen for the SD card, the SSH installation or per device; trusted mirrors of your
+  own (a company or national apt/apk mirror) can be added
+- **Fast control:** agents wait for commands (long polling), so a command reaches the screen within a second
 - **Administration:** users with the roles admin, manager, operator and viewer; command history, audit log,
   Czech and English UI, custom logo, full backup and restore for server migrations, daily backups on the hub;
-  two-factor sign-in (TOTP with recovery codes) and single sign-on through OpenID Connect (Microsoft Entra ID,
+  one-time passwords (the user sets their own at the first sign-in), two-factor sign-in (TOTP with recovery codes) and single sign-on through OpenID Connect (Microsoft Entra ID,
   Google, Keycloak, Authentik…)
 
 ## Quick start

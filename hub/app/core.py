@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.16.1'
+HUB_VERSION = '4.17.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -75,6 +75,11 @@ ACTIONS = {
     'player_settings': ('content', None),
     # agents from 4.14: switch the screen off / on (DPMS, HDMI-CEC)
     'screen': ('control', 600),
+    # agents from 4.15 with CARACAL 2026.10.13: cameras (RTSP / HTTP streams, ONVIF)
+    'add_camera': ('content', None),
+    'update_camera': ('content', None),
+    'camera_onvif': ('content', 600),
+    'camera_discover': ('content', 600),
     # on-screen notifications of the nodes
     'notify': ('control', 600),
     'notify_clear': ('control', 600),
@@ -106,7 +111,8 @@ ACTIONS = {
 # only to the node.
 SECRET_KEYS = ('username', 'password', 'secret', 'client_secret', 'refresh_token')
 SECRET_ACTIONS = ('add_profile', 'update_profile', 'add_watcher', 'update_watcher', 'preview_watcher', 'set_admin',
-                  'convert_to_docker', 'reinstall_node')   # optionally with the node's web administrator
+                  'convert_to_docker', 'reinstall_node',   # optionally with the node's web administrator
+                  'add_camera', 'update_camera', 'camera_onvif')   # credentials of camera streams
 # installing CARACAL (apt, pip, image downloads) takes much longer than other commands
 INSTALL_ACTIONS = ('update_caracal', 'convert_to_docker', 'reinstall_node')
 DARK_MODES = ('off', 'dark', 'force')
@@ -130,7 +136,12 @@ def redact(action, payload):
     """Copy of a command payload without credentials (for the history, the audit and the stored command)."""
     if action not in SECRET_ACTIONS or not isinstance(payload, dict):
         return payload
-    return {k: (REDACTED if k in SECRET_KEYS and v else v) for k, v in payload.items()}
+
+    def clean(v):   # also inside lists of objects (the streams of a camera)
+        if isinstance(v, dict):
+            return {k: (REDACTED if k in SECRET_KEYS and x and not isinstance(x, (dict, list)) else clean(x)) for k, x in v.items()}
+        return [clean(x) for x in v] if isinstance(v, list) else v
+    return clean(payload)
 
 
 def redact_json(action, payload_json):
@@ -242,7 +253,8 @@ COLUMNS = [
     ('users', 'totp_pending', "TEXT DEFAULT ''"),
     ('users', 'totp_recovery', "TEXT DEFAULT ''"),
     ('users', 'totp_last', 'INTEGER DEFAULT 0'),
-    ('users', 'sso_subject', "TEXT DEFAULT ''"),   # '<schedule id>:<playlist id>' deployed by a schedule
+    ('users', 'sso_subject', "TEXT DEFAULT ''"),
+    ('users', 'must_change_password', 'INTEGER DEFAULT 0'),   # a one-time password set by an administrator   # '<schedule id>:<playlist id>' deployed by a schedule
 ]
 
 
@@ -427,11 +439,15 @@ def make_session(u):
     return body + ':' + _sign(body)
 
 
+# A user with a one-time password can only read their account, set a new password and sign out.
+PASSWORD_CHANGE_PATHS = ('/api/me', '/api/logout')
+
+
 def current_user(r: Request, perm='view'):
-    return user_from_token(r.headers.get('Authorization', '').removeprefix('Bearer ').strip(), perm)
+    return user_from_token(r.headers.get('Authorization', '').removeprefix('Bearer ').strip(), perm, r.url.path)
 
 
-def user_from_token(raw, perm='view'):
+def user_from_token(raw, perm='view', path=None):
     """User of a session token (also used by WebSockets, which cannot send the Authorization header)."""
     try:
         name, exp, fp, sig = raw.rsplit(':', 3)
@@ -445,6 +461,8 @@ def user_from_token(raw, perm='view'):
     except (ValueError, TypeError):
         raise HTTPException(401, 'session_expired')
     u = dict(u)
+    if u.get('must_change_password') and path not in PASSWORD_CHANGE_PATHS:
+        raise HTTPException(403, 'password_change_required')
     if u['role'] not in PERMS[perm]:
         raise HTTPException(403, 'forbidden')
     return u
@@ -454,7 +472,8 @@ def public_user(u):
     x = dict(u)
     return {'id': x['id'], 'username': x['username'], 'role': x['role'], 'language': x['language'] or 'cs',
             'permissions': sorted(p for p, roles in PERMS.items() if x['role'] in roles),
-            'totp': bool(x.get('totp_secret')), 'sso': str(x.get('password_hash') or '').startswith('sso$')}
+            'totp': bool(x.get('totp_secret')), 'sso': str(x.get('password_hash') or '').startswith('sso$'),
+            'must_change_password': bool(x.get('must_change_password'))}
 
 
 def audit(u, action, target='', detail=''):
@@ -479,8 +498,14 @@ def device_auth(r: Request, did):
         raise HTTPException(401, 'invalid_device_token')
 
 
+# A counter per device, raised by every queued command: an agent waiting for commands (long poll) looks at it
+# instead of asking the database again and again.
+COMMAND_SEQ = {}
+
+
 def queue_command(c, device_id, action, payload, username, batch='', followup=None):
     now = time.time()
+    COMMAND_SEQ[device_id] = COMMAND_SEQ.get(device_id, 0) + 1
     ttl = ACTIONS[action][1]
     cur = c.execute(
         'INSERT INTO commands(device_id, action, payload_json, state, result, created, updated, username, batch, '

@@ -58,9 +58,23 @@ _jobs_lock = threading.Lock()
 _trimmed = [0.0]
 
 
+MIRROR_RE = re.compile(r'(?:(https?)://)?([a-z0-9](?:[a-z0-9.-]{0,250}[a-z0-9])?(?::\d{1,5})?)/?')
+MIRRORS_MAX = 50
+
+
+def mirrors():
+    """Trusted mirrors added by an administrator: [{'host', 'scheme'}] (apt or apk repositories, e.g. a mirror in
+    the company network or a national Alpine mirror)."""
+    return [m for m in cfg().get('proxy_mirrors') or [] if isinstance(m, dict) and m.get('host')]
+
+
+def mirror_hosts():
+    return tuple(m['host'] for m in mirrors())
+
+
 def apt_hosts():
     extra = [h.strip().lower() for h in os.getenv('CARACAL_HUB_APT_HOSTS', '').split(',') if h.strip()]
-    return tuple(dict.fromkeys(DEFAULT_APT_HOSTS + APK_HOSTS + tuple(extra)))
+    return tuple(dict.fromkeys(DEFAULT_APT_HOSTS + APK_HOSTS + tuple(extra) + mirror_hosts()))
 
 
 def cache_limit():
@@ -70,9 +84,14 @@ def cache_limit():
         return 20 * 1024 ** 3
 
 
+def scheme_of(host):
+    """https, or http for a mirror without TLS in the local network."""
+    return next((m.get('scheme') for m in mirrors() if m['host'] == host), None) or 'https'
+
+
 def _upstream(host):
     """Base URL of an apt repository host (replaced in tests)."""
-    return f'https://{host}'
+    return f'{scheme_of(host)}://{host}'
 
 
 # ---------------------------------------------------------------- authentication
@@ -366,6 +385,39 @@ def proxy_status(r: Request):
         jobs = [{'image': f'{k[0]}:{k[1]}', 'arch': k[2], **v} for k, v in _jobs.items()]
     return {'apt_hosts': list(apt_hosts()), 'cache_bytes': _size(CACHE), 'cache_limit': cache_limit(),
             'apt_bytes': _size(APT_CACHE), 'images': archives, 'jobs': jobs}
+
+
+@router.get('/api/proxy/mirrors')
+def get_mirrors(r: Request):
+    current_user(r, 'manage')
+    return {'mirrors': mirrors(), 'builtin': list(DEFAULT_APT_HOSTS + APK_HOSTS)}
+
+
+@router.put('/api/proxy/mirrors')
+async def put_mirrors(r: Request):
+    """The trusted mirrors: one per line, a host name (https) or http://host for a mirror without TLS. apt and apk
+    check the repository signatures themselves, so a mirror cannot change packages."""
+    from .core import save_cfg
+    u = current_user(r, 'admin')
+    try:
+        d = await r.json()
+    except ValueError:
+        raise HTTPException(400, 'invalid_json')
+    lines = d.get('mirrors') if isinstance(d, dict) else None
+    if not isinstance(lines, list) or len(lines) > MIRRORS_MAX:
+        raise HTTPException(400, 'invalid_value')
+    out, builtin = [], set(DEFAULT_APT_HOSTS + APK_HOSTS)
+    for line in lines:
+        m = MIRROR_RE.fullmatch(str(line or '').strip().lower())
+        if not m:
+            raise HTTPException(400, 'invalid_mirror')
+        if m.group(2) not in builtin and m.group(2) not in [x['host'] for x in out]:
+            out.append({'host': m.group(2), 'scheme': m.group(1) or 'https'})
+    conf = cfg()
+    conf['proxy_mirrors'] = out
+    save_cfg(conf)
+    audit(u, 'proxy.mirrors', '', {'mirrors': [f"{x['scheme']}://{x['host']}" for x in out]})
+    return {'mirrors': out}
 
 
 @router.post('/api/proxy/cache/clear')
