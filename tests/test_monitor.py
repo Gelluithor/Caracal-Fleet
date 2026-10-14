@@ -163,3 +163,92 @@ def test_malformed_status_does_not_break_the_device_list(client, admin_headers):
         assert client.get('/api/devices', headers=admin_headers).status_code == 200, status
         assert client.get(f'/api/devices/{did}', headers=admin_headers).status_code == 200, status
     monitor.check(time.time(), lambda *a: None)
+
+
+TG_TOKEN = '123456789:' + 'A' * 35
+
+
+class TelegramApi:
+    """The Bot API as far as alerts use it."""
+
+    def __init__(self, ok=True):
+        self.ok, self.calls = ok, []
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.calls.append((url, json))
+        answer = {'ok': True, 'result': True} if self.ok else {'ok': False, 'description': 'Bad Request: chat not found'}
+        if url.endswith('/getUpdates'):
+            answer = {'ok': True, 'result': [
+                {'update_id': 1, 'message': {'chat': {'id': 42, 'type': 'private', 'first_name': 'Jana', 'last_name': 'Nová'}}},
+                {'update_id': 2, 'my_chat_member': {'chat': {'id': -100777, 'type': 'supergroup', 'title': 'IT <ops>'}}},
+                {'update_id': 3, 'message': {'chat': {'id': 42, 'type': 'private', 'first_name': 'Jana'}}}]}
+
+        class Response:
+            status_code = 200 if answer['ok'] else 400
+
+            def json(self):
+                return answer
+        return Response()
+
+
+def test_telegram_channel(client, admin_headers, monkeypatch):
+    api = TelegramApi()
+    monkeypatch.setattr(monitor.requests, 'post', api.post)
+    channel = {'type': 'telegram', 'name': 'IT', 'token': TG_TOKEN, 'chat': '-100777'}
+    assert client.post('/api/alerts/test', headers=admin_headers, json={'channel': channel}).json() == {'ok': True}
+    url, data = api.calls[-1]
+    assert url == f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage'
+    assert data['chat_id'] == '-100777' and data['parse_mode'] == 'HTML' and data['text'].startswith('<b>')
+    # the token is stored but never shown; saving the form back keeps it
+    conf = set_alerts(client, admin_headers, channels=[channel])
+    assert conf['channels'][0]['token'] == core.REDACTED and conf['channels'][0]['chat'] == '-100777'
+    client.put('/api/alerts', headers=admin_headers, json=conf)
+    assert monitor.config()['channels'][0]['token'] == TG_TOKEN
+    # finding the chat works (the newest name of a chat wins) with the stored token too
+    chats = client.post('/api/alerts/telegram/chats', headers=admin_headers,
+                        json={'id': conf['channels'][0]['id'], 'token': core.REDACTED}).json()
+    assert chats['chats'] == [{'id': '42', 'name': 'Jana', 'type': 'private'},
+                              {'id': '-100777', 'name': 'IT <ops>', 'type': 'supergroup'}]
+    for bad in ({**channel, 'token': 'nope'}, {**channel, 'chat': 'not a chat'}):
+        assert client.put('/api/alerts', headers=admin_headers, json={'channels': [bad]}).status_code == 400
+    # device names are escaped, the error of Telegram is shown, the token never
+    monitor._deliver(monitor.config()['channels'][0], monitor.config(), 'T', ['<script> & x'], {'items': []}, 'critical')
+    assert '&lt;script&gt; &amp; x' in api.calls[-1][1]['text']
+    api.ok = False
+    bad = client.post('/api/alerts/test', headers=admin_headers, json={'channel': channel}).json()
+    assert bad == {'ok': False, 'error': 'Telegram: Bad Request: chat not found'}
+
+    def broken(url, **kw):
+        raise monitor.requests.ConnectionError(f'Max retries exceeded with url: {url}')
+    monkeypatch.setattr(monitor.requests, 'post', broken)
+    bad = client.post('/api/alerts/test', headers=admin_headers, json={'channel': channel}).json()
+    assert bad['ok'] is False and TG_TOKEN not in bad['error'] and '***' in bad['error']
+
+
+def test_fleet_updates_go_to_the_alert_channels(client, admin_headers, monkeypatch, tmp_path):
+    from app import images, selfupdate
+    sent = []
+    monkeypatch.setattr(monitor, '_deliver', lambda ch, conf, title, lines, payload, level: sent.append((title, lines, payload)))
+    set_alerts(client, admin_headers, public_url='https://fleet.test')
+    selfupdate._state.update(checked=0, data=None, job=None)
+    monkeypatch.setattr(images, 'list_tags', lambda image: ['99.0.0', '99.1.0'])
+    monkeypatch.setattr(selfupdate.Docker, 'available', lambda self: False)
+    monkeypatch.setattr(monitor.requests, 'get', lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('offline')))
+    selfupdate.check(force=True)
+    selfupdate.check(force=True)      # once per version
+    assert [s[0] for s in sent] == ['CARACAL Fleet 99.1.0 is available']
+    assert 'https://fleet.test/#/settings/update' in sent[0][1][-1] and sent[0][2]['event'] == 'fleet_available'
+    # the result of an update, once
+    status = core.DATA / selfupdate.STATUS_FILE
+    status.write_text('{"state": "failed", "from": "ghcr.io/o/caracal-fleet:4.17.0", "to": "ghcr.io/o/caracal-fleet:99.1.0", '
+                      f'"error": "the new hub did not become healthy", "at": {time.time()}}}')
+    selfupdate.announce_result()
+    selfupdate.announce_result()
+    assert sent[-1][0] == 'The CARACAL Fleet update to 99.1.0 failed' and '4.17.0' in sent[-1][1][0] and len(sent) == 2
+    # switched off: nothing is sent
+    set_alerts(client, admin_headers, fleet_updates=False)
+    status.write_text(f'{{"state": "done", "from": "x:4.17.0", "to": "x:99.1.0", "at": {time.time()}}}')
+    selfupdate.announce_result()
+    assert len(sent) == 2
+    status.unlink()
+    selfupdate._state.update(checked=0, data=None, job=None)

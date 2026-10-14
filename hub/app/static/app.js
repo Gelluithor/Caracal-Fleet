@@ -130,6 +130,7 @@ const ICONS = {
   chev: 'M7 10l5 5 5-5',
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
+  send: 'M22 2 11 13M22 2l-7 20-4-9-9-4z',
   bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
   check: 'M20 6 9 17l-5-5',
   keyboard: 'M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10',
@@ -2394,8 +2395,8 @@ const SETTINGS_VIEW = {
 
 // ---------- alerts for administrators (Settings → Alerts)
 
-const CH_ICON = { email: 'bell', slack: 'web', teams: 'users', discord: 'web', ntfy: 'attention', webhook: 'upload' };
-const CH_TYPES = ['email', 'slack', 'teams', 'discord', 'ntfy', 'webhook'];
+const CH_ICON = { email: 'bell', slack: 'web', teams: 'users', discord: 'web', telegram: 'send', ntfy: 'attention', webhook: 'upload' };
+const CH_TYPES = ['email', 'slack', 'teams', 'discord', 'telegram', 'ntfy', 'webhook'];
 
 function renderAlerts(root, conf) {
   const st = conf;
@@ -2405,7 +2406,7 @@ function renderAlerts(root, conf) {
   };
   const on = x => (x ? 'checked' : '');
   const chRow = ch => `<div class="channel">${icon(CH_ICON[ch.type])}<div class="channel-main"><b>${esc(ch.name || t('ch_' + ch.type))}</b>
-      <small class="muted">${esc(t('ch_' + ch.type))} · ${esc(ch.to || hostOf(ch.url))}</small></div>
+      <small class="muted">${esc(t('ch_' + ch.type))} · ${esc(ch.to || (ch.type === 'telegram' ? t('chChat') + ' ' + ch.chat : hostOf(ch.url)))}</small></div>
       ${ch.enabled === false ? `<span class="tag">${t('chPaused')}</span>` : ''}
       ${ch.last ? `<span class="tag ${ch.last.ok ? 'ok' : 'critical'}" title="${esc(ch.last.error || '')}">${t(ch.last.ok ? 'chOk' : 'chFailed')} · ${clock(ch.last.ts)}</span>` : ''}
       <span class="row-actions"><button class="btn sm" data-ch-test="${esc(ch.id)}">${t('chTest')}</button>
@@ -2420,6 +2421,7 @@ function renderAlerts(root, conf) {
         <label class="check"><input type="checkbox" name="critical" ${on(st.levels.includes('critical'))}>${t('alertsCritical')}</label>
         <label class="check"><input type="checkbox" name="warning" ${on(st.levels.includes('warning'))}>${t('alertsWarning')}</label>
         <label class="check"><input type="checkbox" name="recovery" ${on(st.recovery)}>${t('alertsRecovery')}</label>
+        <label class="check"><input type="checkbox" name="fleet_updates" ${on(st.fleet_updates)}>${t('alertsFleetUpdates')}</label>
         <label>${t('alertsUrl')}<input name="public_url" value="${esc(st.public_url)}" placeholder="${esc(location.origin)}"><small>${t('alertsUrlHint')}</small></label>
         <div class="form-actions"><button class="btn primary">${t('save')}</button></div></form></section>
     <section class="card flush"><div class="toolbar"><h2 class="grow">${t('alertChannels')}</h2><button class="btn sm primary" id="chAdd">${icon('plus')}${t('chAdd')}</button></div>
@@ -2435,7 +2437,7 @@ function renderAlerts(root, conf) {
   $('#alertForm', root).onsubmit = e => {
     e.preventDefault();
     const f = e.target;
-    save({ enabled: f.enabled.checked, delay: Number(f.delay.value), language: f.language.value, recovery: f.recovery.checked,
+    save({ enabled: f.enabled.checked, delay: Number(f.delay.value), language: f.language.value, recovery: f.recovery.checked, fleet_updates: f.fleet_updates.checked,
       levels: ['critical', 'warning'].filter(x => f[x].checked), public_url: f.public_url.value.trim() });
   };
   const smtp = $('#smtpForm', root);
@@ -2465,7 +2467,7 @@ const alertError = e => I18N[S.lang]['err_' + e] || I18N.en['err_' + e] || e;
 function channelDialog(ch, onSave) {
   const cur = ch || { type: 'email', enabled: true };
   const read = form => ({ id: ch ? ch.id : '', type: ch ? ch.type : form.querySelector('[name=type]:checked').value, name: form.name.value.trim(),
-    to: form.to.value.trim(), url: form.url.value.trim(), token: form.token.value.trim(), enabled: form.enabled.checked });
+    to: form.to.value.trim(), url: form.url.value.trim(), token: form.token.value.trim(), chat: form.chat.value.trim(), enabled: form.enabled.checked });
   modal({
     title: ch ? t('chEdit') : t('chAdd'),
     body: `<div class="form">
@@ -2473,19 +2475,33 @@ function channelDialog(ch, onSave) {
       <label>${t('name')}<input name="name" value="${esc(cur.name || '')}" placeholder="${esc(t('chNameHint'))}"></label>
       <label data-ch="to">${t('chTo')}<input name="to" value="${esc(cur.to || '')}" placeholder="it@firma.cz, servis@firma.cz"><small>${t('chToHint')}</small></label>
       <label data-ch="url">${t('chUrl')}<input name="url" value="${esc(cur.url || '')}" placeholder="https://"><small class="ch-hint"></small></label>
-      <label data-ch="token">${t('chToken')}<input name="token" value="${esc(cur.token || '')}" autocomplete="off"><small>${t('chTokenHint')}</small></label>
+      <label data-ch="token"><span class="ch-token-label">${t('chToken')}</span><input name="token" value="${esc(cur.token || '')}" autocomplete="off"><small class="ch-token-hint">${t('chTokenHint')}</small></label>
+      <div data-ch="chat"><label>${t('chChatId')}<input name="chat" value="${esc(cur.chat || '')}" placeholder="-1001234567890" autocomplete="off"><small>${t('chChatHint')}</small></label>
+        <div class="form-actions start find-chat"><button type="button" class="btn sm" id="chFindChat">${icon('search')}${t('chFindChat')}</button></div><div class="chat-result"></div></div>
       <label class="check"><input type="checkbox" name="enabled" ${cur.enabled !== false ? 'checked' : ''}>${t('chEnabled')}</label>
       <div class="form-actions start"><button type="button" class="btn" id="chTry">${icon('bell')}${t('chTest')}</button></div><div class="try-result"></div></div>`,
     onOpen: form => {
       const sync = () => {
         const type = ch ? ch.type : form.querySelector('[name=type]:checked').value;
         $('[data-ch="to"]', form).hidden = type !== 'email';
-        $('[data-ch="url"]', form).hidden = type === 'email';
-        $('[data-ch="token"]', form).hidden = !['ntfy', 'webhook'].includes(type);
+        $('[data-ch="url"]', form).hidden = ['email', 'telegram'].includes(type);
+        $('[data-ch="token"]', form).hidden = !['ntfy', 'webhook', 'telegram'].includes(type);
+        $('[data-ch="chat"]', form).hidden = type !== 'telegram';
+        $('.ch-token-label', form).textContent = t(type === 'telegram' ? 'chBotToken' : 'chToken');
+        $('.ch-token-hint', form).textContent = t(type === 'telegram' ? 'chBotTokenHint' : 'chTokenHint');
         $('.ch-hint', form).textContent = type === 'email' ? '' : t('chHint_' + type);
       };
       $$('[name=type]', form).forEach(r => { r.onchange = sync; });
       sync();
+      // the chats that wrote to the bot: one click fills in the chat id
+      $('#chFindChat', form).onclick = e => tryCommand(form, e.currentTarget,
+        () => api('/api/alerts/telegram/chats', { method: 'POST', json: { id: ch ? ch.id : '', token: form.token.value.trim() } }),
+        r => {
+          if (!r.ok) return `<div class="note warn">${esc(alertError(r.error))}</div>`;
+          if (!r.chats.length) return `<div class="note info">${t('chNoChats')}</div>`;
+          setTimeout(() => $$('[data-chat]', form).forEach(b => { b.onclick = () => { form.chat.value = b.dataset.chat; $('.chat-result', form).innerHTML = ''; }; }));
+          return `<div class="chat-list">${r.chats.map(c => `<button type="button" class="btn sm" data-chat="${esc(c.id)}">${esc(c.name)} <span class="muted">${esc(c.id)}</span></button>`).join('')}</div>`;
+        }, '.chat-result');
       $('#chTry', form).onclick = e => tryCommand(form, e.currentTarget, () => api('/api/alerts/test', { method: 'POST', json: { channel: read(form) } }),
         r => (r.ok ? `<div class="note info">${icon('check')}${t('chTestOk')}</div>` : `<div class="note warn">${esc(alertError(r.error))}</div>`));
     },

@@ -10,8 +10,9 @@ zero-touch USB stick](docs/fleet.gif)
   a *Needs attention* list with the reason for each issue; metric graphs and availability for 24 hours or 7 days and a
   timeline of outages, problems and commands per device
 - **Alerts for administrators:** when a screen goes down or has a problem, a message by e-mail (SMTP), Microsoft
-  Teams, Slack, Discord, ntfy or a webhook, after a delay you choose, grouped into one message per check, with a
-  "resolved" message too; devices can be muted for maintenance
+  Teams, Slack, Discord, Telegram, ntfy or a webhook, after a delay you choose, grouped into one message per check,
+  with a "resolved" message too; devices can be muted for maintenance. The same channels hear about a new version of
+  Fleet and the result of its update
 - **Content:** playlists with web pages, images, videos and Grafana collections; logins for web pages that need
   a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
   show or freeze an item, skip, resume, restart the player or the device

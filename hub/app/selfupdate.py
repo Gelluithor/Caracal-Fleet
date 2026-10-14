@@ -10,6 +10,8 @@ container from it ("python -m app.selfupdate helper"). The helper stops the hub,
 same configuration, volumes and networks and the new image, waits until it is healthy and removes the old one; when
 the new one does not become healthy, the old hub is started again. On Docker Swarm the service is updated instead.
 Without the socket the UI shows the commands for the server.
+
+A newer version and the result of an update also go to the alert channels (Settings -> Alerts), once each.
 """
 import http.client
 import json
@@ -256,7 +258,48 @@ def check(force=False):
                       'compose': (me['Config'].get('Labels') or {}).get('com.docker.compose.project') if me else None}
     with _lock:
         _state.update(checked=time.time(), data=data)
+    _announce_available(data)
     return data
+
+
+def _announce_available(data):
+    """The newest version goes to the alert channels once."""
+    from . import monitor
+    from .core import cfg, save_cfg
+    latest = data['newer'][0] if data['newer'] else None
+    if not latest or cfg().get('update_announced') == latest:
+        return
+    try:
+        if monitor.announce('available', latest, data['current']):
+            conf = cfg()
+            conf['update_announced'] = latest
+            save_cfg(conf)
+    except Exception as e:   # noqa: BLE001 - an alert must not break the check
+        print('update alert failed:', e, flush=True)
+
+
+def announce_result():
+    """After an update (in the new hub) or a rollback (in the old one): the result goes to the alert channels once."""
+    from . import monitor
+    from .core import DATA, HUB_VERSION
+    path = DATA / STATUS_FILE
+    try:
+        last = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if last.get('state') not in ('done', 'failed') or last.get('announced') or time.time() - last.get('at', 0) > 86400:
+        return
+    version = split_ref(last['to'])[1] if last.get('to') else ''
+    current = split_ref(last['from'])[1] if last.get('from') else HUB_VERSION
+    try:
+        monitor.announce('updated' if last['state'] == 'done' else 'failed', version, current, last.get('error', ''))
+    except Exception as e:   # noqa: BLE001
+        print('update alert failed:', e, flush=True)
+    last['announced'] = True
+    try:
+        path.write_text(json.dumps(last))
+    except OSError:
+        pass
 
 
 def status():
@@ -324,8 +367,9 @@ def start(version, username):
 
 
 def tick():
-    """Called by the schedule loop: the daily check."""
+    """Called by the schedule loop: the result of the last update and the daily check."""
     try:
+        announce_result()
         check()
     except Exception as e:   # noqa: BLE001
         print('update check failed:', e, flush=True)

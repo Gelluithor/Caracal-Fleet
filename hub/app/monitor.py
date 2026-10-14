@@ -3,11 +3,15 @@
 Every heartbeat stores the node's metrics in a five-minute bucket (one row per device and bucket, kept for eight
 days); a bucket without a row means the node was not reporting. A background check compares the problems of every
 device with the previous check and writes an event when a problem starts or ends. A problem that lasts longer than
-the configured delay goes to the alert channels (e-mail, Slack, Microsoft Teams, Discord, ntfy or any webhook),
+the configured delay goes to the alert channels (e-mail, Slack, Microsoft Teams, Discord, Telegram, ntfy or any
+webhook),
 together with every other problem found in the same check, so a network outage is one message, not fifty. When an
 alerted problem ends, that is sent too. A device can be muted for a while (maintenance); its events are still kept.
+The same channels get a message when a new version of CARACAL Fleet is available and when Fleet updated itself.
 """
+import html
 import json
+import re
 import smtplib
 import ssl
 import threading
@@ -28,10 +32,13 @@ EVENT_DAYS = 90
 CHECK_EVERY = 15
 START_GRACE = 60               # after the hub starts, nodes need a moment to report again
 LEVELS = ('critical', 'warning')
-CHANNEL_TYPES = ('email', 'slack', 'teams', 'discord', 'ntfy', 'webhook')
+CHANNEL_TYPES = ('email', 'slack', 'teams', 'discord', 'telegram', 'ntfy', 'webhook')
+TELEGRAM_API = 'https://api.telegram.org'
+TELEGRAM_TOKEN = re.compile(r'\d{3,15}:[A-Za-z0-9_-]{30,64}')
+TELEGRAM_CHAT = re.compile(r'-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31}')
 SECURITY = ('starttls', 'ssl', 'none')
 DEFAULTS = {'enabled': False, 'delay': 5, 'levels': ['critical'], 'recovery': True, 'language': 'cs',
-            'public_url': '', 'channels': [],
+            'public_url': '', 'channels': [], 'fleet_updates': True,
             'smtp': {'host': '', 'port': 587, 'security': 'starttls', 'username': '', 'password': '', 'sender': ''}}
 _started = time.time()
 _results = {}                  # channel id -> {ok, error, ts} of the last delivery
@@ -48,6 +55,11 @@ TEXT = {
         'resolved_title': 'CARACAL Fleet: vyřešeno {n}', 'since': 'od {t}', 'resolved': 'vyřešeno po {d}',
         'test_title': 'CARACAL Fleet: zkušební upozornění', 'test_body': 'Tento kanál funguje.',
         'open': 'Otevřít ve Fleetu',
+        'update_title': 'CARACAL Fleet {v} je k dispozici',
+        'update_body': 'Teď běží {c}. Aktualizovat můžete v Nastavení → Aktualizace Fleetu.',
+        'updated_title': 'CARACAL Fleet aktualizován na {v}', 'updated_body': 'Předchozí verze: {c}.',
+        'update_failed_title': 'Aktualizace CARACAL Fleet na {v} selhala',
+        'update_failed_body': 'Běží dál předchozí verze {c}. Chyba: {e}',
     },
     'en': {
         'offline': 'Offline', 'local_api': 'Local API not responding', 'player': 'Player not running',
@@ -59,6 +71,11 @@ TEXT = {
         'resolved_title': 'CARACAL Fleet: {n} resolved', 'since': 'since {t}', 'resolved': 'resolved after {d}',
         'test_title': 'CARACAL Fleet: test alert', 'test_body': 'This channel works.',
         'open': 'Open in Fleet',
+        'update_title': 'CARACAL Fleet {v} is available',
+        'update_body': '{c} runs now. Update in Settings → Fleet update.',
+        'updated_title': 'CARACAL Fleet updated to {v}', 'updated_body': 'Previous version: {c}.',
+        'update_failed_title': 'The CARACAL Fleet update to {v} failed',
+        'update_failed_body': 'The previous version {c} keeps running. Error: {e}',
     },
 }
 
@@ -144,6 +161,15 @@ def _channel(d, old):
         if not to or any('@' not in x for x in to):
             raise HTTPException(400, 'invalid_email')
         ch['to'] = ', '.join(to)
+    elif d['type'] == 'telegram':
+        token = _text(d.get('token'), 200)
+        token = (old or {}).get('token', '') if token == REDACTED else token
+        if not TELEGRAM_TOKEN.fullmatch(token):
+            raise HTTPException(400, 'invalid_telegram_token')
+        chat = _text(d.get('chat'), 40)
+        if not TELEGRAM_CHAT.fullmatch(chat):
+            raise HTTPException(400, 'invalid_telegram_chat')
+        ch['token'], ch['chat'] = token, chat
     else:
         url = _text(d.get('url'), 2000)
         if urlsplit(url).scheme not in ('http', 'https') or not urlsplit(url).netloc:
@@ -166,6 +192,7 @@ def _validate(d, old):
     levels = [x for x in d.get('levels', old['levels']) or [] if x in LEVELS]
     out['levels'] = levels or ['critical']
     out['recovery'] = bool(d.get('recovery', old['recovery']))
+    out['fleet_updates'] = bool(d.get('fleet_updates', old['fleet_updates']))
     out['language'] = d.get('language') if d.get('language') in TEXT else old['language']
     out['public_url'] = _text(d.get('public_url', old['public_url']), 300).rstrip('/')
     olds = {ch['id']: ch for ch in old['channels']}
@@ -232,6 +259,35 @@ async def test_alert(r: Request):
     except Exception as e:     # any delivery error is shown to the administrator as it is
         return {'ok': False, 'error': _text(e, 400)}
     return {'ok': True}
+
+
+@router.post('/api/alerts/telegram/chats')
+async def telegram_chats(r: Request):
+    """The chats that recently wrote to the bot or added it (getUpdates), so nobody has to look up a chat id."""
+    current_user(r, 'admin')
+    try:
+        d = await r.json()
+    except ValueError:
+        raise HTTPException(400, 'invalid_json')
+    token = _text(d.get('token'), 200)
+    if token == REDACTED:
+        old = next((ch for ch in config()['channels'] if ch['id'] == _text(d.get('id'), 40)), None)
+        token = (old or {}).get('token', '')
+    if not TELEGRAM_TOKEN.fullmatch(token):
+        raise HTTPException(400, 'invalid_telegram_token')
+    try:
+        updates = _telegram(token, 'getUpdates', {'allowed_updates': ['message', 'channel_post', 'my_chat_member']})
+    except Exception as e:     # shown to the administrator as it is
+        return {'ok': False, 'error': _text(e, 400), 'chats': []}
+    chats = {}
+    for u in updates if isinstance(updates, list) else []:
+        for key in ('message', 'channel_post', 'my_chat_member'):
+            chat = (u.get(key) or {}).get('chat') if isinstance(u, dict) else None
+            if isinstance(chat, dict) and chat.get('id') is not None:
+                name = chat.get('title') or ' '.join(x for x in (chat.get('first_name'), chat.get('last_name')) if x) \
+                    or chat.get('username') or str(chat['id'])
+                chats[str(chat['id'])] = {'id': str(chat['id']), 'name': _text(name, 120), 'type': chat.get('type', '')}
+    return {'ok': True, 'chats': list(chats.values())}
 
 
 @router.post('/api/alerts/mute')
@@ -387,7 +443,44 @@ def _notify(conf, channels, devices, started, ended, send):
     return messages
 
 
+def announce(kind, version, current, error='', send=None):
+    """A message about CARACAL Fleet itself to every channel: kind is 'available', 'updated' or 'failed'.
+    Returns True when alerts are on and there was a channel to send it to."""
+    conf = config()
+    channels = [ch for ch in conf['channels'] if ch.get('enabled', True)]
+    if not conf['enabled'] or not conf['fleet_updates'] or not channels:
+        return False
+    tx = TEXT[conf['language']]
+    key = {'available': 'update', 'updated': 'updated', 'failed': 'update_failed'}[kind]
+    fill = lambda s: s.replace('{v}', _text(version, 40)).replace('{c}', _text(current, 40)).replace('{e}', _text(error, 300))
+    title, lines = fill(tx[key + '_title']), [fill(tx[key + '_body'])]
+    url = f"{conf['public_url']}/#/settings/update" if conf['public_url'] else ''
+    if url:
+        lines.append(f"{tx['open']}: {url}")
+    level = {'available': 'info', 'updated': 'ok', 'failed': 'critical'}[kind]
+    payload = {'event': 'fleet_' + kind, 'title': title, 'version': version, 'current': current, 'url': url}
+    for ch in channels:
+        try:
+            (send or _deliver)(ch, conf, title, lines, payload, level)
+            _results[ch['id']] = {'ok': True, 'error': '', 'ts': time.time()}
+        except Exception as e:     # one broken channel must not stop the others
+            _results[ch['id']] = {'ok': False, 'error': _text(e, 300), 'ts': time.time()}
+    return True
+
+
 # ---------------------------------------------------------------- delivery
+
+def _telegram(token, method, data):
+    """One Bot API call; errors never show the token (it is part of the address)."""
+    try:
+        r = requests.post(f'{TELEGRAM_API}/bot{token}/{method}', json=data, timeout=15)
+        answer = r.json()
+    except (requests.RequestException, ValueError) as e:
+        raise ValueError(str(e).replace(token, '***')) from None
+    if not answer.get('ok'):
+        raise ValueError('Telegram: ' + _text(answer.get('description') or r.status_code, 300))
+    return answer.get('result')
+
 
 def _deliver(ch, conf, title, lines, payload, level):
     body = '\n'.join(lines)
@@ -420,6 +513,16 @@ def _deliver(ch, conf, title, lines, payload, level):
     elif t == 'discord':
         # no @everyone / @here / role or user mentions from device names
         data = {'content': (f'**{title}**\n{body}')[:1900], 'allowed_mentions': {'parse': []}}
+    elif t == 'telegram':
+        esc = lambda v: html.escape(str(v), quote=False)
+        links = [f' <a href="{html.escape(x["url"])}">{esc(TEXT[conf["language"]]["open"])}</a>' if x.get('url') else ''
+                 for x in items] if len(items) == len(lines) else [''] * len(lines)
+        text = f'<b>{esc(title)}</b>\n' + '\n'.join(esc(line) + link for line, link in zip(lines, links))
+        if len(text) > 4000:
+            text = f'<b>{esc(title)}</b>\n' + esc(body[:3800]) + '…'
+        _telegram(ch['token'], 'sendMessage', {'chat_id': ch['chat'], 'text': text, 'parse_mode': 'HTML',
+                                               'disable_web_page_preview': True, 'disable_notification': level == 'ok'})
+        return
     elif t == 'teams':
         # Workflows ("When a Teams webhook request is received") expect an Adaptive Card
         card = {'type': 'AdaptiveCard', 'version': '1.4', '$schema': 'http://adaptivecards.io/schemas/adaptive-card.json',

@@ -685,7 +685,10 @@ details.legacy summary { display: flex; gap: 10px; align-items: baseline; flex-w
 .channel > .ic { width: 20px; height: 20px; padding: 7px; box-sizing: content-box; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
 .channel-main { flex: 1; min-width: 160px; display: grid; }
 .channel-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ch-types { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ch-types { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.find-chat { margin-top: 8px; }
+.chat-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chat-list .muted { font-weight: 400; margin-left: 4px; }
 .ch-type { position: relative; display: grid; justify-items: center; gap: 6px; padding: 12px 8px; border-radius: 12px; box-shadow: 0 0 0 1px var(--line-strong); cursor: pointer; font-size: 13px; font-weight: 500; color: var(--ink); transition: box-shadow .2s, background-color .2s; }
 .ch-type input { position: absolute; opacity: 0; pointer-events: none; }
 .ch-type .ic { width: 20px; height: 20px; color: var(--muted); }
