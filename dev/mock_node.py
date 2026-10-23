@@ -103,6 +103,9 @@ def create_app(key=None, api='v2'):
         auth(x_fleet_key)
         p = st.player
         cur = next((x for x in expanded() if x['id'] == p['current_id']), None)
+        if cur is None and expanded():   # the item on the screen was removed: the player goes on with the first one
+            cur = expanded()[0]
+            p.update(current_id=cur['id'], started=time.time(), frozen=False, collection_frozen=False)
         dur = (cur or {}).get('duration') or 30
         frozen = p['frozen'] or p['collection_frozen']
         if v2:

@@ -1,10 +1,56 @@
-# CARACAL Fleet
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/hero-dark.svg">
+    <img src="docs/brand/hero-light.svg" width="860" alt="CARACAL Fleet">
+  </picture>
+</p>
 
-Central management for [CARACAL](https://github.com/Gelluithor/Caracal) digital signage screens, self-hosted
-with one `docker compose up`.
+<p align="center">
+  Central management for <a href="https://github.com/Gelluithor/Caracal">CARACAL</a> digital signage screens:
+  monitoring, content, schedules and installation of every screen, self-hosted with one <code>docker compose up</code>.
+</p>
 
-![CARACAL Fleet: overview, devices, a node with its live screen, the notification look editor, node templates and a
-zero-touch USB stick](docs/fleet.gif)
+<p align="center">
+  <a href="https://github.com/Gelluithor/Caracal-Fleet/releases/latest"><img src="https://img.shields.io/github/v/release/Gelluithor/Caracal-Fleet?label=release&color=f98a12" alt="Latest release"></a>
+  <a href="https://github.com/users/Gelluithor/packages/container/package/caracal-fleet"><img src="https://img.shields.io/badge/docker-ghcr.io%2Fgelluithor%2Fcaracal--fleet-2496ed?logo=docker&logoColor=white" alt="Docker image"></a>
+  <img src="https://img.shields.io/badge/amd64%20%C2%B7%20arm64-supported-555" alt="amd64 and arm64">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Gelluithor/Caracal-Fleet?color=555" alt="License"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#adding-screens">Adding screens</a> ·
+  <a href="#permissions-and-roles">Permissions</a> ·
+  <a href="#security">Security</a> ·
+  <a href="https://github.com/Gelluithor/Caracal">CARACAL node</a>
+</p>
+
+<p align="center">
+  <img src="docs/fleet.gif" width="900" alt="CARACAL Fleet in action: sign-in, the overview, devices and a week of what plays on one screen, the screen wall, a global playlist with a weather and a news widget, what a deployment changes, approvals, what plays when, proof of play, the media library and an emergency message on a screen">
+</p>
+
+---
+
+## How it fits together
+
+```
+ browser ──HTTPS──▶ CARACAL Fleet (FastAPI + web UI, SQLite)  ──▶ alerts: e-mail, Teams, Slack, Telegram, ntfy…
+                         ▲     │ backups ──▶ S3, WebDAV, SFTP, SMB, NFS, rclone
+                         │     │
+     heartbeats, plays,  │     │ commands (long polling), files, CARACAL images
+     screenshots         │     ▼
+                  ┌─ Fleet Agent ──local Fleet API──▶ CARACAL node: web admin, Chromium player, overlay
+  every screen ───┤                                     (Raspberry Pi or PC, Docker or classic)
+                  └─ (optional) all downloads through Fleet for nodes without internet access
+```
+
+The agent on each screen opens every connection itself, so the screens can sit behind NAT or in another network;
+only the SSH console and the installation over SSH connect to a node. Logins of websites and watchers travel only to
+the node, and camera passwords are never shown and leave the command history once delivered.
+
+## Features
+
+### Watch every screen
 
 - **Monitoring:** online state, CPU, RAM, disk, temperature and what each screen is playing right now, plus
   a *Needs attention* list with the reason for each issue; metric graphs and availability for 24 hours or 7 days and a
@@ -13,29 +59,23 @@ zero-touch USB stick](docs/fleet.gif)
   Teams, Slack, Discord, Telegram, ntfy or a webhook, after a delay you choose, grouped into one message per check,
   with a "resolved" message too; devices can be muted for maintenance. The same channels hear about a new version of
   Fleet and the result of its update
-- **Content:** playlists with web pages, images, videos and Grafana collections; logins for web pages that need
-  a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
-  show or freeze an item, skip, resume, restart the player or the device
-- **On-screen notifications:** send a notification to one screen or many, change the notification settings (position,
-  size, sound, limits, your own MP3 per level) and their look in a visual editor with a live preview of the TV (colours,
-  icons, shape, banner, font, animation) and manage watchers that announce new tickets or issues from other apps; a notification API
-  lets other apps reach many screens with one request
-- **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
-  and locations
-- **Zero-touch installation:** prepare an SD card for a Raspberry Pi (Raspberry Pi OS, DietPi, or a ready Alpine Linux
-  card image, also over Wi-Fi) or a USB stick for a PC (Alpine Linux fully hands-off, Ubuntu Server autoinstall), install any running Debian, Ubuntu or Alpine with one command, or find a
-  fresh Raspberry Pi in the network and install it over SSH; every installation can create the administrator of the
-  node's own web administration
-- **Node templates:** the playlist, notification settings and look (with picture), the countdown bar, group and
-  location defined once; applied to existing nodes or baked into a zero-touch card, USB stick or installation, so a
-  new node is set up as soon as it connects
-- **Everything the node's web administration does:** besides content and notifications also its administrator
-  (create, new name and password), the countdown bar on the TV, the notification queue, history and audit log, the
-  node's own app tokens, trying a watcher or a Grafana tag before saving
-- **SSH console:** a terminal on any node right in the browser (the hub connects over SSH, nothing to install)
+- **Screen wall:** what every screen shows right now, refreshed while the page is open
+- **Proof of play:** what every screen showed and for how long, by content, screen or day, with a chart and a CSV
+  export (CARACAL 2026.10.23.1 with agent 4.17)
+- **Display watch:** the agent restarts an X display that stopped answering, the node restarts a player whose website
+  stays black; both show up as problems and alerts
 - **Diagnostics and reinstallation:** a report of a node whose screen stays black (disk, memory, power, display
   outputs, the X server, containers and system log, with the usual causes pointed out), and *Reinstall CARACAL*
   from scratch – optionally as a factory reset with a new administrator and a template
+- **SSH console:** a terminal on any node right in the browser (the hub connects over SSH, nothing to install)
+
+### Put content on them
+
+- **Content:** playlists with web pages, images, videos and Grafana collections; logins for web pages that need
+  a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
+  show or freeze an item, skip, resume, restart the player or the device
+- **Widgets:** a clock, the weather (Open-Meteo), news from RSS / Atom, a table from CSV or Google Sheets and a text
+  as playlist items, with a live preview; the node draws them itself (CARACAL 2026.10.23.1 with agent 4.17)
 - **Cameras:** RTSP and HTTP streams of IP cameras and recorders as playlist items, up to 9 in a grid; ONVIF cameras
   and recorders (NVR, every channel) are found in the node's network and asked for their streams, with a picture of
   each stream before it goes on the screen; their passwords stay on the node, encrypted. Cameras can also be part of
@@ -43,39 +83,60 @@ zero-touch USB stick](docs/fleet.gif)
   them and removes them from the command history once delivered
 - **Content with a validity:** any item (also in global playlists) can play only from / until a time – a weekend
   offer goes on and off the screens by itself
+- **Websites in dark mode:** per node or per website and Grafana collection – the sites' own dark look or forced
+  dark for every page
+- **On-screen notifications:** send a notification to one screen or many, change the notification settings (position,
+  size, sound, limits, your own MP3 per level) and their look in a visual editor with a live preview of the TV (colours,
+  icons, shape, banner, font, animation) and manage watchers that announce new tickets or issues from other apps; a notification API
+  lets other apps reach many screens with one request
 - **Emergency message:** one click puts a full-screen message (evacuation, an outage) on all screens or on chosen
   locations, groups and devices, right away and for a time or until it is ended; then the playlists go on. Older
   nodes get it as a notification
-- **Approvals:** when switched on, a global playlist deployment by a user without the permission *Approve* waits for
-  an approval; what is approved is the version of the playlist at the time of the request
+
+### Run the whole fleet
+
+- **At scale:** global playlists deployed to many nodes, copying content between nodes, bulk operations, groups
+  and locations
+- **Schedules:** global playlists by time of day and day of the week, screen hours (screens off outside them through
+  HDMI power saving and HDMI-CEC) and actions at a given time (restarts, screens off/on, a playlist, a template, a
+  notification, updates), in the hub's time zone
+- **What plays when:** a day of every screen of a location or group, or a week of one device, from the schedules:
+  playlists, screen hours, scheduled actions, emergency messages and items with a validity
 - **Versions of global playlists:** every change is kept (50 versions) and an earlier one can be brought back; before
   a deployment Fleet shows per device what is added, removed and kept
 - **Media library:** pictures and videos kept in Fleet with where each is used; *Replace everywhere* swaps a file in
   all global playlists and templates and offers to deploy them again
-- **Proof of play:** what every screen showed and for how long, by content, screen or day, with a chart and a CSV
-  export (CARACAL 2026.10.23.1 with agent 4.17)
-- **What plays when:** a day of every screen of a location or group, or a week of one device, from the schedules:
-  playlists, screen hours, scheduled actions, emergency messages and items with a validity
-- **Widgets:** a clock, the weather (Open-Meteo), news from RSS / Atom, a table from CSV or Google Sheets and a text
-  as playlist items, with a live preview; the node draws them itself (CARACAL 2026.10.23.1 with agent 4.17)
+- **Approvals:** when switched on, a global playlist deployment by a user without the permission *Approve* waits for
+  an approval; what is approved is the version of the playlist at the time of the request
+- **Node templates:** the playlist, notification settings and look (with picture), the countdown bar, group and
+  location defined once; applied to existing nodes or baked into a zero-touch card, USB stick or installation, so a
+  new node is set up as soon as it connects
 - **Labels and tables:** free labels on devices (filters of the device list and of proof of play), the device list
   as CSV, and names, locations, groups, labels and notes of many devices changed from a table with a preview
-- **Schedules:** global playlists by time of day and day of the week, screen hours (screens off outside them through
-  HDMI power saving and HDMI-CEC) and actions at a given time (restarts, screens off/on, a playlist, a template, a
-  notification, updates), in the hub's time zone
-- **Screen wall:** what every screen shows right now, refreshed while the page is open
-- **Display watch:** the agent restarts an X display that stopped answering, the node restarts a player whose website
-  stays black; both show up as problems and alerts
+- **Fast control:** agents wait for commands (long polling), so a command reaches the screen within a second
+- **Everything the node's web administration does:** besides content and notifications also its administrator
+  (create, new name and password), the countdown bar on the TV, the notification queue, history and audit log, the
+  node's own app tokens, trying a watcher or a Grafana tag before saving
+
+### Install and update
+
+- **Zero-touch installation:** prepare an SD card for a Raspberry Pi (Raspberry Pi OS, DietPi, or a ready Alpine Linux
+  card image, also over Wi-Fi) or a USB stick for a PC (Alpine Linux fully hands-off, Ubuntu Server autoinstall), install any running Debian, Ubuntu or Alpine with one command, or find a
+  fresh Raspberry Pi in the network and install it over SSH; every installation can create the administrator of the
+  node's own web administration
+- **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
 - **Staged updates:** a new CARACAL version goes to pilot nodes first, then in batches after a healthy wait; a failure
   stops the rollout; optionally automatic every day
-- **Websites in dark mode:** per node or per website and Grafana collection – the sites' own dark look or forced
-  dark for every page
-- **Updates:** nodes run CARACAL in Docker and are updated from Fleet with automatic rollback
 - **Nodes without internet access:** Fleet can be the only download source of a node (system packages, Docker and
   CARACAL go through the hub), chosen for the SD card, the SSH installation or per device; trusted mirrors of your
   own (a company or national apt/apk mirror) can be added
-- **Fast control:** agents wait for commands (long polling), so a command reaches the screen within a second
-- **Permissions:** twelve permissions (view, control, content, schedule, device management, updates, terminal,
+- **Fleet updates itself:** a newer version is shown with its release notes and installed in one click (with the
+  Docker socket), with automatic rollback when it does not start; going back to an older version, optionally with the
+  data of a backup that version made
+
+### Administration and security
+
+- **Permissions:** thirteen permissions (view, control, content, approve, schedule, device management, updates, terminal,
   installation, notification API, audit, users, settings) in built-in and custom roles, each for a scope – all
   devices or chosen locations, device groups and devices; user groups give their members a role too (e.g. "Brno
   reception": operator for Brno); nobody can grant more than they have
@@ -83,9 +144,6 @@ zero-touch USB stick](docs/fleet.gif)
   Cloudflare R2, Wasabi, MinIO…), WebDAV (Nextcloud), SFTP, SMB, NFS, any cloud of rclone (Google Drive, OneDrive,
   Dropbox…) or a mounted folder, checked there, the oldest removed; optionally encrypted with a passphrase
   (AES-256-GCM); a backup can be restored straight from a destination, also on a new server
-- **Fleet updates itself:** a newer version is shown with its release notes and installed in one click (with the
-  Docker socket), with automatic rollback when it does not start; going back to an older version, optionally with the
-  data of a backup that version made
 - **Administration:** users, roles and user groups; command history, audit log,
   Czech and English UI, custom logo, full backup and restore for server migrations, daily backups on the hub;
   one-time passwords (the user sets their own at the first sign-in), two-factor sign-in (TOTP with recovery codes) and single sign-on through OpenID Connect (Microsoft Entra ID,
@@ -257,8 +315,9 @@ cannot be removed or limited.
 | Permission | What it allows |
 |---|---|
 | view | state, playlists, schedule, screens (every role has it) |
-| control | playback, show/freeze, screens on/off, restarts, notifications on the screens |
+| control | playback, show/freeze, screens on/off, restarts, notifications and emergency messages on the screens |
 | content | playlists, media, websites, cameras, website logins, global playlists |
+| approve | approving deployments of global playlists prepared by others (when approval is switched on) |
 | schedule | screen routines and actions at a set time |
 | devices | names, groups and locations, templates, muting alerts, the node's web administration |
 | updates | agent and CARACAL updates, reinstallation (staged updates and the node image: whole fleet) |

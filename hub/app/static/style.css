@@ -1082,3 +1082,5 @@ tr.row-err td { background: var(--bad-soft); }
 .wk-off { z-index: 1; }
 .toolbar input[type=date] { width: auto; flex: none; }
 .toolbar .icon-btn { flex: none; }
+.freeze-banner.takeover-banner { background: color-mix(in srgb, #b91c1c 10%, var(--panel)); box-shadow: var(--lift), inset 0 0 0 1px color-mix(in srgb, #b91c1c 40%, transparent); }
+.freeze-banner.takeover-banner .freeze-ic { background: #b91c1c; color: #fff; }

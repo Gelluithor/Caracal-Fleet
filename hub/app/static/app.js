@@ -1142,6 +1142,11 @@ async function openConsole(d, data, root) {
 
 // A frozen screen is said loud and clear, with the way back to the playlist right next to it.
 function freezeBanner(d) {
+  // an emergency message holds the screen: it is ended on its page, not by resuming playback
+  if (d.takeover && d.online) {
+    return `<div class="freeze-banner takeover-banner"><span class="freeze-ic">${icon('takeover')}</span><div><b>${t('takeoverOnScreen', { name: esc(d.takeover.title || d.takeover.message || '') })}</b>
+      <small>${d.takeover.until ? t('takeoverUntil', { time: clock(d.takeover.until) }) : t('takeoverUntilEnded')}</small></div><a class="btn" href="#/takeover">${t('open')}</a></div>`;
+  }
   if (!d.frozen || !d.online) return '';
   const until = d.frozen_until ? t('frozenUntil', { time: dt(d.frozen_until) }) : t('frozenIndef');
   return `<div class="freeze-banner"><span class="freeze-ic">${icon('snow')}</span><div><b>${t('frozenOn', { name: esc(d.current_name || t('nothingPlaying')) })}</b><small>${until}</small></div>
