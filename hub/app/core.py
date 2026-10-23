@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.19.1'
+HUB_VERSION = '4.20.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -37,6 +37,7 @@ DEVICE_PERMISSIONS = (
     'view',       # devices, playlists, schedules, screens
     'control',    # playback, show/freeze, screens on/off, restarts, notifications on the screens
     'content',    # playlists, media, websites, cameras, global playlists
+    'approve',    # approving content changes prepared by others (when approval is switched on)
     'schedule',   # screen routines and actions at a set time
     'devices',    # device settings, names, groups and locations, templates, muting alerts
     'updates',    # agent and CARACAL updates (staged updates and the node image need the whole fleet)
@@ -125,6 +126,9 @@ ACTIONS = {
     # agents from 4.11 with CARACAL 2026.10.10.4 and newer
     'notify_image': ('content', None),
     'screenshot': ('view', 120),
+    # agents from 4.17 with CARACAL 2026.10.23.1: an emergency message on the whole screen (ttl = until its end)
+    'takeover': ('control', None),
+    'takeover_end': ('control', 3600),
 }
 
 # Payload keys that must not stay in the hub: login credentials of web pages and of notification watchers travel
@@ -132,7 +136,8 @@ ACTIONS = {
 SECRET_KEYS = ('username', 'password', 'secret', 'client_secret', 'refresh_token')
 SECRET_ACTIONS = ('add_profile', 'update_profile', 'add_watcher', 'update_watcher', 'preview_watcher', 'set_admin',
                   'convert_to_docker', 'reinstall_node',   # optionally with the node's web administrator
-                  'add_camera', 'update_camera', 'camera_onvif', 'camera_preview')   # credentials of camera streams
+                  'add_camera', 'update_camera', 'camera_onvif', 'camera_preview',   # credentials of camera streams
+                  'import_playlist')   # cameras of a global playlist
 # installing CARACAL (apt, pip, image downloads) takes much longer than other commands
 INSTALL_ACTIONS = ('update_caracal', 'convert_to_docker', 'reinstall_node')
 DARK_MODES = ('off', 'dark', 'force')
@@ -252,6 +257,20 @@ CREATE TABLE IF NOT EXISTS roles(key TEXT PRIMARY KEY, name TEXT, description TE
 CREATE TABLE IF NOT EXISTS user_groups(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT DEFAULT '',
   role TEXT DEFAULT '', scope_json TEXT DEFAULT '', created REAL);
 CREATE TABLE IF NOT EXISTS user_group_members(group_id INTEGER, user_id INTEGER, PRIMARY KEY(group_id, user_id));
+-- what the screens showed (proof of play), reported by the agents
+CREATE TABLE IF NOT EXISTS plays(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, node_id INTEGER, asset_id INTEGER,
+  name TEXT, kind TEXT, started REAL, ended REAL, UNIQUE(device_id, node_id, started));
+CREATE INDEX IF NOT EXISTS idx_plays_started ON plays(started);
+-- emergency messages on the whole screen
+CREATE TABLE IF NOT EXISTS takeovers(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, message TEXT, level TEXT,
+  targets_json TEXT DEFAULT '{}', devices_json TEXT DEFAULT '[]', until REAL, created REAL, username TEXT, ended REAL,
+  ended_by TEXT DEFAULT '');
+-- content changes waiting for approval, and earlier versions of global playlists
+CREATE TABLE IF NOT EXISTS approvals(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, playlist_id INTEGER,
+  payload_json TEXT DEFAULT '{}', summary TEXT DEFAULT '', username TEXT, created REAL, state TEXT DEFAULT 'pending',
+  decided_by TEXT DEFAULT '', decided REAL, comment TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS global_playlist_versions(id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER,
+  items_json TEXT DEFAULT '[]', username TEXT, created REAL, note TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS scheduled_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER DEFAULT 1,
   data_json TEXT DEFAULT '{}', last_run REAL, last_day TEXT DEFAULT '', last_result TEXT DEFAULT '', created REAL,
   updated REAL, updated_by TEXT DEFAULT '');
@@ -284,6 +303,9 @@ COLUMNS = [
     ('users', 'scope_json', "TEXT DEFAULT ''"),   # the devices the user's role holds for ('' = all)
     ('global_playlist_items', 'valid_from', 'REAL'),    # shown only from / until (Unix time), CARACAL 2026.10.14
     ('global_playlist_items', 'valid_until', 'REAL'),
+    ('global_playlist_items', 'secret_json', "TEXT DEFAULT ''"),   # credentials of a camera's streams, never returned
+    ('devices', 'tags_json', "TEXT DEFAULT '[]'"),   # free labels of a device
+    ('files', 'library', 'INTEGER DEFAULT 0'),       # kept in the media library
 ]
 
 
@@ -384,11 +406,14 @@ def cleanup_files():
     limit = time.time() - FILE_RETENTION
     with db() as c:
         old = [r['id'] for r in c.execute(
-            "SELECT id FROM files WHERE created<? AND COALESCE(pinned, 0)=0 "
+            "SELECT id FROM files WHERE created<? AND COALESCE(pinned, 0)=0 AND COALESCE(library, 0)=0 "
             "AND id NOT IN (SELECT file_id FROM global_playlist_items WHERE file_id != '') "
             "AND id NOT IN (SELECT file_id FROM node_releases) "
             "AND id NOT IN (SELECT image_file_id FROM node_templates)", (limit,))]
+        versions = ' '.join(r[0] for r in c.execute('SELECT items_json FROM global_playlist_versions'))
         for fid in old:
+            if fid in versions:   # an earlier version of a global playlist can still bring it back
+                continue
             (FILES / fid).unlink(missing_ok=True)
             c.execute('DELETE FROM files WHERE id=?', (fid,))
 
@@ -396,8 +421,8 @@ def cleanup_files():
 def refresh_pin(c, fid):
     """A file stays pinned while a global playlist item, a CARACAL release or a node template uses it."""
     used = c.execute('SELECT 1 FROM global_playlist_items WHERE file_id=? UNION SELECT 1 FROM node_releases '
-                     'WHERE file_id=? UNION SELECT 1 FROM node_templates WHERE image_file_id=?',
-                     (fid, fid, fid)).fetchone()
+                     'WHERE file_id=? UNION SELECT 1 FROM node_templates WHERE image_file_id=? '
+                     'UNION SELECT 1 FROM files WHERE id=? AND library=1', (fid, fid, fid, fid)).fetchone()
     c.execute('UPDATE files SET pinned=? WHERE id=?', (1 if used else 0, fid))
 
 
@@ -622,10 +647,10 @@ def device_auth(r: Request, did):
 COMMAND_SEQ = {}
 
 
-def queue_command(c, device_id, action, payload, username, batch='', followup=None):
+def queue_command(c, device_id, action, payload, username, batch='', followup=None, expires=None):
     now = time.time()
     COMMAND_SEQ[device_id] = COMMAND_SEQ.get(device_id, 0) + 1
-    ttl = ACTIONS[action][1]
+    ttl = (expires - now) if expires else ACTIONS[action][1]
     cur = c.execute(
         'INSERT INTO commands(device_id, action, payload_json, state, result, created, updated, username, batch, '
         'expires, followup_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
@@ -636,9 +661,9 @@ def queue_command(c, device_id, action, payload, username, batch='', followup=No
 
 def scrub_secrets(c):
     """Credentials stay in the queue only until the agent fetched the command (or it was cancelled/expired)."""
-    # rows with a key still holding a real value (not empty, not redacted yet)
-    marks = ' OR '.join(f"(payload_json LIKE '%\"{k}\": \"%' AND payload_json NOT LIKE '%\"{k}\": \"\"%' "
-                        f"AND payload_json NOT LIKE '%\"{k}\": \"{REDACTED}\"%')" for k in SECRET_KEYS)
+    # rows with a key still holding a real value (not empty, not redacted yet), anywhere in the payload: a camera
+    # has one password per stream, and an empty one must not hide the others
+    marks = ' OR '.join(f"payload_json GLOB '*\"{k}\": \"[^\"{REDACTED[0]}]*'" for k in SECRET_KEYS)
     for row in c.execute(f"SELECT id, action, payload_json FROM commands WHERE state != 'queued' AND action IN "
                          f"({','.join('?' * len(SECRET_ACTIONS))}) AND ({marks})", SECRET_ACTIONS).fetchall():
         clean = redact_json(row['action'], row['payload_json'])

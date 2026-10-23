@@ -43,7 +43,8 @@ sys.path[:0] = [str(ROOT / 'hub'), str(ROOT)]
 
 
 def serve(app, port):
-    server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
+    # DEMO_HOST=0.0.0.0 when the demo runs in a container and is opened from outside it
+    server = uvicorn.Server(uvicorn.Config(app, host=os.getenv('DEMO_HOST', '127.0.0.1'), port=port, log_level='warning'))
     threading.Thread(target=server.run, daemon=True).start()
     while not server.started:
         time.sleep(0.05)
@@ -73,6 +74,81 @@ def seed_history(db_path, device_ids):
     c.close()
 
 
+def seed_plays(db_path, device_ids):
+    """A synthetic week of plays (proof of play) for the mock nodes: their playlist from 7:00 to 20:00, once."""
+    c = sqlite3.connect(db_path)
+    if c.execute('SELECT COUNT(*) FROM plays').fetchone()[0]:
+        c.close()
+        return
+    items = [('Intranet', 'web', 30), ('Logo', 'image', 10), ('Výroba dashboardy · Dashboard 1', 'web', 60),
+             ('Výroba dashboardy · Dashboard 2', 'web', 60), ('Akce týdne', 'image', 15)]
+    rnd, rows, now = random.Random(7), [], time.time()
+    day0 = time.mktime(time.localtime(now - 6 * 86400)[:3] + (0, 0, 0, 0, 0, -1))
+    for did in device_ids:
+        for day in range(7):
+            t, end, n, node_id = day0 + day * 86400 + 7 * 3600 + rnd.randint(0, 600), day0 + day * 86400 + 20 * 3600, 0, day * 100000
+            while t < min(end, now):
+                name, kind, dur = items[n % len(items)]
+                if name == 'Akce týdne' and day < 3:   # a picture added in the middle of the week
+                    n += 1
+                    continue
+                node_id += 1
+                rows.append((did, node_id, n % len(items), name, kind, t, t + dur))
+                t, n = t + dur, n + 1
+    c.executemany('INSERT OR IGNORE INTO plays(device_id, node_id, asset_id, name, kind, started, ended) VALUES(?,?,?,?,?,?,?)', rows)
+    c.commit()
+    c.close()
+
+
+def _png(w, h, rgb):
+    """A plain PNG of one colour with a lighter band (no Pillow needed)."""
+    import struct
+    import zlib
+    raw = b''.join(b'\x00' + bytes((min(255, rgb[0] + 60), min(255, rgb[1] + 60), min(255, rgb[2] + 60)) if h // 3 < y < h // 2 else rgb) * w for y in range(h))
+    chunk = lambda tag, data: struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
+    return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b'')
+
+
+def seed_features(hub, ids):
+    """Content for trying the newer parts, once: global playlists with widgets and pictures from the media library,
+    a schedule, labels, an operator whose deployment waits for an approval."""
+    s = requests.Session()
+    s.headers['Authorization'] = 'Bearer ' + s.post(hub + '/api/login', json={'username': 'admin', 'password': os.environ['CARACAL_HUB_ADMIN_PASSWORD']}).json()['token']
+    if s.get(hub + '/api/global-playlists').json():
+        return
+    for did, tags in zip(ids, (['lobby', '4K'], ['hala', 'venku'], ['jídelna'], ['sklad'])):
+        s.patch(f'{hub}/api/devices/{did}', json={'tags': tags})
+    files = {}
+    for name, rgb in (('Akce týdne.png', (180, 60, 30)), ('Logo firmy.png', (20, 60, 140)), ('Menu dne.png', (30, 120, 70))):
+        r = s.post(hub + '/api/files', data=_png(320, 180, rgb), headers={'Content-Type': 'image/png', 'X-File-Name': name}).json()
+        s.post(f"{hub}/api/library/{r['id']}", json={})
+        files[name] = r['id']
+    day = s.post(hub + '/api/global-playlists', json={'name': 'Recepce – den', 'description': 'Přes den na vstupech'}).json()['id']
+    evening = s.post(hub + '/api/global-playlists', json={'name': 'Recepce – večer'}).json()['id']
+    for pid, items in ((day, [
+            {'kind': 'web', 'name': 'Hodiny', 'duration': 15, 'source': 'caracal-widget:type=clock&lang=cs&title=Recepce'},
+            {'kind': 'image', 'name': 'Akce týdne', 'duration': 15, 'file_id': files['Akce týdne.png']},
+            {'kind': 'web', 'name': 'Počasí Praha', 'duration': 20, 'source': 'caracal-widget:type=weather&lang=cs&city=Praha'},
+            {'kind': 'web', 'name': 'Vítejte', 'duration': 15, 'source': 'caracal-widget:type=text&lang=cs&title=V%C3%ADtejte&text=Dnes+v+10%3A00+porada+v+zasedac%C3%AD+m%C3%ADstnosti+B&align=center'},
+            {'kind': 'web', 'name': 'Intranet', 'duration': 30, 'source': 'https://example.com',
+             'valid_from': time.time() + 2 * 3600, 'valid_until': time.time() + 30 * 3600}]),
+            (evening, [{'kind': 'web', 'name': 'Zprávy', 'duration': 30, 'source': 'caracal-widget:type=rss&lang=cs&url=https%3A%2F%2Fwww.ceskenoviny.cz%2Fsluzby%2Frss%2Fzpravy.php'},
+                       {'kind': 'image', 'name': 'Logo firmy', 'duration': 10, 'file_id': files['Logo firmy.png']}])):
+        for it in items:
+            s.post(f'{hub}/api/global-playlists/{pid}/items', json=it)
+    s.post(f'{hub}/api/global-playlists/{day}/items', json={'kind': 'image', 'name': 'Menu dne', 'duration': 15, 'file_id': files['Menu dne.png']})
+    s.post(hub + '/api/schedules', json={'name': 'Recepce', 'default_playlist_id': evening, 'targets': {'devices': ids[:1]},
+                                         'slots': [{'days': [0, 1, 2, 3, 4], 'start': '07:00', 'end': '17:00', 'playlist_id': day}],
+                                         'screen': [{'days': [0, 1, 2, 3, 4, 5, 6], 'start': '06:00', 'end': '22:00'}]})
+    s.post(hub + '/api/scheduled-tasks', json={'name': 'Ranní restart', 'action': 'restart_player', 'time': '05:30',
+                                               'days': [0, 1, 2, 3, 4, 5, 6], 'targets': {'devices': ids[:2]}})
+    s.put(hub + '/api/approvals/settings', json={'enabled': True})
+    s.post(hub + '/api/users', json={'username': 'operator', 'password': 'operator-password', 'role': 'operator'})
+    op = requests.Session()
+    op.headers['Authorization'] = 'Bearer ' + op.post(hub + '/api/login', json={'username': 'operator', 'password': 'operator-password'}).json()['token']
+    op.post(f'{hub}/api/global-playlists/{day}/deploy', json={'target_ids': ids[:3], 'mode': 'replace', 'note': 'Nová akce týdne na všech vstupech'})
+
+
 def fake_screen(node, local, item, left, duration, frozen):
     """A picture of the TV for the screenshot preview: the page being shown, the countdown bar and the notification
     the overlay would show, drawn with the node's own renderer (player/notify_render.py; Pillow needed)."""
@@ -83,6 +159,14 @@ def fake_screen(node, local, item, left, duration, frozen):
     sw, sh = 1920, 1080
     img = R.gradient((sw, sh), (14, 20, 32), (26, 36, 56), 'diagonal')
     d = ImageDraw.Draw(img)
+    if item.get('kind') == 'takeover':   # the emergency message on the whole screen
+        t = local.get(node + '/api/player/takeover', timeout=5).json()
+        img.paste({'warning': (180, 83, 9), 'info': (29, 78, 216)}.get(t.get('level'), (185, 28, 28)), (0, 0, sw, sh))
+        d.text((110, 330), t.get('title', ''), font=R.font('DejaVu Sans', True, 110), fill=(255, 255, 255))
+        d.multiline_text((110, 520), t.get('message', ''), font=R.font('DejaVu Sans', False, 52), fill=(255, 255, 255), spacing=16)
+        buf = io.BytesIO()
+        img.resize((1280, 720)).save(buf, 'JPEG', quality=80)
+        return buf.getvalue()
     d.text((90, 70), item.get('name', ''), font=R.font('DejaVu Sans', True, 54), fill=(240, 244, 250))
     d.text((92, 140), item.get('source', ''), font=R.font('DejaVu Sans', False, 24), fill=(140, 150, 170))
     rnd = random.Random(item.get('id'))
@@ -236,7 +320,12 @@ def main():
         ids.append(enrolled['device_id'])
         print(f'node {name}: {enrolled["device_id"]} local API :{port}')
     seed_history(DATA / 'hub' / 'hub.db', ids)
+    seed_plays(DATA / 'hub' / 'hub.db', ids)
     start_real_node(hub, agent_mod, '--overlay' in sys.argv)
+    try:
+        seed_features(hub, ids)
+    except (requests.RequestException, KeyError, ValueError) as e:
+        print('demo content not created:', e)
     print(f'\nCARACAL Fleet demo running on {hub}  (admin / {os.environ["CARACAL_HUB_ADMIN_PASSWORD"]})')
     try:
         while True:

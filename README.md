@@ -38,9 +38,28 @@ zero-touch USB stick](docs/fleet.gif)
   from scratch – optionally as a factory reset with a new administrator and a template
 - **Cameras:** RTSP and HTTP streams of IP cameras and recorders as playlist items, up to 9 in a grid; ONVIF cameras
   and recorders (NVR, every channel) are found in the node's network and asked for their streams, with a picture of
-  each stream before it goes on the screen; their passwords stay on the node, encrypted
+  each stream before it goes on the screen; their passwords stay on the node, encrypted. Cameras can also be part of
+  a global playlist (agent 4.17 and newer): Fleet then keeps their passwords to hand them to the nodes, never shows
+  them and removes them from the command history once delivered
 - **Content with a validity:** any item (also in global playlists) can play only from / until a time – a weekend
   offer goes on and off the screens by itself
+- **Emergency message:** one click puts a full-screen message (evacuation, an outage) on all screens or on chosen
+  locations, groups and devices, right away and for a time or until it is ended; then the playlists go on. Older
+  nodes get it as a notification
+- **Approvals:** when switched on, a global playlist deployment by a user without the permission *Approve* waits for
+  an approval; what is approved is the version of the playlist at the time of the request
+- **Versions of global playlists:** every change is kept (50 versions) and an earlier one can be brought back; before
+  a deployment Fleet shows per device what is added, removed and kept
+- **Media library:** pictures and videos kept in Fleet with where each is used; *Replace everywhere* swaps a file in
+  all global playlists and templates and offers to deploy them again
+- **Proof of play:** what every screen showed and for how long, by content, screen or day, with a chart and a CSV
+  export (CARACAL 2026.10.23.1 with agent 4.17)
+- **What plays when:** a day of every screen of a location or group, or a week of one device, from the schedules:
+  playlists, screen hours, scheduled actions, emergency messages and items with a validity
+- **Widgets:** a clock, the weather (Open-Meteo), news from RSS / Atom, a table from CSV or Google Sheets and a text
+  as playlist items, with a live preview; the node draws them itself (CARACAL 2026.10.23.1 with agent 4.17)
+- **Labels and tables:** free labels on devices (filters of the device list and of proof of play), the device list
+  as CSV, and names, locations, groups, labels and notes of many devices changed from a table with a preview
 - **Schedules:** global playlists by time of day and day of the week, screen hours (screens off outside them through
   HDMI power saving and HDMI-CEC) and actions at a given time (restarts, screens off/on, a playlist, a template, a
   notification, updates), in the hub's time zone
@@ -268,7 +287,7 @@ old items are deleted only after all new ones were added.
 ## Backup and migration
 
 *Settings → Backup & migration* downloads a ZIP with the database (devices and their tokens, users, groups,
-locations, global playlists, history, audit), `config.json`, the logo and the media of global playlists. Restore it
+locations, global playlists with the passwords of their cameras, history, audit), `config.json`, the logo and the media of global playlists. Restore it
 on the new server in the same place. On the same domain the agents reconnect by themselves; for a new domain,
 select the devices on the old hub and use *Redirect to another hub*. The backup contains secrets – store it safely.
 

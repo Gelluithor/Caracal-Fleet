@@ -44,6 +44,7 @@ def create_app(key=None, api='v2'):
                  'started': time.time(), 'updated': time.time(), 'created': time.time(), 'stopped': False}
     st.next_id = 10
     st.log = []
+    st.takeover = None
 
     def auth(k):
         if k != st.key:
@@ -112,7 +113,12 @@ def create_app(key=None, api='v2'):
                       'collection_id': p['collection_id'], 'duration': dur,
                       'remaining': None if frozen else max(0, round(dur - (time.time() - p['started']) % dur)),
                       'updated': p['updated'], 'player_online': time.time() - p['updated'] < 8}
-            return {'api_version': 2, 'assets': st.assets, 'profiles': st.profiles, 'player': player}
+            t = st.takeover
+            if t and t.get('until') and time.time() >= t['until']:
+                t = st.takeover = None
+            if t:   # an emergency message replaces the playlist (CARACAL 2026.10.23.1)
+                player.update(current_id=-1, current_name=t.get('title') or '', frozen=True, remaining=None)
+            return {'api_version': 2, 'assets': st.assets, 'profiles': st.profiles, 'player': player, 'takeover': t}
         # v1 patch: the v1 state file is never refreshed by the v2 player
         return {'assets': st.assets, 'profiles': [{'id': x['id'], 'name': x['name']} for x in st.profiles],
                 'player': {'current_id': p['current_id'], 'current_name': (cur or {}).get('name', ''),
@@ -280,6 +286,30 @@ def create_app(key=None, api='v2'):
         if ident not in st.files:
             raise HTTPException(404, 'No media file')
         return Response(st.files[ident], media_type='application/octet-stream')
+
+    if v2:   # CARACAL 2026.10.23.1: emergency message, widgets, proof of play
+        @app.post('/api/fleet/v1/takeover')
+        async def takeover(req: Request, x_fleet_key: str = Header('')):
+            auth(x_fleet_key)
+            d = await req.json()
+            st.takeover = {k: d.get(k) for k in ('id', 'title', 'message', 'level', 'until')}
+            st.takeover['started'] = time.time()
+            return {'ok': True}
+
+        @app.delete('/api/fleet/v1/takeover')
+        def takeover_end(x_fleet_key: str = Header('')):
+            auth(x_fleet_key)
+            st.takeover = None
+            return {'ok': True}
+
+        @app.get('/widgets')
+        def widgets():
+            return Response('<!doctype html><title>widget</title>', media_type='text/html')
+
+        @app.get('/api/fleet/v1/plays')
+        def plays(after: int = 0, x_fleet_key: str = Header('')):
+            auth(x_fleet_key)
+            return {'last_id': after, 'plays': []}
 
     return app
 

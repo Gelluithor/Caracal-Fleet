@@ -21,7 +21,8 @@ const S = {
   attentionCount: 0,
   org: { groups: [], locations: [] },
   selected: new Set(),
-  filters: { q: '', status: '', group: '', location: '', ...JSON.parse(store.get('caracalFilters', '{}') || '{}') },
+  filters: { q: '', status: '', group: '', location: '', tag: '', ...JSON.parse(store.get('caracalFilters', '{}') || '{}') },
+  takeovers: [], approvalsPending: 0, approvalEnabled: false, tags: [],
   detail: null,
   route: { view: 'overview', id: '', tab: '' },
   pendingOrder: null,
@@ -154,6 +155,13 @@ const ICONS = {
   location: 'M12 21s-7-6.2-7-11a7 7 0 1 1 14 0c0 4.8-7 11-7 11zM12 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
   group: 'M3 7h7l2 2h9v11H3z',
   lock: 'M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4M12 15v2',
+  library: 'M4 4h6v16H4zM10 4h4v16h-4zM15 5l4-1 3 15-4 1z',
+  timeline: 'M3 6h8M3 12h14M3 18h10M15 4v4M19 10v4M15 16v4',
+  plays: 'M4 20V10M10 20V4M16 20v-8M22 20H2M7 7l5-3 5 6 4-3',
+  approvals: 'M9 12l2 2 4-4M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z',
+  takeover: 'M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1zM16 8a5 5 0 0 1 0 8M19 5a9 9 0 0 1 0 14',
+  widget: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z',
+  tag: 'M3 12V3h9l9 9-9 9zM7.5 7.5h.01',
 };
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[n] || ICONS.web}"/></svg>`;
 const isTag = k => k === 'grafana-tag';
@@ -342,6 +350,10 @@ async function refresh() {
     const [d, org] = await Promise.all([api('/api/devices'), api('/api/org')]);
     S.devices = d.devices;
     S.attentionCount = d.attention_count;
+    S.takeovers = d.takeovers || [];
+    S.approvalsPending = d.approvals_pending || 0;
+    S.approvalEnabled = !!d.approval_enabled;
+    S.tags = d.tags || [];
     S.agentVersion = d.agent_version;
     S.org = org;
     for (const id of [...S.selected]) if (!dev(id)) S.selected.delete(id);
@@ -357,25 +369,32 @@ async function refresh() {
   live.className = 'live-dot ' + (fresh ? 'ok' : 'bad');
   live.title = fresh ? t('liveOk') : t('liveBad');
   updateNavBadges();
+  renderTakeoverBar();
 }
 
 // ------------------------------------------------------------------ navigation
 
 const NAV = [
   ['overview', 'view'], ['devices', 'view'], ['wall', 'view'], ['attention', 'view'], ['playlists', 'view'], ['global', 'view'],
-  ['templates', 'view'], ['schedule', 'view'], ['organization', 'view'],
+  ['library', 'view'], ['approvals', 'view'], ['templates', 'view'], ['schedule', 'view'], ['timeline', 'view'], ['plays', 'view'],
+  ['takeover', 'control'], ['organization', 'view'],
   ['operations', 'view'], ['updates', 'updates'], ['audit', 'audit'], ['users', 'users'], ['settings', 'view'],
 ];
 
 function buildNav() {
   $('#nav').innerHTML = NAV.filter(([, p]) => can(p)).map(([v]) =>
-    `<a href="#/${v}" data-nav="${v}">${icon(v)}<span>${t('nav_' + v)}</span>${v === 'attention' ? '<em id="attBadge"></em>' : ''}</a>`).join('');
+    `<a href="#/${v}" data-nav="${v}" class="${v === 'takeover' ? 'nav-takeover' : ''}">${icon(v)}<span>${t('nav_' + v)}</span>${v === 'attention' ? '<em id="attBadge"></em>' : v === 'approvals' ? '<em id="apprBadge"></em>' : ''}</a>`).join('');
   updateNavBadges();
 }
 
 function updateNavBadges() {
   const b = $('#attBadge');
   if (b) { b.textContent = S.attentionCount || ''; b.hidden = !S.attentionCount; }
+  const ab = $('#apprBadge');
+  if (ab) { ab.textContent = S.approvalsPending || ''; ab.hidden = !S.approvalsPending; }
+  // approvals stay out of the menu while they are off and nothing waits
+  const an = $('#nav a[data-nav="approvals"]');
+  if (an) an.hidden = !S.approvalEnabled && !S.approvalsPending && S.route.view !== 'approvals';
   const active = S.route.view === 'device' ? 'devices' : S.route.view;
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.nav === active));
 }
@@ -539,8 +558,9 @@ function welcomeCard() {
 function filteredDevices() {
   const f = S.filters, q = f.q.toLowerCase();
   return S.devices.filter(d => {
-    if (q && ![d.name, d.id, d.ip, d.location, d.group, d.current_name, d.hostname].join(' ').toLowerCase().includes(q)) return false;
+    if (q && ![d.name, d.id, d.ip, d.location, d.group, d.current_name, d.hostname, ...(d.tags || [])].join(' ').toLowerCase().includes(q)) return false;
     if (f.group && d.group !== f.group) return false;
+    if (f.tag && !(d.tags || []).includes(f.tag)) return false;
     if (f.location && d.location !== f.location) return false;
     switch (f.status) {
       case 'online': return d.online;
@@ -566,7 +586,10 @@ VIEWS.devices = {
         <select id="fStatus">${['', 'online', 'offline', 'attention', 'frozen', 'outdated'].map(s => `<option value="${s}" ${s === f.status ? 'selected' : ''}>${t('status_' + (s || 'all'))}</option>`).join('')}</select>
         <select id="fGroup">${options(orgNames('groups'), f.group, t('allGroups'))}</select>
         <select id="fLoc">${options(orgNames('locations'), f.location, t('allLocations'))}</select>
+        ${S.tags.length ? `<select id="fTag">${options(S.tags, f.tag, t('allTags'))}</select>` : ''}
         <span class="muted grow" id="fCount"></span><button class="btn sm ghost" id="fReset" hidden>${icon('x')}${t('resetFilters')}</button>
+        <button class="btn sm ghost" data-do="devicesExport" title="${esc(t('csvExportHint'))}">${icon('download')}${t('csvExport')}</button>
+        ${can('devices') ? `<button class="btn sm ghost" data-do="devicesImport" title="${esc(t('csvImportHint'))}">${icon('upload')}${t('csvImport')}</button>` : ''}
       </div>
       <div class="bulkbar" id="bulkBar" hidden></div>
       <div class="table-wrap"><table class="table devices-table">
@@ -579,7 +602,8 @@ VIEWS.devices = {
     $('#fStatus', root).onchange = e => set('status', e.target.value);
     $('#fGroup', root).onchange = e => set('group', e.target.value);
     $('#fLoc', root).onchange = e => set('location', e.target.value);
-    $('#fReset', root).onclick = () => { S.filters = { q: '', status: '', group: '', location: '' }; store.set('caracalFilters', null); this.mount(root); this.update(root); };
+    if ($('#fTag', root)) $('#fTag', root).onchange = e => set('tag', e.target.value);
+    $('#fReset', root).onclick = () => { S.filters = { q: '', status: '', group: '', location: '', tag: '' }; store.set('caracalFilters', null); this.mount(root); this.update(root); };
     $('#selAll', root).onchange = e => { filteredDevices().forEach(d => e.target.checked ? S.selected.add(d.id) : S.selected.delete(d.id)); upd(); };
   },
   update(root) {
@@ -588,7 +612,7 @@ VIEWS.devices = {
     $('#fReset', root).hidden = !Object.values(S.filters).some(Boolean);
     patch($('#devRows', root), list.map(d => `<tr data-href="#/device/${encodeURIComponent(d.id)}" class="${S.selected.has(d.id) ? 'sel' : ''}">
       <td class="cb"><input type="checkbox" data-pick="${esc(d.id)}" ${S.selected.has(d.id) ? 'checked' : ''}></td>
-      <td><div class="dev-name">${dot(d)}<div><b>${esc(d.name)}${d.muted_until ? ` <span class="muted-ic" title="${esc(t('mutedUntil', { time: clock(d.muted_until) }))}">${icon('bell')}</span>` : ''}</b><small>${esc(d.id)} · ${esc(d.ip || '—')}</small></div></div></td>
+      <td><div class="dev-name">${dot(d)}<div><b>${esc(d.name)}${d.muted_until ? ` <span class="muted-ic" title="${esc(t('mutedUntil', { time: clock(d.muted_until) }))}">${icon('bell')}</span>` : ''}</b><small>${esc(d.id)} · ${esc(d.ip || '—')}</small>${tagChips(d)}</div></div></td>
       <td><small class="stack">${d.location ? `<span>${icon('location')}${esc(d.location)}</span>` : ''}${d.group ? `<span>${icon('group')}${esc(d.group)}</span>` : ''}${!d.location && !d.group ? '—' : ''}</small></td>
       <td class="content-cell">${progress(d)}${d.needs_attention ? `<small class="reason-inline">${esc(d.attention.filter(a => a.level !== 'info').map(attText).join(', '))}</small>` : ''}</td>
       <td>${d.online ? bar(d.cpu, 80, 95) : '—'}</td><td>${d.online ? bar(d.ram, 80, 90) : '—'}</td><td>${bar(d.disk, 85, 95)}</td>
@@ -656,6 +680,7 @@ function deviceActions(d = null) {
     { ic: 'settings', label: t('menuManage'), sections: [
       [manage && A('muteAlerts', 'bell', d && d.muted_until ? t('unmuteAlerts') : t('muteAlerts')),
         manage && A('bulkAssign', 'group', t('assignGroupLocation')),
+        manage && A('bulkTags', 'tag', t('tagsEdit')),
         manage && A('templateApplyTo', 'templates', t('templateApply')),
         manage && d && A('templateFromDevice', 'copy', t('saveAsTemplate')),
         manage && A(d ? 'nodeAdmin' : 'bulkNodeAdmin', 'lock', t('webAdmin'), { disabled: off || !admin, why: why(admin) || t('offline') }),
@@ -936,7 +961,7 @@ function quickFix(d, a, inDetail = false) {
 
 // ---------- device detail
 
-const DEVICE_TABS = ['overview', 'playlist', 'collections', 'logins', 'notify', 'history', 'settings'];
+const DEVICE_TABS = ['overview', 'playlist', 'collections', 'logins', 'notify', 'timeline', 'plays', 'history', 'settings'];
 const TAB_COUNTS = { playlist: 'playlist_count', collections: 'collection_count', logins: 'profile_count', notify: 'watcher_count' };
 
 function deviceTabs(d, tab) {
@@ -973,6 +998,8 @@ VIEWS.device = {
     else if (tab === 'logins') patch(el, renderProfiles(d));
     else if (tab === 'notify') patch(el, renderNotifications(d));
     else if (tab === 'history') patch(el, deviceHistory(d));
+    else if (tab === 'timeline') deviceTimeline(el, d);
+    else if (tab === 'plays') devicePlays(el, d);
     else if (tab === 'settings') { if (!el._html) patch(el, deviceSettings(d)); }
   },
 };
@@ -1476,8 +1503,9 @@ function deviceSettings(d) {
       <label>${t('name')}<input name="name" value="${esc(d.name)}" required></label>
       <div class="row2"><label>${t('group')}<input name="group" value="${esc(d.group)}" list="dlGroups"></label>
       <label>${t('location')}<input name="location" value="${esc(d.location)}" list="dlLocations"></label></div>
+      <label>${t('tags')}<input name="tags" value="${esc((d.tags || []).join(', '))}" list="dlTags" placeholder="${esc(t('tagsPlaceholder'))}"><small class="muted">${t('tagsHint')}</small></label>
       <label>${t('notes')}<textarea name="notes" rows="3">${esc(d.notes)}</textarea></label>
-      ${orgDatalists()}
+      ${orgDatalists()}<datalist id="dlTags">${S.tags.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
       <div class="form-actions"><button class="btn primary">${t('save')}</button></div></form></section>
     <section class="card narrow danger-zone"><h2>${t('dangerZone')}</h2><p class="muted">${t('deleteDeviceHint')}</p>
       <button class="btn danger" data-do="deleteDevice" data-id="${esc(d.id)}">${icon('trash')}${t('deleteDevice')}</button></section>`;
@@ -1505,6 +1533,8 @@ function renderPlaylist(el, d) {
       ${edit ? `<button class="btn" data-do="addAsset" data-kind="web" data-id="${esc(d.id)}">${icon('web')}${t('addWeb')}</button>
       ${d.capabilities.upload === false ? '' : `<button class="btn" data-do="addAsset" data-kind="image" data-id="${esc(d.id)}">${icon('image')}${t('addImage')}</button>
       <button class="btn" data-do="addAsset" data-kind="video" data-id="${esc(d.id)}">${icon('video')}${t('addVideo')}</button>`}
+      ${d.capabilities.add_camera === true ? `<button class="btn" data-do="addCamera" data-id="${esc(d.id)}">${icon('camera')}${t('add_camera')}</button>` : ''}
+      ${d.capabilities.widgets === true ? `<button class="btn" data-do="addWidget" data-id="${esc(d.id)}">${icon('widget')}${t('widget')}</button>` : ''}
       <button class="btn" data-do="copyContent" data-id="${esc(d.id)}">${icon('copy')}${t('copyPlaylist')}</button>` : ''}
     </div>
     ${S.pendingOrder ? `<div class="savebar">${t('orderChanged')}<button class="btn primary sm" data-do="saveOrder" data-id="${esc(d.id)}">${t('saveOrder')}</button><button class="btn sm ghost" data-do="resetOrder">${t('cancel')}</button></div>` : ''}
@@ -1519,8 +1549,8 @@ function renderPlaylist(el, d) {
       const open = dash && dash.length && S.openCols.has(String(a.id));
       return `<li class="pl-row ${playing ? 'playing' : ''} ${a.enabled ? '' : 'disabled'}" data-aid="${esc(a.id)}" ${edit ? 'draggable="true"' : ''}>
         ${edit ? `<span class="handle" title="${t('dragToReorder')}">${icon('drag')}</span>` : ''}<span class="idx">${i + 1}</span>
-        <span class="kind k-${esc(a.kind)}">${kindIcon(a.kind)}</span>
-        <div class="pl-main"><b>${esc(a.name)}</b>${validityTag(a)}<small>${esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' ? ' · ' + esc(a.source) : ''}</small>
+        <span class="kind k-${esc(a.kind)}">${isWidget(a) ? icon('widget') : kindIcon(a.kind)}</span>
+        <div class="pl-main"><b>${esc(a.name)}</b>${validityTag(a)}<small>${isWidget(a) ? esc(widgetLabel(a.source)) : esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' && !isWidget(a) ? ' · ' + esc(a.source) : ''}</small>
           ${dash && dash.length ? `<button class="pl-expand ${open ? 'open' : ''}" data-do="toggleCol" data-col="${esc(a.id)}" aria-expanded="${open ? 'true' : 'false'}">${icon('chev')}${t('dashboardsCount', { n: dash.length })}</button>` : ''}</div>
         <span class="pl-dur">${a.duration ? dur(a.duration) : (a.kind === 'video' ? t('fullLength') : '—')}</span>
         <span class="pl-tags">${playing ? `<span class="tag ok">${d.frozen ? icon('snow') + t('frozen') : icon('play') + t('playing')}</span>` : ''}${a.enabled ? '' : `<span class="tag">${t('disabled')}</span>`}${loginTag(d, a)}</span>
@@ -2143,7 +2173,7 @@ function auditAction(a) {
 // ---------- users, roles and user groups
 
 const BUILTIN_ROLES = ['admin', 'manager', 'operator', 'viewer'];
-const DEVICE_PERMS = ['view', 'control', 'content', 'schedule', 'devices', 'updates', 'console'];
+const DEVICE_PERMS = ['view', 'control', 'content', 'approve', 'schedule', 'devices', 'updates', 'console'];
 const SYSTEM_PERMS = ['install', 'notify_api', 'audit', 'users', 'settings'];
 const roleLabel = (key, name) => (BUILTIN_ROLES.includes(key) ? t('role_' + key) : name || (S.roles || []).find(r => r.key === key)?.name || (key ? key : t('roleNone')));
 // "all devices" or the locations, groups and devices a role holds for
@@ -3223,7 +3253,7 @@ VIEWS.global = {
   mount(root) {
     setTitle(t('nav_global'));
     if (S.route.id) {
-      root.innerHTML = `<div id="gHead"></div><div id="gItems"></div><div id="gDeps"></div>`;
+      root.innerHTML = `<div id="gHead"></div><div id="gItems"></div><div id="gVers"></div><div id="gDeps"></div>`;
       return;
     }
     root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('nav_global')}</h2>
@@ -3252,10 +3282,10 @@ VIEWS.global = {
       ${edit ? `<div class="hero-actions"><button class="btn primary" data-do="globalDeploy" ${p.items.length ? '' : 'disabled'}>${icon('upload')}${t('deploy')}</button>
       <button class="btn" data-do="globalEdit">${icon('edit')}${t('edit')}</button><button class="btn danger" data-do="globalDelete">${icon('trash')}${t('delete')}</button></div>` : ''}</section>`);
     patch($('#gItems', root), `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('playlist')} <span class="muted">(${p.items.length})</span></h2>
-      ${edit ? ['web', 'image', 'video', 'grafana-tag'].map(k => `<button class="btn" data-do="globalAddItem" data-kind="${k}">${kindIcon(k)}${t({ web: 'addWeb', image: 'addImage', video: 'addVideo' }[k] || 'grafanaCollection')}</button>`).join('') : ''}</div>
+      ${edit ? ['web', 'image', 'video', 'camera', 'widget', 'grafana-tag'].map(k => `<button class="btn" data-do="globalAddItem" data-kind="${k}">${k === 'widget' ? icon('widget') : kindIcon(k)}${t({ web: 'addWeb', image: 'addImage', video: 'addVideo', camera: 'add_camera', widget: 'widget' }[k] || 'grafanaCollection')}</button>`).join('') : ''}</div>
       <ol class="playlist">${p.items.map((it, i) => `<li class="g-row">
-        <span class="idx">${i + 1}</span><span class="kind k-${esc(it.kind)}">${kindIcon(it.kind)}</span>
-        <div class="pl-main"><b>${esc(it.name)}</b>${validityTag(it)}<small>${esc(kindLabel(it.kind))} · ${esc(it.kind === 'web' ? it.source : isTag(it.kind) ? `${t('grafanaTag')} ${it.tag} · ${it.grafana_url}` : (it.file_name || '') + (it.file_size ? ' · ' + fmtSize(it.file_size) : ''))}</small></div>
+        <span class="idx">${i + 1}</span><span class="kind k-${esc(it.kind)}">${isWidget(it) ? icon('widget') : kindIcon(it.kind)}</span>
+        <div class="pl-main"><b>${esc(it.name)}</b>${validityTag(it)}<small>${esc(kindLabel(it.kind))} · ${esc(isWidget(it) ? widgetLabel(it.source) : it.kind === 'web' ? it.source : it.kind === 'camera' ? t('camStreamsN', { n: (it.streams || []).length }) : isTag(it.kind) ? `${t('grafanaTag')} ${it.tag} · ${it.grafana_url}` : (it.file_name || '') + (it.file_size ? ' · ' + fmtSize(it.file_size) : ''))}</small></div>
         <span class="pl-dur">${it.duration ? dur(it.duration) : t('fullLength')}</span>
         <span class="pl-actions">${edit ? `<button class="icon-btn" title="${t('moveUp')}" data-do="globalMove" data-iid="${it.id}" data-dir="-1" ${i ? '' : 'disabled'}>${icon('up')}</button>
           <button class="icon-btn" title="${t('moveDown')}" data-do="globalMove" data-iid="${it.id}" data-dir="1" ${i < p.items.length - 1 ? '' : 'disabled'}>${icon('down')}</button>
@@ -3270,6 +3300,7 @@ VIEWS.global = {
         <td><details><summary><span class="badge st-completed">${count(['completed'])}</span> <span class="badge st-failed">${count(['failed', 'timeout', 'expired'])}</span> <span class="badge st-queued">${count(['queued', 'delivered'])}</span> / ${dep.targets.length}</summary>
         ${dep.results.map(x => `<div class="dep-row"><a href="#/device/${encodeURIComponent(x.device_id)}">${esc(x.device_name || x.device_id)}</a><span class="badge st-${x.state}">${t('state_' + x.state)}</span><small class="result" title="${esc(x.result)}">${esc((x.result || '').slice(0, 160))}</small></div>`).join('')}</details></td></tr>`;
       }).join('') || `<tr><td colspan="4" class="empty">${t('noDeployments')}</td></tr>`}</tbody></table></div></section>`);
+    globalVersions($('#gVers', root), p);
   },
 };
 
@@ -3305,7 +3336,10 @@ function globalItemDialog(pid, kind, item = null) {
   const it = item || { name: '', source: '', duration: kind === 'grafana-tag' ? 60 : kind === 'web' ? 30 : 15, scale: 1, kiosk: true };
   modal({
     title: item ? t('editItem') : isTag(kind) ? t('addCollection') : t('add_' + kind),
-    body: `<div class="form">${isMedia && !item ? `<label>${t('file')}<input type="file" name="file" accept="${kind}/*" required></label><div class="upload-prog" hidden><i></i></div>` : ''}
+    body: `<div class="form">${isMedia && !item ? `<div class="seg wide-seg" id="srcSeg"><button type="button" class="active" data-src="upload">${t('uploadNew')}</button><button type="button" data-src="library">${t('fromLibrary')}</button></div>
+      <div data-src-box="upload"><label>${t('file')}<input type="file" name="file" accept="${kind}/*" required></label><div class="upload-prog" hidden><i></i></div>
+      <label class="check"><input type="checkbox" name="to_library" checked>${t('saveToLibrary')}</label></div>
+      <div data-src-box="library" hidden><label>${t('libraryFile')}<select name="library_id"><option value="">${t('loading')}</option></select></label></div>` : ''}
       <label>${t('name')}<input name="name" value="${esc(it.name)}" ${isMedia ? '' : 'required'}></label>
       ${kind === 'web' ? `<label>URL<input name="source" type="url" value="${esc(it.source)}" placeholder="https://" required></label>` : ''}
       ${isTag(kind) ? grafanaFields(it) : ''}
@@ -3317,9 +3351,31 @@ function globalItemDialog(pid, kind, item = null) {
     onOpen: form => {
       const f = $('input[name=file]', form);
       if (f) f.onchange = () => { if (f.files[0] && !form.name.value) form.name.value = f.files[0].name.replace(/\.[^.]+$/, ''); };
+      const seg = $('#srcSeg', form);
+      if (!seg) return;
+      seg.onclick = e => {
+        const b = e.target.closest('[data-src]');
+        if (!b) return;
+        $$('[data-src]', seg).forEach(x => x.classList.toggle('active', x === b));
+        $$('[data-src-box]', form).forEach(x => { x.hidden = x.dataset.srcBox !== b.dataset.src; });
+        form.file.required = b.dataset.src === 'upload';
+        form.library_id.required = b.dataset.src === 'library';
+      };
+      api('/api/library').then(list => {
+        const files = list.filter(x => x.kind === kind);
+        form.library_id.innerHTML = files.length ? files.map(x => `<option value="${esc(x.id)}">${esc(x.name)} · ${fmtSize(x.size)}</option>`).join('') : `<option value="">${t('libraryEmptyKind')}</option>`;
+      }).catch(() => {});
     },
     onSubmit: async (data, form) => {
       const payload = { kind, name: data.name.trim(), duration: Number(data.duration || 0), scale: Number(data.scale || 1) };
+      if (isMedia && !item && $('[data-src-box="library"]', form) && !$('[data-src-box="library"]', form).hidden) {
+        if (!data.library_id) throw new Error('file_not_found');
+        payload.file_id = data.library_id;
+        Object.assign(payload, validityPayload(data));
+        await api(`/api/global-playlists/${pid}/items`, { method: 'POST', json: payload });
+        toast(t('saved'));
+        return render();
+      }
       if (kind === 'web') payload.source = data.source.trim();
       if (isTag(kind)) Object.assign(payload, grafanaPayload(data));
       if (kind === 'web' || isTag(kind)) payload.dark = data.dark || '';
@@ -3334,6 +3390,7 @@ function globalItemDialog(pid, kind, item = null) {
           const up = await uploadFile(file, x => { $('i', pr).style.width = (x * 100) + '%'; });
           payload.file_id = up.id;
           payload.name = payload.name || file.name;
+          if (data.to_library) await api('/api/library/' + up.id, { method: 'POST', json: {} });
         }
         await api(`/api/global-playlists/${pid}/items`, { method: 'POST', json: payload });
       }
@@ -3344,21 +3401,43 @@ function globalItemDialog(pid, kind, item = null) {
 }
 
 function globalDeployDialog(p) {
-  const media = p.items.some(it => it.kind !== 'web');
+  const media = p.items.some(it => it.kind === 'image' || it.kind === 'video');
+  const approval = S.approvalEnabled && !S.devices.every(d => canOn(d, 'approve'));
   modal({
-    title: t('deployTitle', { name: esc(p.name) }), submit: t('deploy'), wide: true,
+    title: t('deployTitle', { name: esc(p.name) }), submit: approval ? t('requestApproval') : t('deploy'), wide: true,
     body: `<div class="form"><p class="muted">${t('deployHint')}</p>${targetPicker(null)}
       <div class="radios"><label class="check"><input type="radio" name="mode" value="append" checked>${t('mode_append')}</label>
       <label class="check"><input type="radio" name="mode" value="replace">${t('mode_replace')}</label></div>
       <div class="note warn">${t('deployReplaceWarning')}</div>
-      ${media ? `<div class="note">${t('deployMediaNote')}</div>` : ''}</div>`,
-    onOpen: bindTargetPicker,
+      ${media ? `<div class="note">${t('deployMediaNote')}</div>` : ''}
+      ${approval ? `<div class="note info">${icon('approvals')}${t('approvalNeededHint')}</div><label>${t('approvalNote')}<input name="note" maxlength="500" placeholder="${esc(t('approvalNotePlaceholder'))}"></label>` : ''}
+      <details class="diff-box" id="diffBox"><summary>${icon('eye')}${t('deployPreview')}</summary><div id="diffOut" class="muted">${t('deployPreviewPick')}</div></details></div>`,
+    onOpen: form => {
+      bindTargetPicker(form);
+      let timer = null;
+      const load = async () => {
+        const targets = pickedTargets(Object.fromEntries(new FormData(form)));
+        const out = $('#diffOut', form);
+        if (!targets.length) { out.innerHTML = t('deployPreviewPick'); return; }
+        out.innerHTML = t('loading');
+        try {
+          const r = await api(`/api/global-playlists/${p.id}/preview`, { method: 'POST', json: { target_ids: targets, mode: form.mode.value } });
+          out.innerHTML = r.devices.map(x => diffHtml(x)).join('');
+        } catch (e) { out.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; }
+      };
+      const later = () => { clearTimeout(timer); if ($('#diffBox', form).open) timer = setTimeout(load, 300); };
+      form.addEventListener('change', later);
+      form.addEventListener('click', e => { if (e.target.closest('[data-tsel]')) later(); });
+      $('#diffBox', form).addEventListener('toggle', later);
+    },
     onSubmit: async data => {
       const targets = pickedTargets(data);
       if (!targets.length) throw new Error('no_devices');
-      const r = await api(`/api/global-playlists/${p.id}/deploy`, { method: 'POST', json: { target_ids: targets, mode: data.mode } });
+      const r = await api(`/api/global-playlists/${p.id}/deploy`, { method: 'POST', json: { target_ids: targets, mode: data.mode, note: data.note || '' } });
+      if (r.pending_approval) { toast(t('approvalRequested')); S.approvalsPending += 0; render(); return; }
       toast(t('deployQueued', { n: targets.length }));
       if (r.media_unsupported.length) toast(t('deployMediaSkipped', { list: r.media_unsupported.join(', ') }), 'warn');
+      if ((r.items_unsupported || []).length) toast(t('deployCameraSkipped', { list: r.items_unsupported.join(', ') }), 'warn');
       render();
     },
   });
@@ -3828,30 +3907,37 @@ async function cameraPreview(deviceId, payload, box) {
     box.innerHTML = r.image ? `<img class="cam-preview" alt="" src="data:${esc(r.type || 'image/jpeg')};base64,${r.image}">` : `<div class="note warn">${esc(r.text || r.detail || t('camPreviewNone'))}</div>`;
   } catch (e) { box.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; }
 }
-function cameraDialog(deviceId, cam = null, targets = null) {
+// pid: a camera of a global playlist (stored in Fleet); finding and previews then go through a node chosen in the dialog
+function cameraDialog(deviceId, cam = null, targets = null, pid = null) {
   let src = { streams: [{}], layout: 'auto' };
   if (cam) { try { src = { ...src, ...JSON.parse(cam.source || '{}') }; } catch { /* ignore */ } }
+  if (pid && cam) src = { ...src, streams: cam.streams, layout: cam.layout, audio: cam.audio };
+  const via = pid ? S.devices.filter(d => d.online && canOn(d, 'content') && (d.capabilities || {}).camera_onvif === true) : [];
+  if (pid) deviceId = via.length ? via[0].id : null;
   const layouts = [['auto', t('camLayoutAuto')], ['2', t('camLayout2')], ['2x2', '2 × 2'], ['3x3', '3 × 3']];
   modal({
     title: cam ? t('camEdit') : t('add_camera'), wide: true, submit: cam ? t('save') : t('add'),
-    body: `<div class="form"><p class="muted">${t('camHint')}</p>
+    body: `<div class="form"><p class="muted">${t(pid ? 'camHintGlobal' : 'camHint')}</p>
       <div class="row2"><label>${t('name')}<input name="name" required value="${esc(cam ? cam.name : '')}"></label>
       <label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(cam ? cam.duration : 30)}" required></label></div>
       <div class="row2"><label>${t('camLayout')}<select name="layout">${layouts.map(([v, l]) => `<option value="${v}" ${src.layout === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="check"><input type="checkbox" name="audio" ${src.audio ? 'checked' : ''}>${t('camAudio')}</label></div>
-      ${validitySupport(targets || [deviceId]) ? validityFields(cam || {}) : ''}
-      <h3>${t('camStreams')}</h3>${cam ? `<p class="muted">${t('camEditHint')}</p>` : ''}<div id="camRows">${src.streams.map(x => camStreamRow(x, !!cam)).join('')}</div>
+      ${pid || validitySupport(targets || [deviceId]) ? validityFields(cam || {}) : ''}
+      <h3>${t('camStreams')}</h3>${cam ? `<p class="muted">${t(pid ? 'camEditHintGlobal' : 'camEditHint')}</p>` : ''}<div id="camRows">${src.streams.map(x => camStreamRow(x, !!cam)).join('')}</div>
       <div class="form-actions start"><button type="button" class="btn sm" data-add-stream>${icon('plus')}${t('camAddStream')}</button></div>
-      ${targets ? '' : `<details class="onvif"><summary>${t('camOnvif')}</summary><p class="muted">${t('camOnvifHint')}</p>
+      ${targets || !deviceId ? '' : `<details class="onvif"><summary>${t('camOnvif')}</summary><p class="muted">${t('camOnvifHint')}</p>
+        ${pid ? `<label>${t('camVia')}<select data-via>${via.map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}</select><small class="muted">${t('camViaHint')}</small></label>` : ''}
         <div class="form-actions start"><button type="button" class="btn sm" data-discover>${icon('search')}${t('camDiscover')}</button></div><div class="cam-found"></div>
         <div class="row2"><label>${t('camHost')}<input data-onvif="host" placeholder="192.168.1.20"></label><label>Port<input data-onvif="port" type="number" value="80"></label></div>
         <div class="row2"><label>${t('username')}<input data-onvif="username" autocomplete="off"></label><label>${t('password')}<input data-onvif="password" type="password" autocomplete="new-password"></label></div>
         <input type="hidden" data-onvif="xaddr"><div class="form-actions start"><button type="button" class="btn sm primary" data-onvif-load>${icon('camera')}${t('camLoad')}</button></div><div class="cam-streams"></div></details>`}
-      ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : cam ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], d => (d.capabilities || {}).add_camera === true)}</details>`}</div>`,
+      ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : cam || pid ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], d => (d.capabilities || {}).add_camera === true)}</details>`}</div>`,
     onOpen: form => {
       bindTargetPicker(form);
       const rows = $('#camRows', form), ov = k => $(`[data-onvif="${k}"]`, form);
-      const preview = (dev(deviceId)?.capabilities || {}).camera_preview === true;
+      const viaSel = $('[data-via]', form);
+      if (viaSel) viaSel.onchange = () => { deviceId = viaSel.value; };
+      const preview = pid ? via.some(d => (d.capabilities || {}).camera_preview === true) : (dev(deviceId)?.capabilities || {}).camera_preview === true;
       if (!preview) $$('[data-preview-row]', form).forEach(b => b.remove());
       form.addEventListener('click', async e => {
         if (e.target.closest('[data-add-stream]')) {
@@ -3863,10 +3949,11 @@ function cameraDialog(deviceId, cam = null, targets = null) {
           const row = pr.closest('[data-stream]'), f = k => $(`[data-f=${k}]`, row).value.trim();
           const index = $$('[data-stream]', form).indexOf(row);
           // an edited camera without a new password: the node uses the stored one
-          const payload = cam && !f('password') && !f('username') ? { id: cam.id, index } : { url: f('url'), username: f('username'), password: $('[data-f=password]', row).value };
+          const payload = cam && !pid && !f('password') && !f('username') ? { id: cam.id, index } : { url: f('url'), username: f('username'), password: $('[data-f=password]', row).value };
           let box = row.nextElementSibling;
           if (!box || !box.classList.contains('cam-preview-box')) { row.insertAdjacentHTML('afterend', '<div class="cam-preview-box"></div>'); box = row.nextElementSibling; }
-          cameraPreview(deviceId, payload, box);
+          if (pid && (dev(deviceId)?.capabilities || {}).camera_preview !== true) box.innerHTML = `<div class="note warn">${t('camPreviewNoNode')}</div>`;
+          else cameraPreview(deviceId, payload, box);
         }
         const del = e.target.closest('[data-del-stream]');
         if (del && $$('[data-stream]', form).length > 1) del.closest('[data-stream]').remove();
@@ -3920,6 +4007,10 @@ function cameraDialog(deviceId, cam = null, targets = null) {
       const streams = $$('#camRows [data-stream]').map(row => Object.fromEntries($$('[data-f]', row).map(i => [i.dataset.f, i.value.trim()])));
       const payload = { name: data.name.trim(), duration: Number(data.duration || 30), layout: data.layout, audio: !!data.audio, streams };
       if ('valid_from' in data) Object.assign(payload, validityPayload(data));
+      if (pid) {
+        return api(cam ? `/api/global-playlists/${pid}/items/${cam.id}` : `/api/global-playlists/${pid}/items`,
+          { method: cam ? 'PATCH' : 'POST', json: { kind: 'camera', ...payload } }).then(() => { toast(t('saved')); render(); });
+      }
       if (cam) return sendCommand(deviceId, 'update_camera', { id: cam.id, ...payload });
       const ids = targets || [deviceId, ...pickedTargets(data)];
       return ids.length === 1 ? sendCommand(ids[0], 'add_camera', payload) : sendBulk(ids, 'add_camera', payload);
@@ -4253,11 +4344,19 @@ const ACTIONS_UI = {
     toast(t('deleted'));
     location.hash = '#/global';
   },
-  globalAddItem(b) { globalItemDialog(S.global.id, b.dataset.kind); },
+  globalAddItem(b) {
+    if (b.dataset.kind === 'camera') cameraDialog(null, null, null, S.global.id);
+    else if (b.dataset.kind === 'widget') widgetDialog({ pid: S.global.id });
+    else globalItemDialog(S.global.id, b.dataset.kind);
+  },
   globalEditItem(b) {
     const it = S.global.items.find(x => String(x.id) === b.dataset.iid);
-    if (it) globalItemDialog(S.global.id, it.kind, it);
+    if (!it) return;
+    if (it.kind === 'camera') cameraDialog(null, it, null, S.global.id);
+    else if (isWidget(it)) widgetDialog({ pid: S.global.id, item: it });
+    else globalItemDialog(S.global.id, it.kind, it);
   },
+  addCamera(b) { cameraDialog(b.dataset.id); },
   async globalDeleteItem(b) {
     if (!await confirmBox(t('confirmDeleteItem', { name: esc(b.dataset.name) }))) return;
     await api(`/api/global-playlists/${S.global.id}/items/${b.dataset.iid}`, { method: 'DELETE' });
@@ -4370,6 +4469,7 @@ const ACTIONS_UI = {
     const a = S.detail.assets.find(x => String(x.id) === b.dataset.item);
     if (a && isTag(a.kind)) collectionDialog(b.dataset.id, a);
     else if (a && a.kind === 'camera') cameraDialog(b.dataset.id, a);
+    else if (a && isWidget(a)) widgetDialog({ deviceId: b.dataset.id, item: a });
     else if (a) assetDialog(b.dataset.id, ['image', 'video'].includes(a.kind) ? a.kind : 'web', a);
   },
   async deleteAsset(b) {
@@ -4963,3 +5063,641 @@ VIEWS.wall = {
     }).join('') || `<div class="card">${emptyState('wall', t('wallEmpty'), t('wallHint'))}</div>`);
   },
 };
+
+// ================================================================== emergency messages, approvals, library, proof
+// of play, what plays when, widgets, device labels and tables
+
+// ---------- emergency message: a bar on every page while one runs
+
+function renderTakeoverBar() {
+  const el = $('#takeoverBar');
+  if (!el) return;
+  patch(el, (S.takeovers || []).map(x => `<div class="takeover-bar lvl-${esc(x.level)}">${icon('takeover')}<b>${esc(x.title)}</b>
+    <span>${t('takeoverOnN', { n: x.devices })}${x.until ? ' · ' + t('takeoverUntil', { time: clock(x.until) }) : ' · ' + t('takeoverUntilEnded')}</span><span class="grow"></span>
+    <a class="btn sm" href="#/takeover">${t('open')}</a>${can('control') ? `<button class="btn sm" data-do="takeoverEnd" data-tid="${x.id}">${icon('x')}${t('takeoverEnd')}</button>` : ''}</div>`).join(''));
+}
+
+const TAKEOVER_MINUTES = [15, 30, 60, 120, 240, 480, 0];
+VIEWS.takeover = {
+  mount(root) {
+    setTitle(t('nav_takeover'));
+    const locs = orgNames('locations'), groups = orgNames('groups');
+    root.innerHTML = `<div class="grid two takeover-grid">
+      <section class="card"><h2>${t('takeoverNew')}</h2><p class="muted">${t('takeoverHint')}</p>
+      <form id="toForm" class="form">
+        <label>${t('takeoverTitle')}<input name="title" maxlength="200" placeholder="${esc(t('takeoverTitlePlaceholder'))}" required></label>
+        <label>${t('takeoverMessage')}<textarea name="message" rows="4" maxlength="2000" placeholder="${esc(t('takeoverMessagePlaceholder'))}"></textarea></label>
+        <div class="row2"><label>${t('takeoverLevel')}<select name="level">${['critical', 'warning', 'info'].map(l => `<option value="${l}">${t('takeoverLevel_' + l)}</option>`).join('')}</select></label>
+        <label>${t('takeoverDuration')}<select name="minutes">${TAKEOVER_MINUTES.map(m => `<option value="${m}" ${m === 60 ? 'selected' : ''}>${m ? (m < 60 ? t('minutesN', { n: m }) : t('hoursN', { n: m / 60 })) : t('takeoverUntilEnded')}</option>`).join('')}</select></label></div>
+        <div class="radios"><label class="check"><input type="radio" name="scope" value="all" checked>${t('takeoverAll')}</label><label class="check"><input type="radio" name="scope" value="pick">${t('takeoverPick')}</label></div>
+        <div id="toPick" hidden>
+          ${locs.length ? `<h3>${t('locations')}</h3><div class="chip-picks">${locs.map(x => `<label class="check chip-pick"><input type="checkbox" name="loc:${esc(x)}">${icon('location')}${esc(x)}</label>`).join('')}</div>` : ''}
+          ${groups.length ? `<h3>${t('groups')}</h3><div class="chip-picks">${groups.map(x => `<label class="check chip-pick"><input type="checkbox" name="grp:${esc(x)}">${icon('group')}${esc(x)}</label>`).join('')}</div>` : ''}
+          <h3>${t('nav_devices')}</h3>${targetPicker(null, [], d => canOn(d, 'control'))}</div>
+        <div class="form-actions start"><button class="btn danger big">${icon('takeover')}${t('takeoverStart')}</button></div>
+      </form></section>
+      <section class="card"><h2>${t('preview')}</h2><div class="takeover-preview lvl-critical" id="toPrev"><small></small><b></b><p></p><footer><span></span><span></span></footer></div>
+      <p class="muted">${t('takeoverOldNodes')}</p></section></div>
+      <section class="card flush"><div class="toolbar"><h2 class="grow">${t('takeoverHistory')}</h2></div><div id="toList"><div class="empty">…</div></div></section>`;
+    const form = $('#toForm', root);
+    bindTargetPicker(form);
+    const prev = () => {
+      const box = $('#toPrev', root), lvl = form.level.value;
+      box.className = 'takeover-preview lvl-' + lvl;
+      $('small', box).textContent = t('takeoverLevel_' + lvl).toUpperCase();
+      $('b', box).textContent = form.title.value || t('takeoverTitlePlaceholder');
+      $('p', box).textContent = form.message.value;
+      const now = new Date();
+      $$('footer span', box)[0].textContent = now.toLocaleDateString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+      $$('footer span', box)[1].textContent = now.toLocaleTimeString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
+    };
+    form.addEventListener('input', prev);
+    form.addEventListener('change', () => { $('#toPick', root).hidden = form.scope.value !== 'pick'; prev(); });
+    prev();
+    form.onsubmit = async e => {
+      e.preventDefault();
+      const data = Object.fromEntries(new FormData(form));
+      const targets = data.scope === 'all' ? { all: true } : {
+        locations: Object.keys(data).filter(k => k.startsWith('loc:')).map(k => k.slice(4)),
+        groups: Object.keys(data).filter(k => k.startsWith('grp:')).map(k => k.slice(4)), devices: pickedTargets(data),
+      };
+      const n = data.scope === 'all' ? S.devices.filter(d => canOn(d, 'control')).length : null;
+      if (!await confirmBox(t('takeoverConfirm', { n: n ?? '…' }), true, t('takeoverStart'))) return;
+      try {
+        const r = await api('/api/takeovers', { method: 'POST', json: { title: data.title, message: data.message, level: data.level, minutes: Number(data.minutes), targets } });
+        const old = r.devices.filter(x => x.how !== 'takeover').length;
+        toast(t('takeoverStarted', { n: r.devices.length }));
+        if (old) toast(t('takeoverFallback', { n: old }), 'warn');
+        form.reset();
+        prev();
+        await tick();
+        this.load(root);
+      } catch (err) { toast(errText(err), 'err'); }
+    };
+    this.load(root);
+  },
+  async load(root) {
+    const list = await api('/api/takeovers').catch(() => []);
+    const el = $('#toList', root);
+    if (!el) return;
+    patch(el, list.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>${t('takeoverTitle')}</th><th>${t('time')}</th><th>${t('nav_devices')}</th><th>${t('state')}</th><th></th></tr></thead><tbody>
+      ${list.map(x => `<tr><td><span class="lvl-dot lvl-${esc(x.level)}"></span><b>${esc(x.title || '—')}</b><br><small class="muted">${esc((x.message || '').slice(0, 140))}</small></td>
+        <td class="nowrap">${dt(x.created)}<br><small class="muted">${esc(x.username)}</small></td>
+        <td>${t('nDevices', { n: x.devices.length })}${x.devices.some(d => d.how === 'notify') ? `<br><small class="muted">${t('takeoverAsNotify', { n: x.devices.filter(d => d.how === 'notify').length })}</small>` : ''}</td>
+        <td>${x.active ? `<span class="tag bad">${t('takeoverActive')}</span>${x.until ? `<br><small class="muted">${t('takeoverUntil', { time: clock(x.until) })}</small>` : ''}` : `<span class="tag">${t('takeoverEnded')}</span>${x.ended_by ? `<br><small class="muted">${esc(x.ended_by)}</small>` : ''}`}</td>
+        <td>${x.active && can('control') ? `<button class="btn sm" data-do="takeoverEnd" data-tid="${x.id}">${t('takeoverEnd')}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`
+      : emptyState('takeover', t('takeoverNone'), t('takeoverNoneHint')));
+  },
+};
+
+// ---------- approvals
+
+VIEWS.approvals = {
+  mount(root) {
+    setTitle(t('nav_approvals'));
+    root.innerHTML = `<div id="apSet"></div><div id="apPending"><div class="card empty">…</div></div><div id="apDone"></div>`;
+    this.load(root);
+  },
+  async load(root) {
+    const [pending, done] = await Promise.all([api('/api/approvals'), api('/api/approvals?state=done')]).catch(() => [null, null]);
+    if (!pending || !$('#apPending', root)) return;
+    S.approvalEnabled = pending.enabled;
+    patch($('#apSet', root), canAll('settings') ? `<section class="card"><div class="card-head"><h2>${t('approvalSetting')}</h2>
+      <label class="switch-row"><input type="checkbox" id="apToggle" ${pending.enabled ? 'checked' : ''}><span>${pending.enabled ? t('on') : t('off')}</span></label></div>
+      <p class="muted">${t('approvalSettingHint')}</p></section>` : pending.enabled ? '' : `<div class="note">${t('approvalOff')}</div>`);
+    const tg = $('#apToggle', root);
+    if (tg) tg.onchange = async () => {
+      try { await api('/api/approvals/settings', { method: 'PUT', json: { enabled: tg.checked } }); toast(t('saved')); await tick(); this.load(root); } catch (e) { toast(errText(e), 'err'); }
+    };
+    patch($('#apPending', root), `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('approvalPending')} <span class="muted">(${pending.approvals.length})</span></h2></div>
+      ${pending.approvals.map(a => `<div class="approval">
+        <div class="approval-head"><div><b><a href="#/global/${a.playlist_id}">${esc(a.playlist)}</a></b> <span class="tag">${t('mode_' + a.mode)}</span>
+          <br><small class="muted">${t('approvalBy', { user: esc(a.username), time: dt(a.created) })}</small></div>
+          <div class="approval-actions">${a.can_decide ? `<button class="btn primary sm" data-do="approvalApprove" data-aid="${a.id}">${icon('check')}${t('approve')}</button>
+            <button class="btn sm" data-do="approvalReject" data-aid="${a.id}">${icon('x')}${t('reject')}</button>` : ''}
+            ${a.mine ? `<button class="btn sm ghost" data-do="approvalCancel" data-aid="${a.id}">${t('cancelRequest')}</button>` : ''}</div></div>
+        ${a.note ? `<p class="approval-note">${esc(a.note)}</p>` : ''}
+        <div class="approval-body"><div><h3>${t('approvalItems', { n: a.items.length })}</h3><ol class="mini-list">${a.items.map(it => `<li>${isWidget(it) ? icon('widget') : kindIcon(it.kind)}<span>${esc(it.name)}</span><small class="muted">${it.duration ? dur(it.duration) : ''}</small></li>`).join('')}</ol></div>
+        <div><h3>${t('approvalTargets', { n: a.targets.length })}</h3><div class="chips">${a.targets.map(d => `<span>${esc(d.name)}</span>`).join('')}</div></div></div></div>`).join('')
+        || `<div class="empty">${emptyState('approvals', t('approvalNone'), pending.enabled ? t('approvalNoneHint') : t('approvalOff'))}</div>`}</section>`);
+    patch($('#apDone', root), done && done.approvals.length ? `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('approvalDecided')}</h2></div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>${t('nav_global')}</th><th>${t('approvalRequestedBy')}</th><th>${t('result')}</th><th>${t('approvalComment')}</th></tr></thead><tbody>
+      ${done.approvals.map(a => `<tr><td><b>${esc(a.playlist)}</b><br><small class="muted">${t('nDevices', { n: a.targets.length })} · ${t('mode_' + a.mode)}</small></td>
+        <td>${esc(a.username)}<br><small class="muted">${dt(a.created)}</small></td>
+        <td><span class="tag ${a.state === 'approved' ? 'ok' : a.state === 'rejected' ? 'bad' : ''}">${t('approval_' + a.state)}</span><br><small class="muted">${esc(a.decided_by)} · ${dt(a.decided)}</small></td>
+        <td>${esc(a.comment || '')}</td></tr>`).join('')}</tbody></table></div></section>` : '');
+  },
+};
+
+// ---------- media library
+
+VIEWS.library = {
+  mount(root) {
+    setTitle(t('nav_library'));
+    root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('nav_library')}</h2>
+      <input id="libQ" type="search" placeholder="${esc(t('search'))}"><select id="libKind"><option value="">${t('libraryAll')}</option><option value="image">${t('kind_image')}</option><option value="video">${t('kind_video')}</option></select>
+      ${can('content') ? `<label class="btn primary">${icon('upload')}${t('libraryUpload')}<input type="file" id="libUp" accept="image/*,video/*" multiple hidden></label>` : ''}</div>
+      <p class="muted card-intro">${t('libraryHint')}</p><div class="upload-prog" id="libProg" hidden><i></i></div><div class="lib-grid" id="libGrid"><div class="empty">…</div></div></section>`;
+    $('#libQ', root).oninput = () => this.draw(root);
+    $('#libKind', root).onchange = () => this.draw(root);
+    const up = $('#libUp', root);
+    if (up) up.onchange = async () => {
+      const prog = $('#libProg', root);
+      prog.hidden = false;
+      try {
+        for (const [i, file] of [...up.files].entries()) {
+          const r = await uploadFile(file, x => { $('i', prog).style.width = ((i + x) / up.files.length * 100) + '%'; });
+          await api('/api/library/' + r.id, { method: 'POST', json: {} });
+        }
+        toast(t('saved'));
+      } catch (e) { toast(errText(e), 'err'); }
+      prog.hidden = true;
+      up.value = '';
+      this.load(root);
+    };
+    this.load(root);
+  },
+  async load(root) {
+    S.library = await api('/api/library').catch(() => []);
+    this.draw(root);
+  },
+  draw(root) {
+    const grid = $('#libGrid', root);
+    if (!grid) return;
+    const q = ($('#libQ', root).value || '').toLowerCase(), kind = $('#libKind', root).value;
+    const list = (S.library || []).filter(x => (!kind || x.kind === kind) && (!q || x.name.toLowerCase().includes(q)));
+    patch(grid, list.map(x => `<div class="lib-card">
+      <div class="lib-thumb" data-thumb="${esc(x.id)}" data-kind="${x.kind}">${x.kind === 'video' ? icon('video') : icon('image')}</div>
+      <div class="lib-meta"><b title="${esc(x.name)}">${esc(x.name)}</b><small class="muted">${t('kind_' + x.kind)} · ${fmtSize(x.size)} · ${dt(x.created)}</small>
+        <div class="lib-usage">${x.usage.length ? x.usage.map(u => u.type === 'global' ? `<a class="tag info" href="#/global/${u.id}">${icon('global')}${esc(u.name)}</a>` : `<a class="tag" href="#/templates/${u.id}">${icon('templates')}${esc(u.name)}</a>`).join('') : `<span class="tag">${t('libraryUnused')}</span>`}</div></div>
+      ${can('content') ? `<div class="lib-actions"><button class="icon-btn" title="${t('libraryUse')}" data-do="libUse" data-fid="${esc(x.id)}">${icon('plus')}</button>
+        <button class="icon-btn" title="${t('rename')}" data-do="libRename" data-fid="${esc(x.id)}">${icon('edit')}</button>
+        <button class="icon-btn" title="${t('libraryReplace')}" data-do="libReplace" data-fid="${esc(x.id)}">${icon('refresh')}</button>
+        <button class="icon-btn danger" title="${x.usage.length ? t('libraryInUse') : t('delete')}" data-do="libDelete" data-fid="${esc(x.id)}" ${x.usage.length ? 'disabled' : ''}>${icon('trash')}</button></div>` : ''}</div>`).join('')
+      || emptyState('library', t('libraryEmpty'), t('libraryHint')));
+    $$('[data-thumb]', grid).forEach(el => libThumb(el));
+  },
+};
+S.thumbs = {};
+async function libThumb(el) {
+  const id = el.dataset.thumb;
+  if (!S.thumbs[id]) {
+    S.thumbs[id] = fetch('/api/library/' + id + '/file', { headers: { Authorization: 'Bearer ' + S.token } })
+      .then(r => (r.ok ? r.blob() : null)).then(b => (b ? URL.createObjectURL(b) : null)).catch(() => null);
+  }
+  const url = await S.thumbs[id];
+  if (!url || !el.isConnected) return;
+  el.innerHTML = el.dataset.kind === 'video' ? `<video src="${url}" muted preload="metadata"></video>` : `<img src="${url}" alt="">`;
+}
+
+function libReplaceDialog(file) {
+  modal({
+    title: t('libraryReplaceTitle', { name: esc(file.name) }), submit: t('libraryReplace'),
+    body: `<div class="form"><p class="muted">${t('libraryReplaceHint')}</p>
+      <label>${t('file')}<input type="file" name="file" accept="${file.kind}/*" required></label><div class="upload-prog" hidden><i></i></div>
+      ${file.usage.length ? `<p>${t('libraryUsedIn')}</p><div class="chips">${file.usage.map(u => `<span>${esc(u.name)}</span>`).join('')}</div>` : ''}</div>`,
+    onSubmit: async (data, form) => {
+      const pr = $('.upload-prog', form);
+      pr.hidden = false;
+      const up = await uploadFile(form.file.files[0], x => { $('i', pr).style.width = (x * 100) + '%'; });
+      const r = await api(`/api/library/${file.id}/replace`, { method: 'POST', json: { file_id: up.id } });
+      toast(t('libraryReplaced', { n: r.playlists.length }));
+      const again = r.playlists.filter(x => x.last_deployment);
+      if (again.length) setTimeout(() => redeployDialog(again), 50);
+      render();
+    },
+  });
+}
+
+function redeployDialog(list) {
+  modal({
+    title: t('redeployTitle'), submit: t('deploy'),
+    body: `<div class="form"><p class="muted">${t('redeployHint')}</p>${list.map(x => `<label class="check"><input type="checkbox" name="p:${x.id}" checked><span><b>${esc(x.name)}</b><br>
+      <small class="muted">${t('nDevices', { n: x.last_deployment.targets.length })} · ${t('mode_' + x.last_deployment.mode)} · ${dt(x.last_deployment.created)}</small></span></label>`).join('')}</div>`,
+    onSubmit: async data => {
+      let pending = 0, done = 0;
+      for (const x of list) {
+        if (!data['p:' + x.id]) continue;
+        const r = await api(`/api/global-playlists/${x.id}/deploy`, { method: 'POST', json: { target_ids: x.last_deployment.targets, mode: x.last_deployment.mode } });
+        r.pending_approval ? pending++ : done++;
+      }
+      if (done) toast(t('redeployDone', { n: done }));
+      if (pending) toast(t('approvalRequested'));
+    },
+  });
+}
+
+async function libUseDialog(file) {
+  const lists = await api('/api/global-playlists');
+  modal({
+    title: t('libraryUse'), submit: t('add'),
+    body: `<div class="form"><label>${t('nav_global')}<select name="pid">${lists.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
+      <label>${t('name')}<input name="name" value="${esc(file.name.replace(/\.[^.]+$/, ''))}"></label>
+      <label>${t('durationSec')}<input name="duration" type="number" min="5" value="${file.kind === 'video' ? 30 : 15}"></label></div>`,
+    onSubmit: async data => {
+      if (!data.pid) throw new Error('not_found');
+      await api(`/api/global-playlists/${data.pid}/items`, { method: 'POST', json: { kind: file.kind, file_id: file.id, name: data.name, duration: Number(data.duration || 15) } });
+      toast(t('saved'));
+      render();
+    },
+  });
+}
+
+// ---------- versions of a global playlist and what a deployment changes
+
+async function globalVersions(el, p) {
+  if (!el) return;
+  const list = await api(`/api/global-playlists/${p.id}/versions`).catch(() => []);
+  if (!el.isConnected) return;
+  const note = v => (v.note.startsWith('restore:') ? t('version_restore') : t('version_' + (v.note || 'edit')));
+  patch(el, list.length ? `<section class="card flush"><details class="pver"><summary class="toolbar"><h2 class="grow">${t('versions')} <span class="muted">(${list.length})</span></h2></summary>
+    <ol class="pver-list">${list.map(v => `<li class="${v.current ? 'current' : ''}"><div><b>${dt(v.created)}</b> <small class="muted">${v.username ? esc(v.username) + ' · ' : ''}${esc(note(v))}</small>
+      <br><small class="muted">${t('nItems', { n: v.count })}: ${esc(v.names.join(', '))}${v.count > v.names.length ? '…' : ''}</small></div>
+      <div class="pver-actions">${v.current ? `<span class="tag ok">${t('versionCurrent')}</span>` : `<button class="btn sm ghost" data-do="versionShow" data-vid="${v.id}">${icon('eye')}${t('show')}</button>
+      ${can('content') ? `<button class="btn sm" data-do="versionRestore" data-vid="${v.id}">${icon('restart')}${t('restore')}</button>` : ''}`}</div></li>`).join('')}</ol></details></section>` : '');
+}
+
+function diffHtml(x) {
+  const list = (cls, names) => names.map(n => `<li class="${cls}">${esc(n)}</li>`).join('');
+  return `<div class="diff-dev"><b>${esc(x.name)}</b>${x.online ? '' : ` <small class="muted">${t('offlineQueuedShort')}</small>`}
+    <ul class="diff">${list('add', x.added)}${list('same', x.same)}${list('del', x.removed)}${list('keep', x.kept)}${list('skip', x.skipped)}</ul>
+    ${x.duplicates.length ? `<small class="muted">${t('diffDuplicates', { list: esc(x.duplicates.join(', ')) })}</small>` : ''}
+    ${!x.added.length && !x.removed.length && !x.same.length ? `<small class="muted">${t('diffNothing')}</small>` : ''}</div>`;
+}
+
+// ---------- proof of play
+
+function playsQuery(f) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) if (v) q.set(k, v);
+  return q.toString();
+}
+const isoDay = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+function playsRange(preset) {
+  const today = new Date(), from = new Date();
+  if (preset === 'today') return [isoDay(today), isoDay(today)];
+  if (preset === 'month') { from.setDate(1); return [isoDay(from), isoDay(today)]; }
+  from.setDate(today.getDate() - (preset === '30' ? 29 : 6));
+  return [isoDay(from), isoDay(today)];
+}
+async function downloadAuthed(path, name) {
+  const r = await fetch(path, { headers: { Authorization: 'Bearer ' + S.token } });
+  if (!r.ok) throw new Error(r.statusText);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await r.blob());
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function playsReport(r, by) {
+  const max = Math.max(1, ...r.days.map(d => d.seconds));
+  const cols = by === 'item' ? [t('playsItem'), t('playsCount'), t('playsTime'), t('nav_devices')] : by === 'device' ? [t('device'), t('playsCount'), t('playsTime'), t('playsItems')] : [t('playsDay'), t('playsCount'), t('playsTime'), t('nav_devices')];
+  const cell = x => (by === 'item' ? `<td>${kindIcon(x.kind)} <b>${esc(x.name || '—')}</b></td>` : by === 'device'
+    ? `<td><a href="#/device/${encodeURIComponent(x.device_id)}"><b>${esc(x.name)}</b></a><br><small class="muted">${esc(x.location || '')}</small></td>`
+    : `<td>${new Date(x.day + 'T12:00').toLocaleDateString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB', { weekday: 'short', day: 'numeric', month: 'numeric' })}</td>`);
+  return `<div class="stats plays-stats"><div class="stat"><span>${t('playsCount')}</span><b>${r.total.count.toLocaleString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB')}</b></div><div class="stat"><span>${t('playsTime')}</span><b>${dur(r.total.seconds)}</b></div>
+    <div class="stat"><span>${t('playsItems')}</span><b>${r.total.items}</b></div><div class="stat"><span>${t('playsScreens')}</span><b>${r.total.devices}</b></div></div>
+    ${r.days.length > 1 ? `<div class="plays-chart" role="img" aria-label="${esc(t('playsChart'))}">${r.days.map(d => `<div class="pc-col" title="${esc(d.day)}: ${d.count} × · ${esc(dur(d.seconds))}"><i style="height:${Math.round(d.seconds / max * 100)}%"></i><small>${new Date(d.day + 'T12:00').getDate()}.</small></div>`).join('')}</div>` : ''}
+    <div class="table-wrap"><table class="table"><thead><tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>
+    ${r.rows.map(x => `<tr>${cell(x)}<td>${x.count.toLocaleString(S.lang === 'cs' ? 'cs-CZ' : 'en-GB')}</td><td>${dur(x.seconds)}</td><td>${by === 'device' ? x.items : x.devices}</td></tr>`).join('') || `<tr><td colspan="4">${emptyState('plays', t('playsNone'), t('playsNoneHint'))}</td></tr>`}</tbody></table></div>`;
+}
+
+VIEWS.plays = {
+  mount(root) {
+    setTitle(t('nav_plays'));
+    const [from, to] = playsRange('7');
+    S.playsF = S.playsF || { from, to, by: 'item', location: '', group: '', tag: '', q: '', preset: '7' };
+    const f = S.playsF;
+    root.innerHTML = `<section class="card flush"><div class="toolbar wrap">
+      <div class="seg" id="plPreset">${['today', '7', '30', 'month'].map(x => `<button data-p="${x}" class="${f.preset === x ? 'active' : ''}">${t('playsPreset_' + x)}</button>`).join('')}</div>
+      <input type="date" id="plFrom" value="${f.from}"><input type="date" id="plTo" value="${f.to}">
+      <select id="plLoc">${options(orgNames('locations'), f.location, t('allLocations'))}</select>
+      <select id="plGroup">${options(orgNames('groups'), f.group, t('allGroups'))}</select>
+      ${S.tags.length ? `<select id="plTag">${options(S.tags, f.tag, t('allTags'))}</select>` : ''}
+      <input type="search" id="plQ" placeholder="${esc(t('playsSearch'))}" value="${esc(f.q)}"><span class="grow"></span>
+      <button class="btn sm" id="plCsv">${icon('download')}CSV</button></div>
+      <div class="toolbar"><div class="seg" id="plBy">${['item', 'device', 'day'].map(x => `<button data-by="${x}" class="${f.by === x ? 'active' : ''}">${t('playsBy_' + x)}</button>`).join('')}</div></div>
+      <div id="plOut" class="plays-out"><div class="empty">…</div></div></section>`;
+    const go = () => this.load(root);
+    $('#plPreset', root).onclick = e => { const b = e.target.closest('[data-p]'); if (!b) return; [f.from, f.to] = playsRange(b.dataset.p); f.preset = b.dataset.p; this.mount(root); };
+    $('#plBy', root).onclick = e => { const b = e.target.closest('[data-by]'); if (!b) return; f.by = b.dataset.by; $$('[data-by]', root).forEach(x => x.classList.toggle('active', x === b)); go(); };
+    $('#plFrom', root).onchange = e => { f.from = e.target.value; f.preset = ''; go(); };
+    $('#plTo', root).onchange = e => { f.to = e.target.value; f.preset = ''; go(); };
+    $('#plLoc', root).onchange = e => { f.location = e.target.value; go(); };
+    $('#plGroup', root).onchange = e => { f.group = e.target.value; go(); };
+    if ($('#plTag', root)) $('#plTag', root).onchange = e => { f.tag = e.target.value; go(); };
+    let timer;
+    $('#plQ', root).oninput = e => { f.q = e.target.value; clearTimeout(timer); timer = setTimeout(go, 300); };
+    $('#plCsv', root).onclick = () => downloadAuthed('/api/plays/export.csv?' + playsQuery({ ...f, by: '', preset: '' }), `caracal-plays-${f.from}-${f.to}.csv`).catch(e => toast(errText(e), 'err'));
+    go();
+  },
+  async load(root) {
+    const f = S.playsF, out = $('#plOut', root);
+    try {
+      const r = await api('/api/plays/report?' + playsQuery({ ...f, preset: '' }));
+      if (out.isConnected) patch(out, playsReport(r, f.by));
+    } catch (e) { out.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; }
+  },
+};
+
+async function devicePlays(el, d) {
+  if (el._for === d.id && el._at > Date.now() - 60000) return;
+  el._for = d.id;
+  el._at = Date.now();
+  const [from, to] = playsRange('7');
+  const r = await api('/api/plays/report?' + playsQuery({ device: d.id, from, to, by: 'item' })).catch(() => null);
+  if (!r || !el.isConnected) return;
+  patch(el, `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('playsLast7')}</h2><a class="btn sm" href="#/plays">${t('playsAll')}</a></div>
+    ${d.capabilities.plays === true || r.total.count ? playsReport(r, 'item') : `<div class="note">${t('playsNeedUpdate')}</div>`}</section>`);
+}
+
+// ---------- what plays when
+
+const TIMELINE_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#6366f1'];
+const tlColor = id => TIMELINE_COLORS[Math.abs(Number(id) || 0) % TIMELINE_COLORS.length];
+const hhmm = m => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const tlPct = m => (m / 1440 * 100).toFixed(3) + '%';
+function tlTrack(row, nowMinute = null) {
+  const seg = (s, cls, style, title, label = '') => `<i class="${cls}" style="left:${tlPct(s.start)};width:${tlPct(s.end - s.start)};${style}" title="${esc(title)}">${label}</i>`;
+  return `<div class="wk-track">
+    ${row.playlists.map(p => seg(p, 'wk-pl', `background:${tlColor(p.playlist_id)}`, `${hhmm(p.start)}–${hhmm(p.end)} · ${p.name}`, p.end - p.start > 90 ? `<span>${esc(p.name)}</span>` : '')).join('')}
+    ${row.playlists.length ? '' : `<em class="wk-own">${row.schedule ? t('tlDefault') : t('tlNoSchedule')}</em>`}
+    ${row.screen_off.map(s => seg(s, 'wk-off', '', `${hhmm(s.start)}–${hhmm(s.end)} · ${t('screenOff')}`)).join('')}
+    ${row.takeovers.map(s => seg(s, 'wk-alert', '', `${hhmm(s.start)}–${hhmm(s.end)} · ${s.title}`)).join('')}
+    ${row.tasks.map(x => `<b class="wk-task" style="left:${tlPct(x.minute)}" title="${esc(hhmm(x.minute) + ' · ' + x.name + ' (' + t('task_' + x.action) + ')')}"></b>`).join('')}
+    ${nowMinute !== null ? `<b class="wk-now" style="left:${tlPct(nowMinute)}"></b>` : ''}</div>
+    ${row.items.length ? `<div class="wk-items">${row.items.map(it => `<i style="left:${tlPct(it.start)};width:${tlPct(Math.max(4, it.end - it.start))}" title="${esc(`${hhmm(it.start)}–${hhmm(it.end)} · ${it.name}${it.from === 'device' ? '' : ' (' + it.from + ')'}`)}"><span>${esc(it.name)}</span></i>`).join('')}</div>` : ''}`;
+}
+const tlRuler = () => `<div class="wk-ruler">${[0, 3, 6, 9, 12, 15, 18, 21].map(h => `<span style="left:${tlPct(h * 60)}">${h}:00</span>`).join('')}</div>`;
+function tlLegend(days) {
+  const seen = new Map();
+  days.forEach(d => d.devices.forEach(r => r.playlists.forEach(p => seen.set(p.playlist_id, p.name))));
+  return `<div class="wk-legend">${[...seen].map(([id, name]) => `<span><i style="background:${tlColor(id)}"></i>${esc(name)}</span>`).join('')}
+    <span><i class="wk-off-sw"></i>${t('screenOff')}</span><span><i class="wk-task-sw"></i>${t('tlTask')}</span><span><i class="wk-alert-sw"></i>${t('nav_takeover')}</span><span><i class="wk-item-sw"></i>${t('tlValidity')}</span></div>`;
+}
+function nowMinuteOf(r, date) {
+  const [d, hm] = r.now.split(' ');
+  return d === date ? Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3)) : null;
+}
+
+VIEWS.timeline = {
+  mount(root) {
+    setTitle(t('nav_timeline'));
+    S.tlF = S.tlF || { date: isoDay(new Date()), location: '', group: '' };
+    const f = S.tlF;
+    root.innerHTML = `<section class="card flush"><div class="toolbar wrap"><button class="icon-btn" id="tlPrev">${icon('back')}</button>
+      <input type="date" id="tlDate" value="${f.date}"><button class="icon-btn" id="tlNext" style="transform:scaleX(-1)">${icon('back')}</button>
+      <button class="btn sm ghost" id="tlToday">${t('today')}</button>
+      <select id="tlLoc">${options(orgNames('locations'), f.location, t('allLocations'))}</select>
+      <select id="tlGroup">${options(orgNames('groups'), f.group, t('allGroups'))}</select><span class="grow muted" id="tlTz"></span></div>
+      <p class="muted card-intro">${t('tlHint')}</p><div id="tlOut"><div class="empty">…</div></div></section>`;
+    const shift = n => { const d = new Date(f.date + 'T12:00'); d.setDate(d.getDate() + n); f.date = isoDay(d); $('#tlDate', root).value = f.date; this.load(root); };
+    $('#tlPrev', root).onclick = () => shift(-1);
+    $('#tlNext', root).onclick = () => shift(1);
+    $('#tlToday', root).onclick = () => { f.date = isoDay(new Date()); $('#tlDate', root).value = f.date; this.load(root); };
+    $('#tlDate', root).onchange = e => { f.date = e.target.value; this.load(root); };
+    $('#tlLoc', root).onchange = e => { f.location = e.target.value; this.load(root); };
+    $('#tlGroup', root).onchange = e => { f.group = e.target.value; this.load(root); };
+    this.load(root);
+  },
+  async load(root) {
+    const f = S.tlF, out = $('#tlOut', root);
+    const r = await api('/api/timeline?' + playsQuery(f)).catch(e => ({ error: errText(e) }));
+    if (!out.isConnected) return;
+    if (r.error) { out.innerHTML = `<div class="note warn">${esc(r.error)}</div>`; return; }
+    $('#tlTz', root).textContent = t('tlTimezone', { tz: r.timezone });
+    const day = r.days[0], now = nowMinuteOf(r, day.date);
+    patch(out, day.devices.length ? `${tlLegend(r.days)}<div class="wk"><div class="wk-row wk-head"><span></span>${tlRuler()}</div>
+      ${day.devices.map(x => `<div class="wk-row"><a class="wk-label" href="#/device/${encodeURIComponent(x.id)}/timeline"><b>${esc(x.name)}</b><small class="muted">${esc(x.schedule ? x.schedule.name : t('tlNoSchedule'))}</small></a><div>${tlTrack(x, now)}</div></div>`).join('')}</div>`
+      : emptyState('timeline', t('noMatch'), ''));
+  },
+};
+
+async function deviceTimeline(el, d) {
+  if (el._for === d.id && el._at > Date.now() - 60000) return;
+  el._for = d.id;
+  el._at = Date.now();
+  const r = await api('/api/timeline?' + playsQuery({ device: d.id, days: 7 })).catch(() => null);
+  if (!r || !el.isConnected) return;
+  const loc = S.lang === 'cs' ? 'cs-CZ' : 'en-GB';
+  patch(el, `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('tlWeek')}</h2><span class="muted">${t('tlTimezone', { tz: r.timezone })}</span><a class="btn sm" href="#/schedule">${t('nav_schedule')}</a></div>
+    ${tlLegend(r.days)}<div class="wk"><div class="wk-row wk-head"><span></span>${tlRuler()}</div>
+    ${r.days.map(day => { const x = day.devices[0]; return x ? `<div class="wk-row"><span class="wk-label"><b>${new Date(day.date + 'T12:00').toLocaleDateString(loc, { weekday: 'long' })}</b><small class="muted">${new Date(day.date + 'T12:00').toLocaleDateString(loc, { day: 'numeric', month: 'numeric' })}</small></span><div>${tlTrack(x, nowMinuteOf(r, day.date))}</div></div>` : ''; }).join('')}</div></section>`);
+}
+
+// ---------- widgets
+
+const WIDGET_TYPES = ['clock', 'weather', 'rss', 'table', 'text'];
+const WIDGET_PREFIX = 'caracal-widget:';
+function widgetParams(src) {
+  src = String(src || '');
+  if (src.startsWith(WIDGET_PREFIX)) return new URLSearchParams(src.slice(WIDGET_PREFIX.length));
+  const i = src.indexOf('/widgets?');
+  return i >= 0 ? new URLSearchParams(src.slice(i + 9)) : null;
+}
+const isWidget = a => !!a && a.kind === 'web' && !!widgetParams(a.source) && !!widgetParams(a.source).get('type');
+const widgetLabel = src => { const q = widgetParams(src); return t('widget') + ' · ' + t('widget_' + (q && q.get('type') || 'text')); };
+
+// the preview frame asks the page for feeds (weather, RSS, CSV); Fleet reads them with the user's sign-in
+window.addEventListener('message', async e => {
+  if (e.origin !== location.origin || !e.data || !e.data.caracalFeed || !e.source) return;
+  try {
+    const r = await api('/api/widgets/feed?url=' + encodeURIComponent(e.data.url));
+    e.source.postMessage({ caracalFeed: e.data.caracalFeed, text: r.text }, location.origin);
+  } catch (err) { e.source.postMessage({ caracalFeed: e.data.caracalFeed, error: errText(err) }, location.origin); }
+});
+
+// deviceId: a device's playlist (also more devices through "also add"), pid: a global playlist; item: editing
+function widgetDialog({ deviceId = null, pid = null, item = null }) {
+  const q = item ? widgetParams(item.source) : new URLSearchParams({ type: 'clock' });
+  const v = k => esc(q.get(k) || '');
+  const type0 = q.get('type') || 'clock';
+  modal({
+    title: item ? t('widgetEdit') : t('widgetAdd'), wide: true, submit: item ? t('save') : t('add'),
+    body: `<div class="widget-dlg"><div class="form">
+      <div class="widget-types">${WIDGET_TYPES.map(x => `<label class="wt"><input type="radio" name="type" value="${x}" ${x === type0 ? 'checked' : ''}><span>${t('widget_' + x)}</span><small>${t('widgetHint_' + x)}</small></label>`).join('')}</div>
+      <div class="row2"><label>${t('name')}<input name="name" value="${esc(item ? item.name : '')}" placeholder="${esc(t('widget_' + type0))}"></label>
+      <label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(item ? item.duration : 20)}" required></label></div>
+      <label>${t('widgetTitle')}<input name="title" value="${v('title')}" maxlength="120"></label>
+      <div data-w="clock"><label class="check"><input type="checkbox" name="seconds" ${q.get('seconds') === '1' ? 'checked' : ''}>${t('widgetSeconds')}</label>
+        <label>${t('widgetTz')}<input name="tz" value="${v('tz')}" placeholder="Europe/Prague"><small class="muted">${t('widgetTzHint')}</small></label></div>
+      <div data-w="weather" class="row2"><label>${t('widgetCity')}<input name="city" value="${v('city')}" placeholder="Praha"></label>
+        <label>${t('widgetDays')}<input name="days" type="number" min="0" max="6" value="${v('days') || 4}"></label></div>
+      <div data-w="rss"><label>${t('widgetRss')}<input name="url_rss" type="url" value="${q.get('type') === 'rss' ? v('url') : ''}" placeholder="https://www.example.com/rss"></label>
+        <label>${t('widgetCount')}<input name="count" type="number" min="1" max="12" value="${v('count') || 6}"></label></div>
+      <div data-w="table"><label>${t('widgetCsv')}<input name="url_table" type="url" value="${q.get('type') === 'table' ? v('url') : ''}" placeholder="https://docs.google.com/spreadsheets/d/…"><small class="muted">${t('widgetCsvHint')}</small></label>
+        <div class="row2"><label>${t('widgetRows')}<input name="rows" type="number" min="3" max="30" value="${v('rows') || 10}"></label><label>${t('widgetPageSeconds')}<input name="page_seconds" type="number" min="4" max="120" value="${v('page_seconds') || 10}"></label></div></div>
+      <div data-w="text"><label>${t('widgetText')}<textarea name="text" rows="4" maxlength="1500">${v('text')}</textarea></label>
+        <label class="check"><input type="checkbox" name="align" ${q.get('align') === 'center' ? 'checked' : ''}>${t('widgetCenter')}</label></div>
+      <div class="row2"><label>${t('widgetTheme')}<select name="theme"><option value="dark">${t('widgetDark')}</option><option value="light" ${q.get('theme') === 'light' ? 'selected' : ''}>${t('widgetLight')}</option></select></label>
+        <label>${t('widgetAccent')}<input name="accent" type="color" value="#${(q.get('accent') || 'f26b1d').replace(/[^0-9a-f]/gi, '')}"></label></div>
+      ${deviceId && !item ? `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], x => (x.capabilities || {}).widgets === true)}</details>` : ''}
+      ${!deviceId && !item ? `<small class="muted">${t('widgetGlobalHint')}</small>` : ''}</div>
+      <div class="widget-preview"><div class="wp-frame"><iframe id="wpFrame" title="${esc(t('preview'))}" sandbox="allow-scripts allow-same-origin"></iframe></div><small class="muted">${t('widgetPreviewHint')}</small></div></div>`,
+    onOpen: form => {
+      bindTargetPicker(form);
+      let timer;
+      const sync = () => {
+        const type = form.type.value;
+        $$('[data-w]', form).forEach(el => { el.hidden = el.dataset.w !== type; });
+        form.name.placeholder = t('widget_' + type);
+        clearTimeout(timer);
+        timer = setTimeout(() => { $('#wpFrame', form).src = '/static/widgets.html?preview=1&' + widgetQuery(Object.fromEntries(new FormData(form))); }, 500);
+      };
+      form.addEventListener('input', sync);
+      form.addEventListener('change', sync);
+      sync();
+    },
+    onSubmit: async data => {
+      const source = WIDGET_PREFIX + widgetQuery(data);
+      const payload = { name: (data.name || '').trim() || t('widget_' + data.type), duration: Number(data.duration || 20), source };
+      if (pid) {
+        await api(item ? `/api/global-playlists/${pid}/items/${item.id}` : `/api/global-playlists/${pid}/items`, { method: item ? 'PATCH' : 'POST', json: { kind: 'web', ...payload, scale: 1 } });
+        toast(t('saved'));
+        return render();
+      }
+      if (item) return sendCommand(deviceId, 'update_asset', { id: item.id, ...payload });
+      const ids = [deviceId, ...pickedTargets(data)];
+      return ids.length === 1 ? sendCommand(ids[0], 'add_web', { ...payload, scale: 1 }) : sendBulk(ids, 'add_web', { ...payload, scale: 1 });
+    },
+  });
+}
+function widgetQuery(d) {
+  const q = new URLSearchParams({ type: d.type, lang: S.lang });
+  const put = (k, v) => { if (v !== undefined && v !== null && String(v).trim() !== '') q.set(k, String(v).trim()); };
+  put('title', d.title);
+  put('theme', d.theme === 'light' ? 'light' : '');
+  put('accent', (d.accent || '').replace('#', '') === 'f26b1d' ? '' : (d.accent || '').replace('#', ''));
+  if (d.type === 'clock') { put('seconds', d.seconds ? '1' : ''); put('tz', d.tz); }
+  if (d.type === 'weather') { put('city', d.city); put('days', d.days); }
+  if (d.type === 'rss') { put('url', d.url_rss); put('count', d.count); }
+  if (d.type === 'table') { put('url', d.url_table); put('rows', d.rows); put('page_seconds', d.page_seconds); }
+  if (d.type === 'text') { put('text', d.text); put('align', d.align ? 'center' : ''); }
+  return q.toString();
+}
+
+// ---------- device labels and tables
+
+const tagChips = d => ((d.tags || []).length ? `<span class="tag-chips">${d.tags.map(x => `<span class="tchip">${esc(x)}</span>`).join('')}</span>` : '');
+
+function bulkTagsDialog(ids) {
+  modal({
+    title: t('tagsEdit'), submit: t('save'),
+    body: `<div class="form"><p class="muted">${t('selectedN', { n: ids.length })}</p>
+      <label>${t('tagsAdd')}<input name="add" list="dlTags2" placeholder="${esc(t('tagsPlaceholder'))}"></label>
+      <label>${t('tagsRemove')}<input name="remove" list="dlTags2"></label><datalist id="dlTags2">${S.tags.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+      ${S.tags.length ? `<div class="chips">${S.tags.map(x => `<span class="tchip">${esc(x)}</span>`).join('')}</div>` : ''}</div>`,
+    onSubmit: async data => {
+      await api('/api/devices/tags', { method: 'POST', json: { device_ids: ids, add: data.add, remove: data.remove } });
+      toast(t('saved'));
+      await tick();
+    },
+  });
+}
+
+function importDialog() {
+  let rows = null;
+  modal({
+    title: t('csvImport'), wide: true, submit: t('csvApply'),
+    body: `<div class="form"><p class="muted">${t('csvImportHelp')}</p>
+      <pre class="code">id;name;location;group;tags;notes\nCRCL-1A2B3C4D;Recepce;Praha;Vstupy;lobby, 4K;</pre>
+      <label>${t('file')}<input type="file" name="file" accept=".csv,text/csv,text/plain"></label>
+      <label>${t('csvPaste')}<textarea name="csv" rows="6" spellcheck="false"></textarea></label>
+      <div class="form-actions start"><button type="button" class="btn" id="csvCheck">${icon('eye')}${t('csvCheck')}</button></div>
+      <div id="csvOut"></div></div>`,
+    onOpen: form => {
+      form.file.onchange = async () => { if (form.file.files[0]) { form.csv.value = await form.file.files[0].text(); } };
+      $('#csvCheck', form).onclick = async () => {
+        const out = $('#csvOut', form);
+        try {
+          const r = await api('/api/devices/import', { method: 'POST', json: { csv: form.csv.value, apply: false } });
+          rows = r.rows;
+          out.innerHTML = `<div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>${t('device')}</th><th>${t('csvChanges')}</th></tr></thead><tbody>
+            ${r.rows.map(x => `<tr class="${x.error ? 'row-err' : ''}"><td>${x.line}</td><td>${esc(x.device || x.key)}</td><td>${x.error ? `<span class="tag bad">${esc(errText(new Error(x.error)))}</span>`
+              : Object.keys(x.changes).length ? Object.entries(x.changes).map(([k, c]) => `<div><small class="muted">${t('csvCol_' + k)}:</small> <s>${esc(Array.isArray(c.from) ? c.from.join(', ') : c.from || '—')}</s> → <b>${esc(Array.isArray(c.to) ? c.to.join(', ') : c.to || '—')}</b></div>`).join('') : `<span class="muted">${t('csvNoChange')}</span>`}</td></tr>`).join('')}</tbody></table></div>`;
+        } catch (e) { out.innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; }
+      };
+    },
+    onSubmit: async data => {
+      if (!rows) throw new Error('csv_check_first');
+      const r = await api('/api/devices/import', { method: 'POST', json: { csv: data.csv, apply: true } });
+      toast(t('csvApplied', { n: r.rows.filter(x => !x.error && Object.keys(x.changes || {}).length).length }));
+      await tick();
+    },
+  });
+}
+
+Object.assign(ACTIONS_UI, {
+  async takeoverEnd(b) {
+    if (!await confirmBox(t('takeoverEndConfirm'), false, t('takeoverEnd'))) return;
+    await api(`/api/takeovers/${b.dataset.tid}/end`, { method: 'POST' });
+    toast(t('takeoverEndedToast'));
+    await tick();
+    if (S.route.view === 'takeover') VIEWS.takeover.load($('#view'));
+  },
+  async approvalApprove(b) {
+    modal({
+      title: t('approve'), submit: t('approve'), body: `<div class="form"><label>${t('approvalComment')}<input name="comment" maxlength="500"></label></div>`,
+      onSubmit: async data => {
+        const r = await api(`/api/approvals/${b.dataset.aid}/approve`, { method: 'POST', json: { comment: data.comment } });
+        toast(t('approvalApproved'));
+        if ((r.items_unsupported || []).length) toast(t('deployCameraSkipped', { list: r.items_unsupported.join(', ') }), 'warn');
+        await tick();
+        VIEWS.approvals.load($('#view'));
+      },
+    });
+  },
+  async approvalReject(b) {
+    modal({
+      title: t('reject'), submit: t('reject'), danger: true, body: `<div class="form"><label>${t('approvalReason')}<input name="comment" maxlength="500" required></label></div>`,
+      onSubmit: async data => {
+        await api(`/api/approvals/${b.dataset.aid}/reject`, { method: 'POST', json: { comment: data.comment } });
+        toast(t('approvalRejected'));
+        await tick();
+        VIEWS.approvals.load($('#view'));
+      },
+    });
+  },
+  async approvalCancel(b) {
+    await api(`/api/approvals/${b.dataset.aid}`, { method: 'DELETE' });
+    await tick();
+    VIEWS.approvals.load($('#view'));
+  },
+  libUse(b) { const f = S.library.find(x => x.id === b.dataset.fid); if (f) libUseDialog(f); },
+  libReplace(b) { const f = S.library.find(x => x.id === b.dataset.fid); if (f) libReplaceDialog(f); },
+  libRename(b) {
+    const f = S.library.find(x => x.id === b.dataset.fid);
+    if (!f) return;
+    modal({
+      title: t('rename'), body: `<div class="form"><label>${t('name')}<input name="name" value="${esc(f.name)}" required></label></div>`,
+      onSubmit: async data => { await api('/api/library/' + f.id, { method: 'PATCH', json: { name: data.name } }); VIEWS.library.load($('#view')); },
+    });
+  },
+  async libDelete(b) {
+    const f = S.library.find(x => x.id === b.dataset.fid);
+    if (!f || !await confirmBox(t('confirmDeleteItem', { name: esc(f.name) }))) return;
+    await api('/api/library/' + f.id, { method: 'DELETE' });
+    VIEWS.library.load($('#view'));
+  },
+  async versionShow(b) {
+    const v = await api(`/api/global-playlists/${S.global.id}/versions/${b.dataset.vid}`);
+    const now = S.global.items.map(x => x.name);
+    modal({
+      title: t('versionOf', { time: dt(v.created) }),
+      body: `<p class="muted">${esc(v.username || t('versionSystem'))}</p><ol class="mini-list">${v.items.map(it => `<li class="${now.includes(it.name) ? '' : 'diff-del'}">${isWidget(it) ? icon('widget') : kindIcon(it.kind)}<span>${esc(it.name)}</span><small class="muted">${it.duration ? dur(it.duration) : ''}</small></li>`).join('') || `<li class="empty">${t('playlistEmpty')}</li>`}</ol>
+        ${S.global.items.filter(x => !v.items.some(y => y.name === x.name)).length ? `<p class="muted">${t('versionNewSince')}: ${esc(S.global.items.filter(x => !v.items.some(y => y.name === x.name)).map(x => x.name).join(', '))}</p>` : ''}`,
+    });
+  },
+  async versionRestore(b) {
+    if (!await confirmBox(t('versionRestoreConfirm'), false, t('restore'))) return;
+    const r = await api(`/api/global-playlists/${S.global.id}/versions/${b.dataset.vid}/restore`, { method: 'POST' });
+    toast(t('versionRestored'));
+    if (r.missing.length) toast(t('versionMissing', { list: r.missing.join(', ') }), 'warn');
+    render();
+  },
+  addWidget(b) { widgetDialog({ deviceId: b.dataset.id }); },
+  bulkTags(b) { bulkTagsDialog(b.dataset.id ? [b.dataset.id] : [...S.selected]); },
+  devicesExport() { return downloadAuthed('/api/devices/export.csv', 'caracal-devices.csv'); },
+  devicesImport() { importDialog(); },
+});

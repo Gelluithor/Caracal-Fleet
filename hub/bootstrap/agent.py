@@ -34,7 +34,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.16.0'
+VERSION = '4.17.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -124,7 +124,14 @@ ENDPOINTS = {
     # CARACAL 2026.10.14: a picture of a camera stream, and items shown only from / until a time
     'camera_preview': ('POST', '/api/fleet/v1/cameras/preview'),
     'validity': ('PUT', '/api/assets/{id}/validity'),
+    # CARACAL 2026.10.23.1: what the screen showed, an emergency message on the whole screen, widgets
+    'plays': ('GET', '/api/fleet/v1/plays'),
+    'takeover': ('POST', '/api/fleet/v1/takeover'),
+    'takeover_end': ('DELETE', '/api/fleet/v1/takeover'),
+    'widgets': ('GET', '/widgets'),
 }
+# a widget item from Fleet: 'caracal-widget:<query>' becomes the node's own widget page
+WIDGET_PREFIX = 'caracal-widget:'
 # the node's own first-run setup, for CARACAL versions without the Fleet admin endpoint
 SETUP_STATUS, SETUP = '/api/setup-status', '/api/setup'
 GRAFANA_FIELDS = ('name', 'grafana_url', 'tag', 'kiosk', 'duration', 'scale', 'dark', 'valid_from', 'valid_until')
@@ -358,6 +365,8 @@ class Agent:
                 paths = {norm(k): {m.lower() for m in v} for k, v in (r.json().get('paths') or {}).items()}
                 caps = {name: method.lower() in paths.get(norm(path), set())
                         for name, (method, path) in self.endpoints.items()}
+            if caps:   # cameras of a global playlist are created on import (agent 4.17)
+                caps['import_camera'] = caps.get('add_camera', False)
         except (requests.RequestException, ValueError, AttributeError):
             caps = {}
         self._caps, self._caps_at = caps, time.time()
@@ -447,8 +456,15 @@ class Agent:
             'caracal_version': caracal_version(), 'maintenance': self.maintenance, 'runtime': runtime(),
             'caracal_image': read_env().get('CARACAL_IMAGE', '') if is_docker() else '',
             'download_source': self.download_source(), 'arch': machine_arch(), 'os': os_name(),
+            'takeover': snap.get('takeover') if isinstance(snap.get('takeover'), dict) else None,
         }
+        plays, plays_after = self.collect_plays() if api_ok else (None, None)
+        if plays:
+            data['plays'] = plays
         r = self.hub('POST', '/heartbeat', json=data)
+        if plays_after is not None and plays_after != self.state.get('plays_after'):
+            self.state['plays_after'] = plays_after
+            self.save_state()
         try:   # a device without a time source (no internet, no clock battery) follows the hub's clock
             set_clock(float(r.json()['server_time']))
         except (ValueError, KeyError, TypeError):
@@ -583,7 +599,32 @@ class Agent:
         body = self.clean(p)
         if 'auth_profile_id' in p:
             body['auth_profile_id'] = p['auth_profile_id']
+        src = body.get('source')
+        if isinstance(src, str) and src.startswith(WIDGET_PREFIX):
+            body['source'] = self.conf['local_api'].rstrip('/') + '/widgets?' + src[len(WIDGET_PREFIX):]
         return body
+
+    def collect_plays(self):
+        """(plays, position) of what the screen showed since the last report; (None, None) without support."""
+        if self.capabilities().get('plays') is not True:
+            return None, None
+        after = int(self.state.get('plays_after') or 0)
+        try:
+            r = self.local('plays', params={'after': after}).json()
+            if int(r.get('last_id') or 0) < after:   # a new database on the node (reinstalled)
+                after = 0
+                r = self.local('plays', params={'after': 0}).json()
+        except (LocalApiError, ValueError, TypeError) as e:
+            log('plays:', e)
+            return None, None
+        plays = [x for x in r.get('plays') or [] if isinstance(x, dict)]
+        return plays, (plays[-1]['id'] if plays else after)
+
+    def do_takeover(self, p):
+        return self.body(self.local('takeover', json=p))
+
+    def do_takeover_end(self, p):
+        return self.body(self.local('takeover_end'))
 
     def do_add_web(self, p):
         return self.body(self.local('add_web', json=self.with_profile(p)))
@@ -930,11 +971,15 @@ class Agent:
                 kind = str(it.get('kind') or 'web')
                 collection = it.get('type') == 'collection' or kind == COLLECTION_KIND
                 if (collection and caps.get('add_grafana_tag') is False) or \
-                        (it.get('file_id') and caps.get('upload') is False):
+                        (it.get('file_id') and caps.get('upload') is False) or \
+                        (kind == 'camera' and caps.get('add_camera') is False) or \
+                        (str(it.get('source') or '').startswith(WIDGET_PREFIX) and caps.get('widgets') is not True):
                     skipped.append(it.get('name'))
                     continue
                 if collection:
                     res = self.do_add_collection(dict(it))
+                elif kind == 'camera':
+                    res = self.do_add_camera(dict(it))
                 elif it.get('file_id'):
                     res = self.do_add_media(dict(it))
                 else:

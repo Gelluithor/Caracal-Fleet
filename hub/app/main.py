@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import access, console, images, monitor, notify, offsite, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, templates
+from . import access, approvals, console, images, library, monitor, notify, offsite, plays, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, takeover, templates, timeline, widgets
 from .core import (ACTIONS, AGENT_VERSION, BOOT, DEVICE_PERMISSIONS, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, APP_DIR, require_device,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -48,6 +48,12 @@ app.include_router(rollout.router)      # staged updates of Docker nodes
 app.include_router(security.router)     # two-factor sign-in and single sign-on
 app.include_router(access.router)       # users, roles and user groups
 app.include_router(offsite.router)      # backups outside the server
+app.include_router(approvals.router)    # content changes waiting for an approval
+app.include_router(takeover.router)     # emergency messages on the whole screen
+app.include_router(plays.router)        # proof of play
+app.include_router(timeline.router)     # what plays when
+app.include_router(library.router)      # the media library
+app.include_router(widgets.router)      # feeds for the widget preview
 
 
 SECURITY_HEADERS = {
@@ -66,6 +72,10 @@ SECURITY_HEADERS = {
 @app.middleware('http')
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
+    if request.url.path == '/static/widgets.html':   # the widget preview runs in a frame of Fleet's own page
+        response.headers['Content-Security-Policy'] = SECURITY_HEADERS['Content-Security-Policy'].replace(
+            "frame-ancestors 'none'", "frame-ancestors 'self'").replace("img-src 'self' data: blob:", "img-src 'self' data: blob: https:")
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     for k, v in SECURITY_HEADERS.items():
         response.headers.setdefault(k, v)
     if request.url.path.startswith('/api/'):
@@ -74,7 +84,7 @@ async def security_headers(request: Request, call_next):
 
 LIVE_ACTIONS = {'next', 'unfreeze', 'show', 'freeze', 'show_collection', 'freeze_collection', 'restart_player',
                 'reboot'}
-INTERNAL_ACTIONS = {'import_playlist', 'export_assets'}
+INTERNAL_ACTIONS = {'import_playlist', 'export_assets', 'takeover', 'takeover_end'}
 ORG = {'groups': ('device_groups', 'device_group'), 'locations': ('device_locations', 'location')}
 MAX_UPLOAD = 2 * 1024 ** 3
 _login_failures = {}
@@ -238,8 +248,36 @@ def list_devices(r: Request):
         d['muted_until'] = mutes.get(row['id'])
         d['can'] = [p for p in DEVICE_PERMISSIONS if u['access'].on(p, row)]
         devices.append(d)
+    with db() as c:
+        waiting = approvals.pending_count(c, u)
+        live = [{'id': x['id'], 'title': x['title'] or x['message'][:60], 'level': x['level'], 'until': x['until'],
+                 'devices': len(json.loads(x['devices_json'] or '[]'))} for x in takeover.active(c)
+                if any(d['id'] in {y['id'] for y in devices} for d in json.loads(x['devices_json'] or '[]'))]
     return {'devices': devices, 'attention_count': sum(1 for d in devices if d['needs_attention']),
-            'agent_version': AGENT_VERSION, 'hub_version': HUB_VERSION, 'server_time': time.time()}
+            'agent_version': AGENT_VERSION, 'hub_version': HUB_VERSION, 'server_time': time.time(),
+            'approvals_pending': waiting, 'approval_enabled': bool(cfg().get('require_approval')), 'takeovers': live, 'tags': sorted({t for d in devices for t in d['tags']}, key=str.lower)}
+
+
+CSV_COLUMNS = ('id', 'name', 'hostname', 'ip', 'location', 'group', 'tags', 'notes', 'version', 'caracal_version', 'online', 'last_seen')
+
+
+@app.get('/api/devices/export.csv')
+def export_devices(r: Request):
+    import csv
+    import io
+    u = current_user(r)
+    with db() as c:
+        rows = [x for x in c.execute('SELECT * FROM devices ORDER BY name COLLATE NOCASE').fetchall() if u['access'].on('view', x)]
+    out = io.StringIO()
+    w = csv.writer(out, delimiter=';')
+    w.writerow(CSV_COLUMNS)
+    for row in rows:
+        d = build(row)
+        w.writerow([d['id'], d['name'], d['hostname'], d['ip'], d['location'], d['group'], ', '.join(d['tags']), d['notes'],
+                    d['version'], d['caracal_version'], 'yes' if d['online'] else 'no',
+                    time.strftime('%Y-%m-%d %H:%M', time.localtime(d['last_seen'])) if d['last_seen'] else ''])
+    return PlainTextResponse('\ufeff' + out.getvalue(), media_type='text/csv; charset=utf-8',
+                             headers={'Content-Disposition': 'attachment; filename="caracal-devices.csv"'})
 
 
 @app.get('/api/devices/{did}')
@@ -274,12 +312,111 @@ async def edit_device(did: str, r: Request):
         group = text(d.get('group', row['device_group']), 120)
         location = text(d.get('location', row['location']), 120)
         notes = text(d.get('notes', row['notes']), 2000)
+        tags = clean_tags(d['tags']) if 'tags' in d else json.loads(row['tags_json'] or '[]')
         _check_move(c, u, [row], group, location)
-        c.execute('UPDATE devices SET name=?, device_group=?, location=?, notes=? WHERE id=?',
-                  (name, group, location, notes, did))
+        c.execute('UPDATE devices SET name=?, device_group=?, location=?, notes=?, tags_json=? WHERE id=?',
+                  (name, group, location, notes, json.dumps(tags, ensure_ascii=False), did))
         _ensure_org(c, group, location)
     audit(u, 'device.edit', did, {'name': name, 'group': group, 'location': location})
     return {'ok': True}
+
+
+def clean_tags(v):
+    """Labels of a device: a list or a comma separated text; trimmed, without duplicates, at most 20."""
+    items = v.split(',') if isinstance(v, str) else v if isinstance(v, list) else []
+    out = []
+    for t in items:
+        t = text(t, 40)
+        if t and t.lower() not in [x.lower() for x in out]:
+            out.append(t)
+    return out[:20]
+
+
+@app.post('/api/devices/tags')
+async def bulk_tags(r: Request):
+    """Adds and removes labels on many devices at once."""
+    u = current_user(r, 'devices')
+    d = await body(r)
+    add, remove = clean_tags(d.get('add') or []), {t.lower() for t in clean_tags(d.get('remove') or [])}
+    ids = [str(x) for x in d.get('device_ids') or []]
+    with db() as c:
+        for did in ids:
+            row = get_device_row(c, did)
+            require_device(u, 'devices', row)
+            tags = [t for t in json.loads(row['tags_json'] or '[]') if t.lower() not in remove]
+            c.execute('UPDATE devices SET tags_json=? WHERE id=?', (json.dumps(clean_tags(tags + add), ensure_ascii=False), did))
+    audit(u, 'device.tags', ','.join(ids), {'add': add, 'remove': sorted(remove)})
+    return {'ok': True}
+
+
+@app.post('/api/devices/import')
+async def import_devices(r: Request):
+    """Names, locations, groups, labels and notes of many devices from a table (CSV with ; or ,). A row finds its
+    device by the column id, else hostname, else name. A column that is not in the table stays as it is; an empty cell
+    clears (except the name). With apply=false only the changes are listed."""
+    import csv
+    import io
+    u = current_user(r, 'devices')
+    d = await body(r)
+    raw = str(d.get('csv') or '').lstrip('\ufeff')
+    if not raw.strip():
+        raise HTTPException(400, 'empty_file')
+    first = raw.splitlines()[0]
+    reader = csv.DictReader(io.StringIO(raw), delimiter=';' if first.count(';') >= first.count(',') else ',')
+    fields = {f.strip().lower(): f for f in reader.fieldnames or []}
+    alias = {'název': 'name', 'nazev': 'name', 'lokalita': 'location', 'skupina': 'group', 'štítky': 'tags', 'stitky': 'tags',
+             'poznámka': 'notes', 'poznamka': 'notes', 'device_id': 'id'}
+    fields = {alias.get(k, k): v for k, v in fields.items()}
+    if not {'id', 'hostname', 'name'} & set(fields):
+        raise HTTPException(400, 'csv_no_key')
+    results, apply = [], bool(d.get('apply'))
+    with db() as c:
+        rows = [x for x in c.execute('SELECT * FROM devices').fetchall() if u['access'].on('view', x)]
+        hosts = {}
+        for x in rows:
+            hosts.setdefault((json.loads(x['status_json'] or '{}').get('hostname') or '').lower(), []).append(x)
+        for n, line in enumerate(reader, start=2):
+            cell = lambda k: (line.get(fields[k]) or '').strip() if k in fields else None
+            match = []
+            if cell('id'):
+                match = [x for x in rows if x['id'] == cell('id')]
+            elif cell('hostname'):
+                match = hosts.get(cell('hostname').lower(), [])
+            elif cell('name'):
+                match = [x for x in rows if (x['name'] or '').lower() == cell('name').lower()]
+            label = cell('id') or cell('hostname') or cell('name') or ''
+            if len(match) != 1:
+                results.append({'line': n, 'key': label, 'error': 'csv_ambiguous' if match else 'device_not_found'})
+                continue
+            row = dict(match[0])
+            # the name changes only when the device was found by its id or host name (else the name found it)
+            new = {'name': (cell('name') or None) if cell('id') or cell('hostname') else None,
+                   'location': cell('location'), 'group': cell('group'), 'notes': cell('notes'),
+                   'tags': clean_tags(cell('tags')) if 'tags' in fields else None}
+            old = {'name': row['name'], 'location': row['location'] or '', 'group': row['device_group'] or '',
+                   'notes': row['notes'] or '', 'tags': json.loads(row['tags_json'] or '[]')}
+            changes = {k: {'from': old[k], 'to': v} for k, v in new.items() if v is not None and v != old[k]}
+            entry = {'line': n, 'key': label, 'device_id': row['id'], 'device': row['name'], 'changes': changes}
+            try:
+                if changes and not u['access'].on('devices', row):
+                    raise HTTPException(403, 'forbidden')
+                if 'location' in changes or 'group' in changes:
+                    _check_move(c, u, [row], new['group'] if 'group' in changes else None,
+                                new['location'] if 'location' in changes else None)
+            except HTTPException as e:
+                entry['error'] = str(e.detail)
+                results.append(entry)
+                continue
+            if apply and changes:
+                v = {k: (changes[k]['to'] if k in changes else old[k]) for k in old}
+                c.execute('UPDATE devices SET name=?, location=?, device_group=?, notes=?, tags_json=? WHERE id=?',
+                          (text(v['name'], 120) or row['id'], text(v['location'], 120), text(v['group'], 120),
+                           text(v['notes'], 2000), json.dumps(v['tags'], ensure_ascii=False), row['id']))
+                _ensure_org(c, text(v['group'], 120), text(v['location'], 120))
+            results.append(entry)
+    if apply:
+        audit(u, 'device.import', '', {'rows': len(results), 'changed': sum(1 for x in results if x.get('changes') and not x.get('error'))})
+    return {'applied': apply, 'rows': results}
 
 
 @app.delete('/api/devices/{did}')
@@ -368,9 +505,13 @@ def validate_command(c, row, action, payload):
         if not 0 <= minutes <= 1440:
             raise HTTPException(400, 'invalid_minutes')
         payload['minutes'] = minutes
+    caps = status.get('capabilities') if isinstance(status.get('capabilities'), dict) else {}
+    if action in ('add_web', 'update_asset') and str(payload.get('source') or '').startswith(playlists.WIDGET_PREFIX) \
+            and caps.get('widgets') is not True:
+        raise HTTPException(409, 'update_required')   # widgets: CARACAL 2026.10.23.1 with agent 4.17
     if action == 'add_web':
         src = text(payload.get('source'), 4000)
-        if not src.lower().startswith(('http://', 'https://')):
+        if not src.lower().startswith(('http://', 'https://', playlists.WIDGET_PREFIX)):
             raise HTTPException(400, 'invalid_url')
         payload['source'] = src
         payload['name'] = text(payload.get('name'), 200) or src
@@ -1325,7 +1466,10 @@ def device_ping(did: str, r: Request):
 async def heartbeat(did: str, r: Request):
     device_auth(r, did)
     d = await body(r)
+    reported = d.pop('plays', None)   # proof of play (agents 4.17): stored on its own, not in the status
     with db() as c:
+        if isinstance(reported, list):
+            plays.record(c, did, reported)
         c.execute('UPDATE devices SET ip=?, version=?, last_seen=?, status_json=? WHERE id=?',
                   (text(d.get('ip'), 64) or _client_ip(r), text(d.get('version'), 32), time.time(),
                    json.dumps(d, ensure_ascii=False), did))

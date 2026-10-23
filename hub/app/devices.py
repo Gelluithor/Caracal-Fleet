@@ -205,6 +205,14 @@ def attention(d, failed_commands=0):
     return out
 
 
+def tags_of(row):
+    try:
+        tags = json.loads(row['tags_json'] or '[]') if 'tags_json' in row.keys() else []
+    except (TypeError, ValueError):
+        tags = []
+    return [str(t) for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
+
+
 def build(row, failed_commands=0, full=False, latest_caracal=None):
     status = json.loads(row['status_json'] or '{}')
     player = player_of(status)
@@ -245,6 +253,9 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'admin': admin_of(status), 'overlay': overlay_of(status), 'player_settings': player_settings_of(status),
         # agents from 4.14: the screen (on / off), the display watch and the node's black screen watch
         **screen_of(status),
+        'tags': tags_of(row),
+        # agents from 4.17: the emergency message on the screen
+        'takeover': status.get('takeover') if isinstance(status.get('takeover'), dict) else None,
     }
     d['current_asset_id'] = None
     if d['current_id'] is not None:

@@ -164,6 +164,12 @@ def apply_to(c, tpl, row, username, batch):
             # import_playlist is internal (not sent from the UI): queued like a global playlist deployment
             if action != 'import_playlist':
                 payload = validate_command(c, row, action, payload)
+            else:
+                from .playlists import items_for
+                items, left_out = items_for(build(row)['capabilities'], payload['items'])
+                if left_out:
+                    result['skipped'].append({'action': 'add_camera', 'reason': 'agent_too_old'})
+                payload = {**payload, 'items': items}
         except HTTPException as e:
             result['skipped'].append({'action': action, 'reason': str(e.detail)})
             continue

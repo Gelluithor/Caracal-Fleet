@@ -62,6 +62,8 @@ TEXT = {
         'update_failed_body': 'Běží dál předchozí verze {c}. Chyba: {e}',
         'backup_failed_title': 'CARACAL Fleet: záloha mimo server selhala ({v})',
         'backup_failed_body': 'Zálohu se nepodařilo uložit do „{v}“: {e}. Zkontrolujte cíl v Nastavení → Záloha a migrace.',
+        'approval_title': 'Ke schválení: {v}', 'approval_body': '{c} chce nasadit „{v}“ na {e} zařízení.',
+        'takeover_title': 'Nouzové hlášení: {v}', 'takeover_body': '{c} spustil(a) nouzové hlášení na {e} obrazovkách.',
     },
     'en': {
         'offline': 'Offline', 'local_api': 'Local API not responding', 'player': 'Player not running',
@@ -80,6 +82,8 @@ TEXT = {
         'update_failed_body': 'The previous version {c} keeps running. Error: {e}',
         'backup_failed_title': 'CARACAL Fleet: the backup outside the server failed ({v})',
         'backup_failed_body': 'The backup could not be stored in "{v}": {e}. Check the destination in Settings → Backup.',
+        'approval_title': 'Waiting for approval: {v}', 'approval_body': '{c} wants to deploy "{v}" to {e} devices.',
+        'takeover_title': 'Emergency message: {v}', 'takeover_body': '{c} started an emergency message on {e} screens.',
     },
 }
 
@@ -475,6 +479,17 @@ def backup_failed(name, error, send=None):
     """A backup could not be copied to a destination outside the server."""
     return _system_message(config(), 'backup_failed', 'backup_failed', 'critical', '/#/settings/backup', send,
                            {'destination': name, 'error': error}, v=name, e=error)
+
+
+def approval_requested(playlist, username, count, send=None):
+    """A deployment waits for an approval."""
+    return _system_message(config(), 'approval', 'approval_requested', 'info', '/#/approvals', send,
+                           {'playlist': playlist, 'user': username}, v=playlist, c=username, e=str(count))
+
+
+def takeover_started(title, username, count, send=None):
+    return _system_message(config(), 'takeover', 'takeover_started', 'critical', '/#/takeover', send,
+                           {'title': title, 'user': username}, v=title, c=username, e=str(count))
 
 
 def _system_message(conf, key, event, level, path, send, extra, **values):
