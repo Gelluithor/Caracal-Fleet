@@ -32,6 +32,7 @@ with sync_playwright() as p:
     b = p.chromium.launch(executable_path=os.getenv('CHROMIUM') or None, args=['--no-sandbox'])
     ctx = b.new_context(viewport={'width': 1440, 'height': 900}, record_video_dir=sys.argv[1] if len(sys.argv) > 1 else 'out', record_video_size={'width': 1440, 'height': 900})
     ctx.add_init_script(CURSOR)
+    ctx.add_init_script("try { localStorage.setItem('caracalTheme', 'dark'); } catch (e) {}")
     pg = ctx.new_page()
     pos = [720, 450]
 
