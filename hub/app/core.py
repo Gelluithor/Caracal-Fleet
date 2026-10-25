@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.20.0'
+HUB_VERSION = '4.21.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -27,7 +27,7 @@ SETUP_CODE = DATA / 'setup-code'            # one-time code for creating the fir
 ONLINE_TIMEOUT = 35            # seconds without heartbeat before a node is offline
 DELIVERY_TIMEOUT = 900         # delivered command without result -> timeout
 FILE_RETENTION = 7 * 86400     # uploaded media are kept for a week
-LANGUAGES = ('cs', 'en')
+LANGUAGES = ('cs', 'en', 'sk', 'de', 'pl')
 USERNAME_RE = re.compile(r'^[A-Za-z0-9._@-]{2,64}$')
 
 # Permissions. A user gets them from a role, for a scope: all devices, or chosen locations, device groups and
@@ -271,6 +271,12 @@ CREATE TABLE IF NOT EXISTS approvals(id INTEGER PRIMARY KEY AUTOINCREMENT, kind 
   decided_by TEXT DEFAULT '', decided REAL, comment TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS global_playlist_versions(id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER,
   items_json TEXT DEFAULT '[]', username TEXT, created REAL, note TEXT DEFAULT '');
+-- tokens of other systems for the REST API (a role for a scope, like a user)
+CREATE TABLE IF NOT EXISTS api_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token_hash TEXT UNIQUE, prefix TEXT,
+  role TEXT, scope_json TEXT DEFAULT '', created REAL, created_by TEXT DEFAULT '', last_used REAL, expires REAL,
+  enabled INTEGER DEFAULT 1);
+-- customers in one Fleet (hub/app/tenants.py): they own locations
+CREATE TABLE IF NOT EXISTS tenants(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, created REAL);
 CREATE TABLE IF NOT EXISTS scheduled_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, enabled INTEGER DEFAULT 1,
   data_json TEXT DEFAULT '{}', last_run REAL, last_day TEXT DEFAULT '', last_result TEXT DEFAULT '', created REAL,
   updated REAL, updated_by TEXT DEFAULT '');
@@ -300,12 +306,21 @@ COLUMNS = [
     ('users', 'totp_last', 'INTEGER DEFAULT 0'),
     ('users', 'sso_subject', "TEXT DEFAULT ''"),
     ('users', 'must_change_password', 'INTEGER DEFAULT 0'),   # a one-time password set by an administrator
+    ('users', 'prefs_json', "TEXT DEFAULT '{}'"),   # the user's own view: simple / pro mode, collapsed menu groups, guide
     ('users', 'scope_json', "TEXT DEFAULT ''"),   # the devices the user's role holds for ('' = all)
     ('global_playlist_items', 'valid_from', 'REAL'),    # shown only from / until (Unix time), CARACAL 2026.10.14
     ('global_playlist_items', 'valid_until', 'REAL'),
     ('global_playlist_items', 'secret_json', "TEXT DEFAULT ''"),   # credentials of a camera's streams, never returned
     ('devices', 'tags_json', "TEXT DEFAULT '[]'"),   # free labels of a device
     ('files', 'library', 'INTEGER DEFAULT 0'),       # kept in the media library
+    ('device_locations', 'lat', 'REAL'),             # the place on the map
+    ('device_locations', 'tenant_id', 'INTEGER'),    # the customer who owns the location (NULL = the operator)
+    ('users', 'tenant_id', 'INTEGER'),
+    ('global_playlists', 'tenant_id', 'INTEGER'),
+    ('files', 'tenant_id', 'INTEGER'),
+    ('node_templates', 'tenant_id', 'INTEGER'),
+    ('api_tokens', 'tenant_id', 'INTEGER'),
+    ('device_locations', 'lon', 'REAL'),
 ]
 
 
@@ -508,7 +523,18 @@ def current_user(r: Request, perm='view'):
 
 
 def user_from_token(raw, perm='view', path=None):
-    """User of a session token (also used by WebSockets, which cannot send the Authorization header)."""
+    """User of a session token (also used by WebSockets, which cannot send the Authorization header), or of an API
+    token of another system."""
+    if raw.startswith('cfa_'):
+        from .integrations import token_user
+        u = token_user(raw)
+        if not u:
+            raise HTTPException(401, 'invalid_token')
+        from .tenants import CURRENT
+        CURRENT.set(u.get('tenant_id') or None)
+        if perm and not u['access'].has(perm):
+            raise HTTPException(403, 'forbidden')
+        return u
     try:
         name, exp, fp, sig = raw.rsplit(':', 3)
         body = f'{name}:{exp}:{fp}'
@@ -520,8 +546,13 @@ def user_from_token(raw, perm='view', path=None):
                 raise ValueError
             u = dict(u)
             u['access'] = load_access(c, u)
+            if u.get('tenant_id'):   # a customer's user sees only the customer's part of the fleet
+                from .tenants import restrict
+                u['access'] = restrict(c, u['access'], u['tenant_id'])
     except (ValueError, TypeError):
         raise HTTPException(401, 'session_expired')
+    from .tenants import CURRENT
+    CURRENT.set(u.get('tenant_id') or None)
     if u.get('must_change_password') and path not in PASSWORD_CHANGE_PATHS:
         raise HTTPException(403, 'password_change_required')
     if perm and not u['access'].has(perm):   # perm None: any signed-in user (the own account)
@@ -538,7 +569,32 @@ def public_user(u):
             'language': x['language'] or 'cs',
             'permissions': access.permissions(), 'everywhere': access.everywhere_list(), 'scoped': access.scoped(),
             'totp': bool(x.get('totp_secret')), 'sso': str(x.get('password_hash') or '').startswith('sso$'),
-            'must_change_password': bool(x.get('must_change_password'))}
+            'must_change_password': bool(x.get('must_change_password')), 'prefs': user_prefs(x),
+            'tenant_id': x.get('tenant_id') or None, 'tenant': _tenant_name(x.get('tenant_id'))}
+
+
+def _tenant_name(tid):
+    if not tid:
+        return ''
+    with db() as c:
+        row = c.execute('SELECT name FROM tenants WHERE id=?', (tid,)).fetchone()
+    return row['name'] if row else ''
+
+
+UI_MODES = ('simple', 'pro')
+NAV_GROUPS = ('screens', 'content', 'planning', 'admin')
+
+
+def user_prefs(u):
+    """What the user chose for their own view (unknown keys and values are left out)."""
+    try:
+        raw = json.loads(dict(u).get('prefs_json') or '{}')
+    except (TypeError, ValueError):
+        raw = {}
+    raw = raw if isinstance(raw, dict) else {}
+    return {'ui_mode': raw.get('ui_mode') if raw.get('ui_mode') in UI_MODES else 'pro',
+            'nav_closed': [g for g in raw.get('nav_closed') or [] if g in NAV_GROUPS],
+            'guide_hidden': bool(raw.get('guide_hidden'))}
 
 
 # ---------------------------------------------------------------- roles, scopes and what a user may do

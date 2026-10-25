@@ -101,6 +101,9 @@ async def start(r: Request):
                 devices.append({'id': row['id'], 'how': 'none'})
         c.execute('UPDATE takeovers SET devices_json=? WHERE id=?', (json.dumps(devices), tid))
     audit(u, 'takeover.start', str(tid), {'title': title, 'devices': len(devices), 'minutes': minutes})
+    from .integrations import emit
+    emit('takeover.started', {'id': tid, 'title': title, 'message': message, 'level': level, 'until': until,
+                              'devices': [x['id'] for x in devices], 'user': u['username']})
     try:
         from . import monitor
         monitor.takeover_started(title or message[:60], u['username'], len(devices))
@@ -128,4 +131,6 @@ def end(tid: int, r: Request):
                 queue_command(c, x['id'], 'takeover_end', {'id': str(tid)}, u['username'], batch)
         c.execute('UPDATE takeovers SET ended=?, ended_by=? WHERE id=?', (time.time(), u['username'], tid))
     audit(u, 'takeover.end', str(tid))
+    from .integrations import emit
+    emit('takeover.ended', {'id': tid, 'user': u['username']})
     return {'ok': True}

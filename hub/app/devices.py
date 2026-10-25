@@ -136,7 +136,10 @@ def player_settings_of(status):
     s = status.get('player_settings')
     if not isinstance(s, dict):
         return None
-    return {'web_dark': s.get('web_dark') if s.get('web_dark') in ('off', 'dark', 'force') else 'off'}
+    out = {'web_dark': s.get('web_dark') if s.get('web_dark') in ('off', 'dark', 'force') else 'off'}
+    if isinstance(s.get('layout'), dict):   # CARACAL 2026.10.25: zones next to the playlist
+        out['layout'] = s['layout']
+    return out
 
 
 def screen_of(status):
@@ -200,6 +203,10 @@ def attention(d, failed_commands=0):
         add('admin_missing', 'warning')
     if failed_commands:
         add('commands_failed', 'warning', failed_commands)
+    if d.get('api_ok') and d.get('active_count') == 0 and d.get('playlist_count'):
+        add('playlist_ran_out', 'warning', d['playlist_count'])   # every item is outside its validity
+    elif d.get('api_ok') and d.get('playlist_count') == 0 and d.get('reports_assets'):
+        add('playlist_empty', 'info')
     if version_tuple(d.get('version')) < version_tuple(AGENT_VERSION):
         add('agent_outdated', 'info', d.get('version') or '?')
     return out
@@ -269,6 +276,9 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
             d['current_asset_id'] = match.get('id')
             d['current_name'] = d['current_name'] or match['name']
             d['current_kind'] = d['current_kind'] or match['kind']
+    d['reports_assets'] = 'assets' in status
+    d['active_count'] = sum(1 for a in assets if (not a.get('valid_from') or a['valid_from'] <= now)
+                            and (not a.get('valid_until') or now < a['valid_until']))
     d['attention'] = attention(d, failed_commands)
     if isinstance(latest_caracal, dict):   # latest version per runtime: Docker image / classic release
         latest_caracal = latest_caracal.get(d['runtime'])

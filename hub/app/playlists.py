@@ -42,6 +42,8 @@ def _playlist(c, pid):
     row = c.execute('SELECT * FROM global_playlists WHERE id=?', (pid,)).fetchone()
     if not row:
         raise HTTPException(404, 'not_found')
+    from .tenants import check
+    check(row)
     return dict(row)
 
 
@@ -167,8 +169,9 @@ def _validate_item(c, d, kind, old_secrets=None):
         item['source'] = src
         item['name'] = item['name'] or src
     else:
+        from .tenants import owned
         f = c.execute('SELECT * FROM files WHERE id=?', (_text(d.get('file_id'), 64),)).fetchone()
-        if not f or f['kind'] != kind:
+        if not f or f['kind'] != kind or not owned(f):
             raise HTTPException(400, 'file_not_found')
         item['file_id'] = f['id']
         item['name'] = item['name'] or f['name']
@@ -219,7 +222,9 @@ def _before_change(c, pid):
 def list_playlists(r: Request):
     current_user(r)
     with db() as c:
-        rows = [dict(x) for x in c.execute('SELECT * FROM global_playlists ORDER BY name COLLATE NOCASE')]
+        from .tenants import sql
+        where, args = sql()
+        rows = [dict(x) for x in c.execute(f'SELECT * FROM global_playlists WHERE 1=1{where} ORDER BY name COLLATE NOCASE', args)]
         for p in rows:
             p['items'] = c.execute('SELECT COUNT(*) FROM global_playlist_items WHERE playlist_id=?',
                                    (p['id'],)).fetchone()[0]
@@ -239,9 +244,10 @@ async def create_playlist(r: Request):
         raise HTTPException(400, 'name_required')
     now = time.time()
     with db() as c:
-        pid = c.execute('INSERT INTO global_playlists(name, description, created, updated, updated_by) '
-                        'VALUES(?,?,?,?,?)', (name, _text(d.get('description'), 1000), now, now,
-                                              u['username'])).lastrowid
+        from .tenants import tenant_value
+        pid = c.execute('INSERT INTO global_playlists(name, description, created, updated, updated_by, tenant_id) '
+                        'VALUES(?,?,?,?,?,?)', (name, _text(d.get('description'), 1000), now, now,
+                                                u['username'], tenant_value(c, u, d.get('tenant_id')))).lastrowid
     audit(u, 'global.create', str(pid), {'name': name})
     return {'id': pid}
 
@@ -266,8 +272,9 @@ async def playlist_from_device(r: Request):
 def playlist_from_assets(c, name, assets, username):
     """New global playlist with the web pages and Grafana collections of a node's playlist: (id, skipped names)."""
     now = time.time()
-    pid = c.execute('INSERT INTO global_playlists(name, description, created, updated, updated_by) '
-                    'VALUES(?,?,?,?,?)', (name, '', now, now, username)).lastrowid
+    from .tenants import CURRENT
+    pid = c.execute('INSERT INTO global_playlists(name, description, created, updated, updated_by, tenant_id) '
+                    'VALUES(?,?,?,?,?,?)', (name, '', now, now, username, CURRENT.get())).lastrowid
     skipped = []
     for pos, a in enumerate(assets):
         web = a['kind'] == 'web' and str(a.get('source', '')).lower().startswith(('http://', 'https://'))
@@ -303,6 +310,9 @@ async def edit_playlist(pid: int, r: Request):
             raise HTTPException(400, 'name_required')
         c.execute('UPDATE global_playlists SET name=?, description=? WHERE id=?',
                   (name, _text(d.get('description', p['description']), 1000), pid))
+        if 'tenant_id' in d and not u.get('tenant_id'):   # the operator gives a playlist to a customer
+            from .tenants import tenant_value
+            c.execute('UPDATE global_playlists SET tenant_id=? WHERE id=?', (tenant_value(c, u, d['tenant_id']), pid))
         _touch(c, pid, u)
     audit(u, 'global.edit', str(pid), {'name': name})
     return {'ok': True}
@@ -484,6 +494,8 @@ def deploy_now(c, pid, targets, mode, username, raw=None):
                       username, batch)
     c.execute('INSERT INTO global_deployments(playlist_id, batch, mode, targets_json, username, created) '
               'VALUES(?,?,?,?,?,?)', (pid, batch, mode, json.dumps(targets), username, time.time()))
+    from .integrations import emit
+    emit('playlist.deployed', {'playlist_id': pid, 'playlist': p['name'], 'targets': targets, 'mode': mode, 'user': username})
     return {'batch': batch, 'media_unsupported': warnings, 'items_unsupported': skipped, 'name': p['name']}
 
 
@@ -526,7 +538,9 @@ async def deploy(pid: int, r: Request):
             res = None
         else:
             res = deploy_now(c, pid, targets, mode, u['username'])
+    from .integrations import emit
     if res is None:
+        emit('approval.requested', {'id': aid, 'playlist_id': pid, 'playlist': p['name'], 'targets': targets, 'mode': mode, 'user': u['username']})
         audit(u, 'approval.request', str(aid), {'playlist': p['name'], 'targets': targets, 'mode': mode})
         from .approvals import notify_approvers
         notify_approvers(p['name'], u['username'], len(targets))

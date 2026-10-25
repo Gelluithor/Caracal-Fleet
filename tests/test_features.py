@@ -225,3 +225,17 @@ def test_tags_and_tables(client, admin_headers):
     r = client.post('/api/devices/import', headers=h, json={'csv': 'name,group\ntag-b,Tag Skupina\n', 'apply': True}).json()
     assert r['rows'][0]['changes'] == {'group': {'from': '', 'to': 'Tag Skupina'}}
     assert client.post('/api/devices/import', headers=h, json={'csv': 'foo;bar\n1;2\n'}).json()['detail'] == 'csv_no_key'
+
+
+def test_prefs_and_onboarding(client, admin_headers):
+    h = admin_headers
+    assert client.get('/api/me', headers=h).json()['prefs'] == {'ui_mode': 'pro', 'nav_closed': [], 'guide_hidden': False}
+    client.patch('/api/me', headers=h, json={'prefs': {'ui_mode': 'simple', 'nav_closed': ['admin', 'nope'], 'evil': 1}})
+    client.patch('/api/me', headers=h, json={'prefs': {'guide_hidden': True}})
+    assert client.get('/api/me', headers=h).json()['prefs'] == {'ui_mode': 'simple', 'nav_closed': ['admin'], 'guide_hidden': True}
+    client.patch('/api/me', headers=h, json={'prefs': {'ui_mode': 'expert'}})
+    assert client.get('/api/me', headers=h).json()['prefs']['ui_mode'] == 'pro'
+    steps = {x['key']: x['done'] for x in client.get('/api/onboarding', headers=h).json()['steps']}
+    assert set(steps) == {'device', 'content', 'alerts', 'backup', 'users'}
+    client.post('/api/users', headers=h, json={'username': 'ob-viewer', 'password': 'long-password-1', 'role': 'viewer'})
+    assert client.get('/api/onboarding', headers=login(client, 'ob-viewer')).json()['steps'] == []

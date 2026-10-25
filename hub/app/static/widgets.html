@@ -52,6 +52,37 @@
   .text.center { text-align: center; margin: auto; }
   .bar { height: 1.2vh; width: 12vw; background: var(--accent); border-radius: 1vh; margin-bottom: 5vh; }
   .text.center .bar { margin-inline: auto; }
+  /* qr */
+  .qr { margin: auto; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 3vh; }
+  .qr h1 { font-size: 7vh; margin: 0; }
+  .qr img { height: 58vh; width: 58vh; background: #fff; padding: 2.5vh; border-radius: 2vh; image-rendering: pixelated; }
+  .qr p { font-size: 4vh; color: var(--muted); margin: 0; max-width: 80vw; }
+  /* calendar */
+  .agenda { display: flex; flex-direction: column; gap: 3vh; overflow: hidden; }
+  .agenda h2 { font-size: 3.4vh; color: var(--accent); margin: 0 0 1.2vh; font-weight: 700; }
+  .agenda h2::first-letter { text-transform: uppercase; }
+  .ev { display: grid; grid-template-columns: 24vh 1fr; gap: 2vw; padding: 1.4vh 0; border-bottom: 1px solid var(--line); font-size: 3.8vh; align-items: baseline; }
+  .ev-time { color: var(--muted); font-size: 3.2vh; }
+  .ev-title small { display: block; color: var(--muted); font-size: 2.6vh; }
+  /* meeting room */
+  .room { position: absolute; inset: 0; padding: 7vh 6vw; display: flex; flex-direction: column; color: #fff; background: #15803d; }
+  .room.busy { background: #b91c1c; }
+  .room-name { font-size: 5vh; font-weight: 600; opacity: .9; }
+  .room-state { font-size: 20vh; font-weight: 800; line-height: 1; margin-top: 4vh; }
+  .room-now { font-size: 5vh; margin-top: 2vh; }
+  .room-next { margin-top: auto; background: rgb(0 0 0 / .18); border-radius: 2vh; padding: 3vh 2.5vw; }
+  .room-next h2 { margin: 0 0 1vh; font-size: 3vh; opacity: .85; }
+  .room-next .ev { border-color: rgb(255 255 255 / .2); grid-template-columns: 22vh 1fr; }
+  .room-next .ev-time { color: rgb(255 255 255 / .8); }
+  .room-next p { margin: 0; font-size: 3.4vh; opacity: .85; }
+  /* ticker */
+  .tk-host { padding: 0 !important; flex-direction: row !important; align-items: center; background: var(--panel); }
+  .tk-label { flex: none; height: 100%; display: flex; align-items: center; padding: 0 2.5vw; background: var(--accent); color: #fff; font-size: 45vh; }
+  .tk { flex: 1; overflow: hidden; height: 100%; display: flex; align-items: center; }
+  .tk-run { display: inline-flex; white-space: nowrap; font-size: 45vh; animation: tk linear infinite; will-change: transform; }
+  .tk-run span { padding: 0 1.5vw; }
+  .tk-run i { color: var(--accent); font-style: normal; }
+  @keyframes tk { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 </style>
 </head>
 <body>

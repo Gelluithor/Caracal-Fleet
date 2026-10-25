@@ -112,7 +112,9 @@ def _playlist(c, v, required=True):
         pid = int(v)
     except (TypeError, ValueError):
         raise HTTPException(400, 'playlist_not_found')
-    if not c.execute('SELECT 1 FROM global_playlists WHERE id=?', (pid,)).fetchone():
+    from .tenants import owned
+    row = c.execute('SELECT * FROM global_playlists WHERE id=?', (pid,)).fetchone()
+    if not row or not owned(row):
         raise HTTPException(400, 'playlist_not_found')
     return pid
 
@@ -353,6 +355,10 @@ def tick(now_ts=None):
     rollout.tick(now_ts)   # staged updates advance in the same loop
     from .system import backup_tick
     backup_tick(now_ts)    # and the daily backup
+    from .monitor import content_notice
+    content_notice(now_ts)  # and content whose validity ends soon
+    from .reports import tick as report_tick
+    report_tick(now_ts)     # and the monthly report
     from . import selfupdate
     selfupdate.tick()      # and the daily check for a new version of Fleet
 

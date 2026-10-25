@@ -44,6 +44,8 @@ def _text(v, limit):
 
 def _row(c, tid):
     row = c.execute('SELECT * FROM node_templates WHERE id=?', (tid,)).fetchone()
+    from .tenants import owned
+    row = row if row and owned(row) else None
     if not row:
         raise HTTPException(404, 'not_found')
     return row
@@ -76,7 +78,9 @@ def _clean_parts(c, d, current):
                 pid = int(d['playlist_id'])
             except (TypeError, ValueError):
                 raise HTTPException(400, 'invalid_value')
-            if not c.execute('SELECT 1 FROM global_playlists WHERE id=?', (pid,)).fetchone():
+            from .tenants import owned
+            found = c.execute('SELECT * FROM global_playlists WHERE id=?', (pid,)).fetchone()
+            if not found or not owned(found):
                 raise HTTPException(400, 'playlist_not_found')
             out['playlist_id'] = pid
     if 'playlist_mode' in d:
@@ -100,8 +104,9 @@ def _clean_parts(c, d, current):
     if 'player' in d:
         if not d['player']:
             out.pop('player', None)
-        elif isinstance(d['player'], dict) and d['player'].get('web_dark') in DARK_MODES:
-            out['player'] = {'web_dark': d['player']['web_dark']}
+        elif isinstance(d['player'], dict):
+            from .main import validate_player_settings
+            out['player'] = validate_player_settings(d['player'])
         else:
             raise HTTPException(400, 'invalid_value')
     for key in ('group', 'location'):
@@ -218,7 +223,9 @@ def template_id(value):
 def list_templates(r: Request):
     current_user(r)
     with db() as c:
-        return [_public(c, x) for x in c.execute('SELECT * FROM node_templates ORDER BY name COLLATE NOCASE')]
+        from .tenants import sql
+        where, args = sql()
+        return [_public(c, x) for x in c.execute(f'SELECT * FROM node_templates WHERE 1=1{where} ORDER BY name COLLATE NOCASE', args)]
 
 
 @router.post('/api/templates')
@@ -231,9 +238,10 @@ async def create_template(r: Request):
     now = time.time()
     with db() as c:
         data = _clean_parts(c, d, {})
-        tid = c.execute('INSERT INTO node_templates(name, description, data_json, created, updated, updated_by) '
-                        'VALUES(?,?,?,?,?,?)', (name, _text(d.get('description'), 1000), json.dumps(data), now, now,
-                                                u['username'])).lastrowid
+        from .tenants import tenant_value
+        tid = c.execute('INSERT INTO node_templates(name, description, data_json, created, updated, updated_by, tenant_id) '
+                        'VALUES(?,?,?,?,?,?,?)', (name, _text(d.get('description'), 1000), json.dumps(data), now, now,
+                                                  u['username'], tenant_value(c, u, d.get('tenant_id')))).lastrowid
     audit(u, 'template.create', str(tid), {'name': name})
     return {'id': tid}
 

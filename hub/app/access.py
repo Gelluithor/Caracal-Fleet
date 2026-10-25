@@ -65,11 +65,11 @@ def _check_grant(c, u, role, scope):
 def _admins_left(c, without_user=None, user_change=None):
     """Enabled users who are administrators for the whole fleet (role admin and no scope), after a change."""
     n = 0
-    for row in c.execute('SELECT id, role, scope_json, enabled FROM users'):
+    for row in c.execute('SELECT id, role, scope_json, enabled, tenant_id FROM users'):
         row = dict(row)
         if user_change and row['id'] == user_change['id']:
             row.update(user_change)
-        if row['id'] == without_user or not row['enabled']:
+        if row['id'] == without_user or not row['enabled'] or row.get('tenant_id'):
             continue
         if row['role'] == 'admin' and parse_scope(row['scope_json'] or '') is None:
             n += 1
@@ -83,7 +83,8 @@ def _user_row(c, x):
     groups = [g['group_id'] for g in c.execute('SELECT group_id FROM user_group_members WHERE user_id=?', (x['id'],))]
     return {'id': x['id'], 'username': x['username'], 'role': x['role'], 'language': x['language'], 'enabled': bool(x['enabled']),
             'created': x['created'], 'totp': bool(x['totp_secret']), 'must_change_password': bool(x['must_change_password']),
-            'sso': str(x['password_hash'] or '').startswith('sso$'), 'scope': scope_public(x['scope_json'] or ''), 'groups': groups}
+            'sso': str(x['password_hash'] or '').startswith('sso$'), 'scope': scope_public(x['scope_json'] or ''), 'groups': groups,
+            'tenant_id': x['tenant_id'] or None}
 
 
 @router.get('/api/users')
@@ -122,9 +123,11 @@ async def create_user(r: Request):
         _check_grant(c, u, role, scope)
         if c.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
             raise HTTPException(409, 'already_exists')
-        uid = c.execute('INSERT INTO users(username, password_hash, role, language, enabled, created, must_change_password, scope_json) '
-                        'VALUES(?,?,?,?,1,?,?,?)', (username, hash_password(password), role, language, time.time(),
-                                                    int(bool(d.get('must_change'))), scope)).lastrowid
+        from .tenants import tenant_value
+        tenant = tenant_value(c, u, d.get('tenant_id'))
+        uid = c.execute('INSERT INTO users(username, password_hash, role, language, enabled, created, must_change_password, scope_json, tenant_id) '
+                        'VALUES(?,?,?,?,1,?,?,?,?)', (username, hash_password(password), role, language, time.time(),
+                                                      int(bool(d.get('must_change'))), scope, tenant)).lastrowid
         _set_groups(c, u, uid, d.get('groups'))
     audit(u, 'user.create', username, {'role': role, 'scope': scope_public(scope), 'groups': d.get('groups') or [],
                                        'must_change': bool(d.get('must_change'))})
@@ -148,9 +151,11 @@ async def edit_user(uid: int, r: Request):
         if role != target['role'] or scope != (target['scope_json'] or ''):
             _check_grant(c, u, role, scope)
             _check_grant(c, u, target['role'], target['scope_json'])   # and must be able to take the old one away
-        if not _admins_left(c, user_change={'id': uid, 'role': role, 'scope_json': scope, 'enabled': enabled}):
+        from .tenants import tenant_value
+        tenant = tenant_value(c, u, d['tenant_id']) if 'tenant_id' in d else target['tenant_id']
+        if not _admins_left(c, user_change={'id': uid, 'role': role, 'scope_json': scope, 'enabled': enabled, 'tenant_id': tenant}):
             raise HTTPException(409, 'last_admin')
-        c.execute('UPDATE users SET role=?, language=?, enabled=?, scope_json=? WHERE id=?', (role, language, enabled, scope, uid))
+        c.execute('UPDATE users SET role=?, language=?, enabled=?, scope_json=?, tenant_id=? WHERE id=?', (role, language, enabled, scope, tenant, uid))
         _set_groups(c, u, uid, d.get('groups'))
         if d.get('password'):
             if len(str(d['password'])) < 10:

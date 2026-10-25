@@ -50,7 +50,8 @@ TEXT = {
         'temperature': 'Vysoká teplota ({v} °C)', 'disk': 'Plný disk ({v} %)', 'ram': 'Málo paměti ({v} %)',
         'cpu': 'Vysoké vytížení CPU ({v} %)', 'admin_missing': 'Webová administrace nemá administrátora',
         'commands_failed': 'Selhané příkazy ({v})', 'display_down': 'Displej (X server) neběží',
-        'screen_black': 'Obrazovka je černá ({v} min)',
+        'screen_black': 'Obrazovka je černá ({v} min)', 'playlist_ran_out': 'Playlist nemá co hrát (obsahu skončila platnost)',
+        'expiring_title': 'CARACAL Fleet: končí platnost obsahu ({v})', 'expiring_body': 'Během 2 dnů skončí: {e}',
         'problems': 'CARACAL Fleet: {n} {word}', 'word1': 'problém', 'word2': 'problémy', 'word5': 'problémů',
         'resolved_title': 'CARACAL Fleet: vyřešeno {n}', 'since': 'od {t}', 'resolved': 'vyřešeno po {d}',
         'test_title': 'CARACAL Fleet: zkušební upozornění', 'test_body': 'Tento kanál funguje.',
@@ -71,6 +72,8 @@ TEXT = {
         'cpu': 'High CPU load ({v} %)', 'admin_missing': 'The web administration has no administrator',
         'commands_failed': 'Failed commands ({v})', 'display_down': 'The display (X server) does not run',
         'screen_black': 'The screen is black ({v} min)',
+        'playlist_ran_out': 'The playlist has nothing to play (its content ran out)',
+        'expiring_title': 'CARACAL Fleet: content runs out ({v})', 'expiring_body': 'Within 2 days these end: {e}',
         'problems': 'CARACAL Fleet: {n} {word}', 'word1': 'problem', 'word2': 'problems', 'word5': 'problems',
         'resolved_title': 'CARACAL Fleet: {n} resolved', 'since': 'since {t}', 'resolved': 'resolved after {d}',
         'test_title': 'CARACAL Fleet: test alert', 'test_body': 'This channel works.',
@@ -210,7 +213,7 @@ def _validate(d, old):
     out['levels'] = levels or ['critical']
     out['recovery'] = bool(d.get('recovery', old['recovery']))
     out['fleet_updates'] = bool(d.get('fleet_updates', old['fleet_updates']))
-    out['language'] = d.get('language') if d.get('language') in TEXT else old['language']
+    out['language'] = d.get('language') if d.get('language') in ('cs', 'en', 'sk', 'de', 'pl') else old['language']
     out['public_url'] = _text(d.get('public_url', old['public_url']), 300).rstrip('/')
     olds = {ch['id']: ch for ch in old['channels']}
     if 'channels' in d:
@@ -270,7 +273,7 @@ async def test_alert(r: Request):
         conf = _validate({'smtp': d['smtp']}, conf)
     old = next((ch for ch in conf['channels'] if ch['id'] == _text((d.get('channel') or {}).get('id'), 40)), None)
     ch = _channel(d.get('channel'), old)
-    tx = TEXT[conf['language']]
+    tx = TEXT.get(conf['language'], TEXT['en'])
     try:
         _deliver(ch, conf, tx['test_title'], [tx['test_body']], {'event': 'test'}, 'info')
     except Exception as e:     # any delivery error is shown to the administrator as it is
@@ -361,6 +364,12 @@ def _plural(tx, n):
     return tx['word1'] if n == 1 else tx['word2'] if 2 <= n <= 4 else tx['word5']
 
 
+def _emit(event, did, d, code, level, detail):
+    from .integrations import emit
+    emit(event, {'device_id': did, 'name': d.get('name'), 'location': d.get('location'), 'group': d.get('group'),
+                 'code': code, 'level': level, 'detail': detail})
+
+
 def check(now=None, send=None):
     """One pass over all devices: events for problems that started or ended, alerts for the due ones.
 
@@ -385,6 +394,7 @@ def check(now=None, send=None):
                           (did, code, a['level'], detail, now))
                 c.execute('INSERT INTO events(device_id, ts, kind, code, level, detail) VALUES(?,?,?,?,?,?)',
                           (did, now, 'start', code, a['level'], detail))
+                _emit('device.offline' if code == 'offline' else 'device.problem', did, devices[did], code, a['level'], detail)
                 known[(did, code)] = {'device_id': did, 'code': code, 'level': a['level'], 'detail': detail,
                                       'since': now, 'alerted': 0}
             elif issue['level'] != a['level'] or issue['detail'] != detail:
@@ -402,6 +412,7 @@ def check(now=None, send=None):
                 continue         # the device was removed from Fleet
             c.execute('INSERT INTO events(device_id, ts, kind, code, level, detail) VALUES(?,?,?,?,?,?)',
                       (did, now, 'end', code, issue['level'], issue['detail']))
+            _emit('device.online' if code == 'offline' else 'device.resolved', did, devices[did], code, issue['level'], issue['detail'])
             if issue['alerted'] and conf['recovery']:
                 ended.append({**issue, 'ended': now})
         channels = [ch for ch in conf['channels'] if ch.get('enabled', True)]
@@ -425,7 +436,7 @@ _last_cleanup = [0]
 
 
 def _notify(conf, channels, devices, started, ended, send):
-    tx = TEXT[conf['language']]
+    tx = TEXT.get(conf['language'], TEXT['en'])
     link = lambda did: f"{conf['public_url']}/#/device/{did}" if conf['public_url'] else ''
     where = lambda d: ' / '.join(x for x in (d['location'], d['group']) if x)
     clock = lambda ts: time.strftime('%H:%M', time.localtime(ts))
@@ -481,6 +492,41 @@ def backup_failed(name, error, send=None):
                            {'destination': name, 'error': error}, v=name, e=error)
 
 
+
+
+def content_notice(now=None, send=None):
+    """Once a day from 8:00: items (of global playlists and on the nodes) whose validity ends within 2 days."""
+    from .core import DATA
+    from .schedule import local_now
+    state = DATA / 'content-notice.json'
+    now = now or time.time()
+    day = local_now(now).strftime('%Y-%m-%d')
+    try:
+        last = json.loads(state.read_text()).get('day')
+    except (OSError, ValueError):
+        last = None
+    if last == day or local_now(now).hour < 8:
+        return None
+    from .devices import build
+    soon = []
+    with db() as c:
+        for it in c.execute('SELECT i.name, i.valid_until, p.name playlist FROM global_playlist_items i JOIN global_playlists p '
+                            'ON p.id=i.playlist_id WHERE i.valid_until BETWEEN ? AND ?', (now, now + 2 * 86400)):
+            soon.append({'name': it['name'], 'until': it['valid_until'], 'where': it['playlist']})
+        for row in c.execute('SELECT * FROM devices').fetchall():
+            for a in build(row, full=True)['assets']:
+                if a.get('valid_until') and now <= a['valid_until'] <= now + 2 * 86400:
+                    soon.append({'name': a['name'], 'until': a['valid_until'], 'where': row['name'], 'device_id': row['id']})
+    state.write_text(json.dumps({'day': day}))
+    if not soon:
+        return []
+    from .integrations import emit
+    emit('content.expiring', {'items': soon})
+    names = ', '.join(f"{x['name']} ({x['where']})" for x in soon)
+    _system_message(config(), 'expiring', 'content_expiring', 'info', '/#/timeline', send, {'items': soon}, v=str(len(soon)), e=names)
+    return soon
+
+
 def approval_requested(playlist, username, count, send=None):
     """A deployment waits for an approval."""
     return _system_message(config(), 'approval', 'approval_requested', 'info', '/#/approvals', send,
@@ -496,7 +542,7 @@ def _system_message(conf, key, event, level, path, send, extra, **values):
     channels = [ch for ch in conf['channels'] if ch.get('enabled', True)]
     if not conf['enabled'] or not channels:
         return False
-    tx = TEXT[conf['language']]
+    tx = TEXT.get(conf['language'], TEXT['en'])
     fill = lambda s: s.replace('{v}', _text(values.get('v'), 80)).replace('{c}', _text(values.get('c'), 40)).replace('{e}', _text(values.get('e'), 300))
     title, lines = fill(tx[key + '_title']), [fill(tx[key + '_body'])]
     url = f"{conf['public_url']}{path}" if conf['public_url'] else ''
@@ -559,7 +605,7 @@ def _deliver(ch, conf, title, lines, payload, level):
         data = {'content': (f'**{title}**\n{body}')[:1900], 'allowed_mentions': {'parse': []}}
     elif t == 'telegram':
         esc = lambda v: html.escape(str(v), quote=False)
-        links = [f' <a href="{html.escape(x["url"])}">{esc(TEXT[conf["language"]]["open"])}</a>' if x.get('url') else ''
+        links = [f' <a href="{html.escape(x["url"])}">{esc(TEXT.get(conf["language"], TEXT["en"])["open"])}</a>' if x.get('url') else ''
                  for x in items] if len(items) == len(lines) else [''] * len(lines)
         text = f'<b>{esc(title)}</b>\n' + '\n'.join(esc(line) + link for line, link in zip(lines, links))
         if len(text) > 4000:

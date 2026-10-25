@@ -30,8 +30,9 @@ def usage(c, fid):
 
 
 def _file(c, fid):
+    from .tenants import owned
     row = c.execute('SELECT * FROM files WHERE id=?', (fid,)).fetchone()
-    if not row or row['kind'] not in KINDS:
+    if not row or row['kind'] not in KINDS or not owned(row):
         raise HTTPException(404, 'file_not_found')
     return row
 
@@ -39,11 +40,13 @@ def _file(c, fid):
 @router.get('/api/library')
 def list_library(r: Request):
     current_user(r)
+    from .tenants import sql
+    where, args = sql()
     with db() as c:
         rows = c.execute(
             "SELECT * FROM files WHERE kind IN ('image','video') AND (COALESCE(library,0)=1 OR id IN "
-            "(SELECT file_id FROM global_playlist_items WHERE file_id!='') OR id IN (SELECT image_file_id FROM node_templates)) "
-            "ORDER BY created DESC").fetchall()
+            "(SELECT file_id FROM global_playlist_items WHERE file_id!='') OR id IN (SELECT image_file_id FROM node_templates))"
+            f"{where} ORDER BY created DESC", args).fetchall()
         return [{'id': x['id'], 'name': x['name'], 'kind': x['kind'], 'size': x['size'], 'created': x['created'],
                  'origin': x['origin'], 'library': bool(x['library']), 'usage': usage(c, x['id'])} for x in rows]
 

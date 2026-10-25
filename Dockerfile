@@ -1,5 +1,8 @@
 FROM python:3.13-slim AS base
-RUN apt-get update && apt-get install -y --no-install-recommends curl openssh-client mtools rclone && rm -rf /var/lib/apt/lists/*
+# poppler and LibreOffice (without its UI) turn PDF and PowerPoint files into pictures of their pages
+RUN apt-get update && apt-get install -y --no-install-recommends curl openssh-client mtools rclone poppler-utils \
+      libreoffice-impress-nogui libreoffice-writer-nogui fonts-dejavu-core fonts-liberation2 fonts-crosextra-carlito \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/caracal-hub
 COPY hub/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

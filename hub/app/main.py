@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import access, approvals, console, images, library, monitor, notify, offsite, plays, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, takeover, templates, timeline, widgets
+from . import access, approvals, documents, integrations, reports, tenants, console, images, library, monitor, notify, offsite, plays, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, takeover, templates, timeline, widgets
 from .core import (ACTIONS, AGENT_VERSION, BOOT, DEVICE_PERMISSIONS, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, APP_DIR, require_device,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -26,6 +26,7 @@ from .devices import COLLECTION_KIND, MEDIA_KINDS, SCREENSHOTS, build, collectio
 async def lifespan(_app):
     monitor.start()          # the background check of the fleet (events and alerts)
     schedule.start()         # schedules and scheduled actions
+    integrations.start()     # webhook deliveries
     yield
 
 
@@ -54,11 +55,15 @@ app.include_router(plays.router)        # proof of play
 app.include_router(timeline.router)     # what plays when
 app.include_router(library.router)      # the media library
 app.include_router(widgets.router)      # feeds for the widget preview
+app.include_router(integrations.router) # API tokens and webhooks
+app.include_router(documents.router)    # PDF and presentations as pictures
+app.include_router(reports.router)      # monthly reports
+app.include_router(tenants.router)      # customers in one Fleet
 
 
 SECURITY_HEADERS = {
     # no inline scripts, no third-party resources; inline styles are used for progress bars
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline'; "
                                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
                                "form-action 'self'; object-src 'none'",
     'X-Content-Type-Options': 'nosniff',
@@ -208,6 +213,10 @@ async def edit_me(r: Request):
     with db() as c:
         if d.get('language') in LANGUAGES:
             c.execute('UPDATE users SET language=? WHERE id=?', (d['language'], u['id']))
+        if isinstance(d.get('prefs'), dict):   # merged into what is stored, then cleaned
+            from .core import user_prefs
+            prefs = user_prefs({'prefs_json': json.dumps({**user_prefs(u), **d['prefs']})})
+            c.execute('UPDATE users SET prefs_json=? WHERE id=?', (json.dumps(prefs), u['id']))
         if d.get('new_password'):
             if not check_password(str(d.get('current_password', '')), u['password_hash']):
                 raise HTTPException(400, 'wrong_password')
@@ -221,6 +230,30 @@ async def edit_me(r: Request):
     if d.get('new_password'):
         audit(u, 'user.password', u['username'])
     return {'ok': True, 'token': token}
+
+
+@app.get('/api/onboarding')
+def onboarding(r: Request):
+    """The first steps of a new Fleet, as far as this user may take them: done or not."""
+    u = current_user(r, None)
+    access = u['access']
+    with db() as c:
+        rows = [x for x in c.execute('SELECT * FROM devices').fetchall() if access.on('view', x)]
+        lists = c.execute('SELECT COUNT(*) FROM global_playlists').fetchone()[0]
+        users = c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    content = lists or any(json.loads(x['status_json'] or '{}').get('assets') for x in rows)
+    alerts = monitor.config()
+    steps = []
+    if access.has('install') or access.has('settings'):
+        steps.append({'key': 'device', 'done': bool(rows)})
+    if access.has('content'):
+        steps.append({'key': 'content', 'done': bool(content)})
+    if access.everywhere('settings'):
+        steps.append({'key': 'alerts', 'done': bool(alerts['enabled'] and alerts['channels'])})
+        steps.append({'key': 'backup', 'done': bool(offsite.settings()['targets'])})
+    if access.everywhere('users'):
+        steps.append({'key': 'users', 'done': users > 1})
+    return {'steps': steps}
 
 
 # ---------------------------------------------------------------- devices
@@ -627,9 +660,7 @@ def validate_command(c, row, action, payload):
     if action == 'overlay_settings':
         payload = validate_overlay(payload)
     if action == 'player_settings':
-        if payload.get('web_dark') not in DARK_MODES:
-            raise HTTPException(400, 'invalid_value')
-        payload = {'web_dark': payload['web_dark']}
+        payload = validate_player_settings(payload)
     if action == 'diagnostics':
         payload = {}
     if action in ('add_camera', 'update_camera'):
@@ -832,6 +863,41 @@ def validate_camera(d, edit=False):
         out['streams'].append({'name': text(st.get('name'), 80), 'url': url, 'username': text(st.get('username'), 200),
                                'password': str(st.get('password') or '')[:200]})
     out.update(validate_validity(d))
+    return out
+
+
+def validate_layout(v):
+    """Zones next to the playlist: a side panel and a bar at the bottom, each with a widget ({} = the whole screen)."""
+    if not v:
+        return {}
+    if not isinstance(v, dict):
+        raise HTTPException(400, 'invalid_value')
+    out = {}
+    for zone, size, lo, hi, default in (('side', 'width', 15, 40, 25), ('ticker', 'height', 5, 25, 8)):
+        z = v.get(zone)
+        if not z:
+            continue
+        widget = str(z.get('widget') or '').strip() if isinstance(z, dict) else ''
+        if widget.startswith(playlists.WIDGET_PREFIX):
+            widget = widget[len(playlists.WIDGET_PREFIX):]
+        if not widget.startswith('type=') or len(widget) > 3000 or any(ch.isspace() for ch in widget):
+            raise HTTPException(400, 'zone_widget_required')
+        out[zone] = {size: bounded(z.get(size) or default, lo, hi), 'widget': widget}
+        if zone == 'side':
+            out[zone]['position'] = 'left' if z.get('position') == 'left' else 'right'
+    return out
+
+
+def validate_player_settings(d):
+    out = {}
+    if 'web_dark' in d:
+        if d['web_dark'] not in DARK_MODES:
+            raise HTTPException(400, 'invalid_value')
+        out['web_dark'] = d['web_dark']
+    if 'layout' in d:
+        out['layout'] = validate_layout(d['layout'])
+    if not out:
+        raise HTTPException(400, 'invalid_value')
     return out
 
 
@@ -1148,8 +1214,9 @@ async def _store_upload(r, name, kind, origin):
     finally:
         tmp.unlink(missing_ok=True)
     with db() as c:
-        c.execute('INSERT INTO files(id, name, kind, size, sha256, origin, created) VALUES(?,?,?,?,?,?,?)',
-                  (fid, name, kind, size, h.hexdigest(), origin, time.time()))
+        from .tenants import CURRENT
+        c.execute('INSERT INTO files(id, name, kind, size, sha256, origin, created, tenant_id) VALUES(?,?,?,?,?,?,?,?)',
+                  (fid, name, kind, size, h.hexdigest(), origin, time.time(), CURRENT.get()))
     await run_in_threadpool(cleanup_files)
     return fid
 
@@ -1241,6 +1308,37 @@ def list_org(r: Request):
     return out
 
 
+def coordinates(d):
+    """(lat, lon) of a location from the form, or (None, None)."""
+    try:
+        lat, lon = float(d.get('lat')), float(d.get('lon'))
+    except (TypeError, ValueError):
+        return None, None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise HTTPException(400, 'invalid_value')
+    return round(lat, 6), round(lon, 6)
+
+
+@app.post('/api/org/geocode')
+async def geocode(r: Request):
+    """Places matching an address (OpenStreetMap Nominatim), for the map of the locations."""
+    current_user(r, 'devices')
+    q = text((await body(r)).get('address'), 300)
+    if not q:
+        raise HTTPException(400, 'invalid_value')
+
+    def search():
+        import requests
+        res = requests.get('https://nominatim.openstreetmap.org/search', params={'q': q, 'format': 'json', 'limit': 5},
+                           headers={'User-Agent': f'CARACAL Fleet/{HUB_VERSION}'}, timeout=10)
+        res.raise_for_status()
+        return [{'lat': float(x['lat']), 'lon': float(x['lon']), 'name': x.get('display_name', '')} for x in res.json()]
+    try:
+        return {'places': await run_in_threadpool(search)}
+    except Exception:
+        raise HTTPException(502, 'geocode_failed')
+
+
 def _org(kind):
     if kind not in ORG:
         raise HTTPException(404, 'not_found')
@@ -1261,8 +1359,9 @@ async def create_org(kind: str, r: Request):
         if c.execute(f'SELECT 1 FROM {table} WHERE name=?', (name,)).fetchone():
             raise HTTPException(409, 'already_exists')
         if kind == 'locations':
-            c.execute(f'INSERT INTO {table}(name, description, address, created) VALUES(?,?,?,?)',
-                      (name, text(d.get('description'), 1000), text(d.get('address'), 500), time.time()))
+            lat, lon = coordinates(d)
+            c.execute(f'INSERT INTO {table}(name, description, address, created, lat, lon) VALUES(?,?,?,?,?,?)',
+                      (name, text(d.get('description'), 1000), text(d.get('address'), 500), time.time(), lat, lon))
         else:
             c.execute(f'INSERT INTO {table}(name, description, created) VALUES(?,?,?)',
                       (name, text(d.get('description'), 1000), time.time()))
@@ -1287,7 +1386,8 @@ async def edit_org(kind: str, name: str, r: Request):
             raise HTTPException(409, 'already_exists')
         c.execute(f'UPDATE {table} SET name=?, description=? WHERE name=?', (new, text(d.get('description'), 1000), name))
         if kind == 'locations':
-            c.execute(f'UPDATE {table} SET address=? WHERE name=?', (text(d.get('address'), 500), new))
+            lat, lon = coordinates(d)
+            c.execute(f'UPDATE {table} SET address=?, lat=?, lon=? WHERE name=?', (text(d.get('address'), 500), lat, lon, new))
         c.execute(f'UPDATE devices SET {col}=? WHERE {col}=?', (new, name))
         if new != name:
             access.rename_in_scopes(c, kind, name, new)

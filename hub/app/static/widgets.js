@@ -6,8 +6,8 @@ const LANG = Q.get('lang') === 'en' ? 'en' : 'cs';
 const LOCALE = LANG === 'en' ? 'en-GB' : 'cs-CZ';
 const W = document.getElementById('w');
 const T = {
-  cs: { loading: 'Načítám…', failed: 'Nelze načíst', noCity: 'Zadejte město', cityNotFound: 'Město nebylo nalezeno', wind: 'vítr', feels: 'pocitově', humidity: 'vlhkost', noItems: 'Žádné zprávy', emptyTable: 'Tabulka je prázdná', page: 'strana' },
-  en: { loading: 'Loading…', failed: 'Cannot load', noCity: 'Enter a city', cityNotFound: 'City not found', wind: 'wind', feels: 'feels like', humidity: 'humidity', noItems: 'No news', emptyTable: 'The table is empty', page: 'page' },
+  cs: { free: 'Volno', busy: 'Obsazeno', until: 'do {t}', freeUntil: 'volno do {t}', freeAllDay: 'volno do konce dne', next: 'Dál dnes', nothing: 'Žádné další schůzky', noEvents: 'Žádné události', allDay: 'celý den', today: 'Dnes', tomorrow: 'Zítra', loading: 'Načítám…', failed: 'Nelze načíst', noCity: 'Zadejte město', cityNotFound: 'Město nebylo nalezeno', wind: 'vítr', feels: 'pocitově', humidity: 'vlhkost', noItems: 'Žádné zprávy', emptyTable: 'Tabulka je prázdná', page: 'strana' },
+  en: { free: 'Free', busy: 'Busy', until: 'until {t}', freeUntil: 'free until {t}', freeAllDay: 'free for the rest of the day', next: 'Later today', nothing: 'No more meetings', noEvents: 'No events', allDay: 'all day', today: 'Today', tomorrow: 'Tomorrow', loading: 'Loading…', failed: 'Cannot load', noCity: 'Enter a city', cityNotFound: 'City not found', wind: 'wind', feels: 'feels like', humidity: 'humidity', noItems: 'No news', emptyTable: 'The table is empty', page: 'page' },
 }[LANG];
 
 if (Q.get('theme') === 'light') document.body.classList.add('light');
@@ -187,10 +187,149 @@ function text() {
   W.innerHTML = `<div class="text ${center ? 'center' : ''}"><div class="bar"></div>${Q.get('title') ? `<h1>${esc(Q.get('title'))}</h1>` : ''}<p>${esc(Q.get('text') || '')}</p></div>`;
 }
 
+// ---------- QR code (drawn by the node / Fleet, works offline)
+function qr() {
+  const caption = Q.get('text') || '';
+  W.innerHTML = `<div class="qr">${Q.get('title') ? `<h1>${esc(Q.get('title'))}</h1>` : ''}<img src="/api/widgets/qr?text=${encodeURIComponent(Q.get('url') || '')}" alt="">${caption ? `<p>${esc(caption)}</p>` : ''}</div>`;
+}
+
+// ---------- calendars (iCalendar / ICS: Microsoft 365, Google, Exchange, Nextcloud…)
+const WINDOWS_TZ = { 'Central Europe Standard Time': 'Europe/Prague', 'Central European Standard Time': 'Europe/Warsaw', 'W. Europe Standard Time': 'Europe/Berlin',
+  'Romance Standard Time': 'Europe/Paris', 'GMT Standard Time': 'Europe/London', 'E. Europe Standard Time': 'Europe/Bucharest', 'FLE Standard Time': 'Europe/Kiev',
+  'Eastern Standard Time': 'America/New_York', 'Central Standard Time': 'America/Chicago', 'Pacific Standard Time': 'America/Los_Angeles', UTC: 'UTC' };
+function tzOffset(ms, tz) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(new Date(ms)).map(x => [x.type, x.value]));
+  return Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour % 24, +parts.minute, +parts.second) - ms;
+}
+function icsDate(value, params) {
+  const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z?))?/.exec(value || '');
+  if (!m) return null;
+  const [, y, mo, d, h, mi, se, z] = m;
+  if (h === undefined) return { ms: new Date(+y, mo - 1, +d).getTime(), allDay: true };
+  if (z) return { ms: Date.UTC(+y, mo - 1, +d, +h, +mi, +se), allDay: false };
+  const tz = params.TZID && (WINDOWS_TZ[params.TZID] || params.TZID.replace(/^"|"$/g, ''));
+  if (tz) {
+    try { const guess = Date.UTC(+y, mo - 1, +d, +h, +mi, +se); return { ms: guess - tzOffset(guess, tz), allDay: false }; } catch { /* an unknown zone: local time */ }
+  }
+  return { ms: new Date(+y, mo - 1, +d, +h, +mi, +se).getTime(), allDay: false };
+}
+function parseIcs(text, from, to) {
+  const lines = text.replace(/\r?\n[ \t]/g, '').split(/\r?\n/);
+  const events = [];
+  let ev = null;
+  for (const line of lines) {
+    if (line === 'BEGIN:VEVENT') { ev = { exdates: [] }; continue; }
+    if (line === 'END:VEVENT') { if (ev) events.push(ev); ev = null; continue; }
+    if (!ev) continue;
+    const i = line.indexOf(':');
+    if (i < 0) continue;
+    const [name, ...rest] = line.slice(0, i).split(';');
+    const params = Object.fromEntries(rest.map(x => x.split('=')));
+    const value = line.slice(i + 1);
+    if (name === 'SUMMARY') ev.title = value.replace(/\\([,;\\])/g, '$1').replace(/\\n/gi, ' ');
+    else if (name === 'LOCATION') ev.where = value.replace(/\\([,;\\])/g, '$1');
+    else if (name === 'DTSTART') ev.start = icsDate(value, params);
+    else if (name === 'DTEND') ev.end = icsDate(value, params);
+    else if (name === 'DURATION') ev.duration = value;
+    else if (name === 'RRULE') ev.rrule = Object.fromEntries(value.split(';').map(x => x.split('=')));
+    else if (name === 'EXDATE') value.split(',').forEach(v => { const x = icsDate(v, params); if (x) ev.exdates.push(x.ms); });
+    else if (name === 'STATUS') ev.status = value;
+    else if (name === 'RECURRENCE-ID') ev.recurrence = icsDate(value, params);
+  }
+  const dur = ev => {
+    if (ev.end) return ev.end.ms - ev.start.ms;
+    const m = /P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?/.exec(ev.duration || '');
+    return m ? ((+m[1] || 0) * 86400 + (+m[2] || 0) * 3600 + (+m[3] || 0) * 60) * 1000 : (ev.start.allDay ? 86400000 : 3600000);
+  };
+  const moved = new Set(events.filter(e => e.recurrence).map(e => e.title + '|' + e.recurrence.ms));
+  const out = [];
+  const DAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+  for (const e of events) {
+    if (!e.start || e.status === 'CANCELLED') continue;
+    const len = dur(e);
+    const push = ms => { if (ms + len > from && ms < to && !e.exdates.includes(ms) && (e.recurrence || !moved.has(e.title + '|' + ms))) out.push({ title: e.title || '', where: e.where || '', start: ms, end: ms + len, allDay: e.start.allDay }); };
+    const r = e.rrule;
+    if (!r) { push(e.start.ms); continue; }
+    const until = r.UNTIL ? icsDate(r.UNTIL, {}).ms : Infinity, count = r.COUNT ? +r.COUNT : Infinity, step = +(r.INTERVAL || 1);
+    const byday = (r.BYDAY || '').split(',').filter(Boolean).map(x => DAYS.indexOf(x.slice(-2)));
+    let n = 0;
+    const base = new Date(e.start.ms);
+    for (let k = 0; k < 2000 && n < count; k++) {
+      let dates = [];
+      const t = new Date(base);
+      if (r.FREQ === 'DAILY') { t.setDate(base.getDate() + k * step); dates = [t]; }
+      else if (r.FREQ === 'WEEKLY') {
+        const week = new Date(base); week.setDate(base.getDate() - base.getDay() + k * 7 * step);
+        dates = (byday.length ? byday : [base.getDay()]).sort().map(dw => { const x = new Date(week); x.setDate(week.getDate() + dw); return x; }).filter(x => x >= base);
+      } else if (r.FREQ === 'MONTHLY') { t.setMonth(base.getMonth() + k * step); dates = [t]; }
+      else if (r.FREQ === 'YEARLY') { t.setFullYear(base.getFullYear() + k * step); dates = [t]; }
+      else break;
+      for (const x of dates) {
+        if (x.getTime() > until || n >= count) { k = 1e9; break; }
+        n++;
+        push(x.getTime());
+      }
+      if (dates.length && dates[0].getTime() > to) break;
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+const hm = ms => new Date(ms).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
+async function calendar() {
+  const url = Q.get('url');
+  if (!url) throw new Error('URL');
+  const days = Math.min(14, Math.max(1, Number(Q.get('days') || 3)));
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const events = parseIcs(await feed(url), Date.now(), start.getTime() + days * 86400000).slice(0, 40);
+  const groups = {};
+  for (const e of events) {
+    const d = new Date(Math.max(e.start, Date.now())); d.setHours(0, 0, 0, 0);
+    (groups[d.getTime()] = groups[d.getTime()] || []).push(e);
+  }
+  const label = ms => { const diff = Math.round((ms - start.getTime()) / 86400000); return diff === 0 ? T.today : diff === 1 ? T.tomorrow : new Date(ms).toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'numeric' }); };
+  W.innerHTML = `${titleHtml()}<div class="agenda">${Object.entries(groups).map(([day, list]) => `<section><h2>${esc(label(+day))}</h2>
+    ${list.map(e => `<div class="ev"><span class="ev-time">${e.allDay ? T.allDay : hm(e.start) + '–' + hm(e.end)}</span><span class="ev-title">${esc(e.title)}${e.where ? `<small>${esc(e.where)}</small>` : ''}</span></div>`).join('')}</section>`).join('')
+    || `<div class="error">${T.noEvents}</div>`}</div>`;
+}
+async function room() {
+  const url = Q.get('url');
+  if (!url) throw new Error('URL');
+  const end = new Date(); end.setHours(23, 59, 59, 999);
+  const now = Date.now();
+  const events = parseIcs(await feed(url), now - 12 * 3600000, end.getTime()).filter(e => !e.allDay && e.end > now);
+  const cur = events.find(e => e.start <= now && now < e.end), next = events.filter(e => e.start > now);
+  W.innerHTML = `<div class="room ${cur ? 'busy' : 'free'}"><div class="room-name">${esc(Q.get('title') || '')}</div>
+    <div class="room-state">${cur ? T.busy : T.free}</div>
+    <div class="room-now">${cur ? `${esc(cur.title)} · ${T.until.replace('{t}', hm(cur.end))}` : next.length ? T.freeUntil.replace('{t}', hm(next[0].start)) : T.freeAllDay}</div>
+    <div class="room-next"><h2>${T.next}</h2>${next.slice(0, 4).map(e => `<div class="ev"><span class="ev-time">${hm(e.start)}–${hm(e.end)}</span><span class="ev-title">${esc(e.title)}</span></div>`).join('') || `<p>${T.nothing}</p>`}</div></div>`;
+}
+
+// ---------- ticker: a line of news or own text running across a narrow zone
+async function ticker() {
+  let items = (Q.get('text') || '').split('\n').map(x => x.trim()).filter(Boolean);
+  if (Q.get('url')) {
+    const xml = new DOMParser().parseFromString(await feed(Q.get('url')), 'text/xml');
+    const nodes = [...xml.querySelectorAll('item')].length ? [...xml.querySelectorAll('item')] : [...xml.querySelectorAll('entry')];
+    items = items.concat(nodes.slice(0, 20).map(n => plain((n.getElementsByTagName('title')[0] || {}).textContent || '')).filter(Boolean));
+  }
+  const speed = Math.min(400, Math.max(30, Number(Q.get('speed') || 120)));   // pixels per second
+  const label = Q.get('title') ? `<b class="tk-label">${esc(Q.get('title'))}</b>` : '';
+  const line = items.map(x => `<span>${esc(x)}</span>`).join('<i>•</i>');
+  W.className = 'tk-host';
+  W.innerHTML = `${label}<div class="tk"><div class="tk-run">${line}<i>•</i>${line}<i>•</i></div></div>`;
+  const run = W.querySelector('.tk-run');
+  requestAnimationFrame(() => { run.style.animationDuration = (run.scrollWidth / 2 / speed) + 's'; });
+}
+
 const type = Q.get('type');
 W.innerHTML = `<div class="error">${T.loading}</div>`;
 if (type === 'clock') clock();
 else if (type === 'weather') every(15 * 60000, weather);
 else if (type === 'rss') every(10 * 60000, news);
 else if (type === 'table') every(5 * 60000, table);
+else if (type === 'qr') qr();
+else if (type === 'calendar') every(5 * 60000, calendar);
+else if (type === 'room') every(60000, room);
+else if (type === 'ticker') every(10 * 60000, ticker);
 else text();

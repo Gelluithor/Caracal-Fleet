@@ -60,6 +60,12 @@ the node, and camera passwords are never shown and leave the command history onc
   with a "resolved" message too; devices can be muted for maintenance. The same channels hear about a new version of
   Fleet and the result of its update
 - **Screen wall:** what every screen shows right now, refreshed while the page is open
+- **Map:** every location on a map (OpenStreetMap) with the state of its screens; coordinates are found from the
+  address in one click
+- **Monthly reports:** a PDF with availability, outages, problems and the most shown content of a month, downloaded
+  or e-mailed automatically on the 1st
+- **Content warnings:** an alert when items run out of their validity in the next days, and a problem on a screen
+  whose playlist is empty or has nothing valid left
 - **Proof of play:** what every screen showed and for how long, by content, screen or day, with a chart and a CSV
   export (CARACAL 2026.10.23.1 with agent 4.17)
 - **Display watch:** the agent restarts an X display that stopped answering, the node restarts a player whose website
@@ -75,7 +81,15 @@ the node, and camera passwords are never shown and leave the command history onc
   a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
   show or freeze an item, skip, resume, restart the player or the device
 - **Widgets:** a clock, the weather (Open-Meteo), news from RSS / Atom, a table from CSV or Google Sheets and a text
-  as playlist items, with a live preview; the node draws them itself (CARACAL 2026.10.23.1 with agent 4.17)
+  as playlist items, with a live preview; the node draws them itself (CARACAL 2026.10.23.1 with agent 4.17); also a
+  calendar and a meeting room (free / busy) from an ICS link of Microsoft 365, Outlook or Google, a QR code and a
+  ticker of your own text or RSS
+- **Screen layout:** a side panel and a bar at the bottom next to the playlist, each with its own widget
+  (CARACAL 2026.10.25)
+- **PDF and presentations:** a PDF, PowerPoint, Impress or Word document becomes one picture per page in the media
+  library and in the playlist
+- **Offline fallback:** when a website cannot be loaded, the node shows a calm placeholder and goes on with the next
+  item instead of a browser error
 - **Cameras:** RTSP and HTTP streams of IP cameras and recorders as playlist items, up to 9 in a grid; ONVIF cameras
   and recorders (NVR, every channel) are found in the node's network and asked for their streams, with a picture of
   each stream before it goes on the screen; their passwords stay on the node, encrypted. Cameras can also be part of
@@ -113,6 +127,8 @@ the node, and camera passwords are never shown and leave the command history onc
   new node is set up as soon as it connects
 - **Labels and tables:** free labels on devices (filters of the device list and of proof of play), the device list
   as CSV, and names, locations, groups, labels and notes of many devices changed from a table with a preview
+- **Customers (multi-tenant):** for companies running screens for others – a customer owns locations, and its users
+  see only their devices, global playlists, media and templates
 - **Fast control:** agents wait for commands (long polling), so a command reaches the screen within a second
 - **Everything the node's web administration does:** besides content and notifications also its administrator
   (create, new name and password), the countdown bar on the TV, the notification queue, history and audit log, the
@@ -145,7 +161,7 @@ the node, and camera passwords are never shown and leave the command history onc
   Dropbox…) or a mounted folder, checked there, the oldest removed; optionally encrypted with a passphrase
   (AES-256-GCM); a backup can be restored straight from a destination, also on a new server
 - **Administration:** users, roles and user groups; command history, audit log,
-  Czech and English UI, custom logo, full backup and restore for server migrations, daily backups on the hub;
+  Czech, Slovak, English, German and Polish UI, simple and pro mode remembered per user, a getting-started guide, custom logo, full backup and restore for server migrations, daily backups on the hub;
   one-time passwords (the user sets their own at the first sign-in), two-factor sign-in (TOTP with recovery codes) and single sign-on through OpenID Connect (Microsoft Entra ID,
   Google, Keycloak, Authentik…)
 
@@ -289,6 +305,24 @@ and Alertmanager webhooks, Uptime Kuma webhooks and plain text with the `Title` 
 token can also be sent as `X-Caracal-Token` or as the Basic auth password. `?group=`, `?location=` and `?device=`
 narrow the request to part of the token's screens. Each token has a rate limit (30 requests per minute by default);
 refused tokens are audited. Screens whose CARACAL has no notifications are skipped (`skipped` in the response).
+
+## REST API and webhooks
+
+*Settings → API & webhooks* creates API tokens for other systems (Home Assistant, a fire panel, a CRM…). A token has
+a role and a scope like a user, optionally a customer and an expiry, and can call the whole REST API of the web UI
+(`/api/...`), except managing users. It is shown once; Fleet keeps its hash.
+
+```bash
+curl -H "Authorization: Bearer cfa_..." https://fleet.example/api/devices
+curl -X POST -H "Authorization: Bearer cfa_..." -H "Content-Type: application/json" \
+  https://fleet.example/api/takeovers -d '{"title":"Evacuate the building","level":"critical","minutes":30,"targets":{"all":true}}'
+```
+
+Webhooks send events as JSON (`{"event": ..., "time": ..., "data": {...}}`) by POST to your address:
+`device.offline`, `device.online`, `device.problem`, `device.resolved`, `takeover.started`, `takeover.ended`,
+`approval.requested`, `approval.decided`, `playlist.deployed`, `content.expiring` and `test`. Every delivery carries
+`X-Caracal-Event` and `X-Caracal-Signature: sha256=<HMAC-SHA256 of the body with the webhook's signing key>`; a failed
+delivery is retried a few times and the last result is shown in the list.
 
 ## Updating CARACAL on the nodes
 

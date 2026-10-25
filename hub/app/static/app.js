@@ -162,6 +162,8 @@ const ICONS = {
   takeover: 'M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1zM16 8a5 5 0 0 1 0 8M19 5a9 9 0 0 1 0 14',
   widget: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z',
   tag: 'M3 12V3h9l9 9-9 9zM7.5 7.5h.01',
+  map: 'M9 4 3 6v14l6-2 6 2 6-2V4l-6 2zM9 4v14M15 6v14',
+  customer: 'M3 21V7l9-4 9 4v14M9 21v-6h6v6M8 10h.01M12 10h.01M16 10h.01',
 };
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[n] || ICONS.web}"/></svg>`;
 const isTag = k => k === 'grafana-tag';
@@ -222,7 +224,19 @@ function applyStatic() {
   $('#paletteBtn').innerHTML = `${icon('search')}<span>${t('search')}</span><kbd>${isMac ? '⌘' : 'Ctrl'} K</kbd>`;
 }
 
+// Slovak, German and Polish are loaded when chosen (missing texts fall back to English)
+const LANG_NAMES = [['cs', 'Čeština'], ['sk', 'Slovenčina'], ['en', 'English'], ['de', 'Deutsch'], ['pl', 'Polski']];
+function loadLang(l) {
+  if (I18N[l] || !['sk', 'de', 'pl'].includes(l)) return Promise.resolve();
+  return new Promise(resolve => {
+    const el = document.createElement('script');
+    el.src = `/static/i18n-${l}.js`;
+    el.onload = el.onerror = () => resolve();
+    document.head.append(el);
+  });
+}
 async function setLang(l) {
+  await loadLang(l);
   S.lang = l;
   store.set('caracalLang', l);
   applyStatic();
@@ -317,6 +331,7 @@ async function start() {
     S.me = await api('/api/me');
   } catch { logout(); return; }
   if (!store.get('caracalLang')) S.lang = S.me.language || 'cs';
+  await loadLang(S.lang);
   S.agentVersion = S.me.agent_version;
   if (S.me.must_change_password) {
     // a one-time password from an administrator: a password of one's own first, nothing else
@@ -339,7 +354,7 @@ async function start() {
     $('#view').innerHTML = `<section class="card">${emptyState('lock', t('noAccessTitle'), t('noAccessHint'), '')}</section>`;
     return;
   }
-  await refresh();
+  await Promise.all([refresh(), loadTenants()]);
   route();
 }
 
@@ -374,16 +389,33 @@ async function refresh() {
 
 // ------------------------------------------------------------------ navigation
 
-const NAV = [
-  ['overview', 'view'], ['devices', 'view'], ['wall', 'view'], ['attention', 'view'], ['playlists', 'view'], ['global', 'view'],
-  ['library', 'view'], ['approvals', 'view'], ['templates', 'view'], ['schedule', 'view'], ['timeline', 'view'], ['plays', 'view'],
-  ['takeover', 'control'], ['organization', 'view'],
-  ['operations', 'view'], ['updates', 'updates'], ['audit', 'audit'], ['users', 'users'], ['settings', 'view'],
+// The menu in groups that can be folded; the simple mode leaves out the pages for advanced work (they stay reachable
+// through the search and links). Both choices are kept with the user's account.
+const NAV_GROUPS = [
+  ['screens', [['overview', 'view'], ['devices', 'view'], ['wall', 'view'], ['map', 'view'], ['attention', 'view']]],
+  ['content', [['playlists', 'view'], ['global', 'view'], ['library', 'view'], ['approvals', 'view'], ['takeover', 'control']]],
+  ['planning', [['schedule', 'view'], ['timeline', 'view'], ['templates', 'view'], ['plays', 'view']]],
+  ['admin', [['organization', 'view'], ['operations', 'view'], ['updates', 'updates'], ['audit', 'audit'], ['users', 'users'], ['settings', 'view']]],
 ];
+const NAV = NAV_GROUPS.flatMap(([, items]) => items);
+const PRO_PAGES = new Set(['templates', 'timeline', 'plays', 'organization', 'operations', 'updates', 'audit']);
+const prefs = () => (S.me && S.me.prefs) || { ui_mode: 'pro', nav_closed: [], guide_hidden: false };
+const simpleMode = () => prefs().ui_mode === 'simple';
+async function savePrefs(change) {
+  S.me.prefs = { ...prefs(), ...change };
+  await api('/api/me', { method: 'PATCH', json: { prefs: change } }).catch(() => {});
+}
 
 function buildNav() {
-  $('#nav').innerHTML = NAV.filter(([, p]) => can(p)).map(([v]) =>
-    `<a href="#/${v}" data-nav="${v}" class="${v === 'takeover' ? 'nav-takeover' : ''}">${icon(v)}<span>${t('nav_' + v)}</span>${v === 'attention' ? '<em id="attBadge"></em>' : v === 'approvals' ? '<em id="apprBadge"></em>' : ''}</a>`).join('');
+  const closed = new Set(prefs().nav_closed);
+  $('#nav').innerHTML = NAV_GROUPS.map(([g, items]) => {
+    const list = items.filter(([v, p]) => can(p) && !(simpleMode() && PRO_PAGES.has(v)));
+    if (!list.length) return '';
+    return `<div class="nav-group ${closed.has(g) ? 'closed' : ''}"><button class="nav-head" data-do="navGroup" data-g="${g}" aria-expanded="${closed.has(g) ? 'false' : 'true'}"><span>${t('navGroup_' + g)}</span>${icon('chev', 'chev')}</button>
+      <div class="nav-items">${list.map(([v]) => `<a href="#/${v}" data-nav="${v}" class="${v === 'takeover' ? 'nav-takeover' : ''}">${icon(v)}<span>${t('nav_' + v)}</span>${v === 'attention' ? '<em id="attBadge"></em>' : v === 'approvals' ? '<em id="apprBadge"></em>' : ''}</a>`).join('')}</div></div>`;
+  }).join('');
+  const mode = $('#modeSwitch');
+  if (mode) mode.innerHTML = ['simple', 'pro'].map(m => `<button data-do="setMode" data-mode="${m}" class="${prefs().ui_mode === m ? 'active' : ''}" title="${esc(t('modeHint_' + m))}">${t('mode_' + m + 'UI')}</button>`).join('');
   updateNavBadges();
 }
 
@@ -397,6 +429,7 @@ function updateNavBadges() {
   if (an) an.hidden = !S.approvalEnabled && !S.approvalsPending && S.route.view !== 'approvals';
   const active = S.route.view === 'device' ? 'devices' : S.route.view;
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.nav === active));
+  $$('#nav .nav-group').forEach(g => g.classList.toggle('has-active', !!$('a.active', g)));
 }
 
 function parseRoute() {
@@ -477,7 +510,7 @@ function setTitle(title, crumb = '', href = '') {
 VIEWS.overview = {
   mount(root) {
     setTitle(t('nav_overview'));
-    root.innerHTML = `<div id="ovUpdate"></div><div id="ovWelcome"></div><div class="stats" id="ovStats"></div>
+    root.innerHTML = `<div id="ovUpdate"></div><div id="ovGuide"></div><div id="ovWelcome"></div><div class="stats" id="ovStats"></div>
       <div class="grid two" id="ovRow">
         <section class="card"><div class="card-head"><h2>${t('needsAttention')}</h2><a href="#/attention" class="link">${t('showAll')}</a></div><div id="ovAtt"></div></section>
         <section class="card"><div class="card-head"><h2>${t('recentEvents')}</h2><span class="muted">${t('last24h')}</span></div><div id="ovEvents"><div class="empty">…</div></div></section>
@@ -490,6 +523,7 @@ VIEWS.overview = {
     const ds = S.devices;
     const first = !ds.length;
     patch($('#ovWelcome', root), first ? welcomeCard() : '');
+    guideCard($('#ovGuide', root), first);
     fleetUpdateNotice($('#ovUpdate', root));
     for (const id of ['#ovStats', '#ovRow', '#ovWall']) $(id, root).hidden = first;
     const online = ds.filter(d => d.online).length;
@@ -636,6 +670,12 @@ function renderBulkBar(el) {
     <button class="btn sm ghost" data-do="clearSel">${icon('x')}${t('clearSelection')}</button>`);
 }
 
+// what the simple mode leaves out of the device menus (still in the pro mode and the search)
+const PRO_ACTIONS = new Set(['overlaySettings', 'bulkOverlay', 'webDarkSettings', 'bulkWebDark', 'notifySettings', 'bulkNotifySettings',
+  'notifySound', 'bulkNotifySound', 'addWatcher', 'bulkWatcher', 'notifyStyle', 'templateApplyTo', 'templateFromDevice', 'nodeAdmin',
+  'bulkNodeAdmin', 'downloadSource', 'bulkDownloadSource', 'update_agent', 'caracalUpdate', 'convertNodes', 'reinstallNode', 'bulkReinstall',
+  'diagnostics', 'provision', 'bulkSetHub', 'bulkTags']);
+
 // Actions of one device (d) or of the selected devices (d = null). One model feeds the action bar, the right-click
 // menu and the command palette, so every place offers the same set in the same order.
 function deviceActions(d = null) {
@@ -668,7 +708,8 @@ function deviceActions(d = null) {
     { ic: 'playlists', label: t('menuContent'), sections: [
       [content && A('bulkAddContent', 'plus', t('addContent')), content && A('bulkCopy', 'copy', t('copyPlaylistHere'))],
       [content && A(d ? 'overlaySettings' : 'bulkOverlay', 'settings', t('overlayBar'), { disabled: !overlay, why: why(overlay) }),
-        content && A(d ? 'webDarkSettings' : 'bulkWebDark', 'moon', t('webDark'), { disabled: !webDark, why: why(webDark) })],
+        content && A(d ? 'webDarkSettings' : 'bulkWebDark', 'moon', t('webDark'), { disabled: !webDark, why: why(webDark) }),
+        content && A(d ? 'layoutSettings' : 'bulkLayout', 'widget', t('screenLayout'), { disabled: !sel.some(layoutSupport), why: why(sel.some(layoutSupport)) })],
     ] },
     { ic: 'attention', label: t('menuNotify'), sections: [
       [ctl && A(d ? 'notifySend' : 'bulkNotify', 'plus', t('notifySend'), { disabled: !notify, why: notifyWhy })],
@@ -697,7 +738,7 @@ function deviceActions(d = null) {
       [manage && A('bulkSetHub', 'upload', t('act_set_hub')),
         ctl && A(cmd, 'power', t('act_reboot'), { act: 'reboot', cls: 'danger', disabled: off })],
     ] },
-  ].map(m => ({ ...m, sections: m.sections.map(x => x.filter(Boolean)).filter(x => x.length) })).filter(m => m.sections.length);
+  ].map(m => ({ ...m, sections: m.sections.map(x => x.filter(a => a && !(simpleMode() && PRO_ACTIONS.has(a.act || a.todo)))).filter(x => x.length) })).filter(m => m.sections.length);
   return { play, menus };
 }
 
@@ -962,10 +1003,11 @@ function quickFix(d, a, inDetail = false) {
 // ---------- device detail
 
 const DEVICE_TABS = ['overview', 'playlist', 'collections', 'logins', 'notify', 'timeline', 'plays', 'history', 'settings'];
+const PRO_TABS = new Set(['logins', 'timeline', 'plays', 'history']);
 const TAB_COUNTS = { playlist: 'playlist_count', collections: 'collection_count', logins: 'profile_count', notify: 'watcher_count' };
 
 function deviceTabs(d, tab) {
-  return DEVICE_TABS.filter(x => x !== 'settings' || canOn(d, 'devices')).map(x => `<a href="#/device/${encodeURIComponent(d.id)}/${x}" class="${x === tab ? 'active' : ''}">${t('tab_' + x)}${TAB_COUNTS[x] && d[TAB_COUNTS[x]] ? ` <span class="count">${d[TAB_COUNTS[x]]}</span>` : ''}</a>`).join('');
+  return DEVICE_TABS.filter(x => (x !== 'settings' || canOn(d, 'devices')) && (x === tab || !simpleMode() || !PRO_TABS.has(x)) && (x !== 'collections' || !simpleMode() || d.collection_count)).map(x => `<a href="#/device/${encodeURIComponent(d.id)}/${x}" class="${x === tab ? 'active' : ''}">${t('tab_' + x)}${TAB_COUNTS[x] && d[TAB_COUNTS[x]] ? ` <span class="count">${d[TAB_COUNTS[x]]}</span>` : ''}</a>`).join('');
 }
 
 VIEWS.device = {
@@ -1540,6 +1582,7 @@ function renderPlaylist(el, d) {
       <button class="btn" data-do="addAsset" data-kind="video" data-id="${esc(d.id)}">${icon('video')}${t('addVideo')}</button>`}
       ${d.capabilities.add_camera === true ? `<button class="btn" data-do="addCamera" data-id="${esc(d.id)}">${icon('camera')}${t('add_camera')}</button>` : ''}
       ${d.capabilities.widgets === true ? `<button class="btn" data-do="addWidget" data-id="${esc(d.id)}">${icon('widget')}${t('widget')}</button>` : ''}
+      ${d.capabilities.upload === false ? '' : `<button class="btn" data-do="addDocument" data-target="device" data-id="${esc(d.id)}">${icon('audit')}${t('document')}</button>`}
       <button class="btn" data-do="copyContent" data-id="${esc(d.id)}">${icon('copy')}${t('copyPlaylist')}</button>` : ''}
     </div>
     ${S.pendingOrder ? `<div class="savebar">${t('orderChanged')}<button class="btn primary sm" data-do="saveOrder" data-id="${esc(d.id)}">${t('saveOrder')}</button><button class="btn sm ghost" data-do="resetOrder">${t('cancel')}</button></div>` : ''}
@@ -1575,6 +1618,9 @@ function renderPlaylist(el, d) {
   if (el._dragging) return;
   patch(el, html);
   if (edit) bindDrag($('#plist', el));
+  if (edit && d.capabilities.upload !== false) {
+    dropFiles(el, files => uploadMany(files, (f, up) => sendCommand(S.detail.id, 'add_media', mediaItem(f, up))));
+  }
 }
 
 function bindDrag(list) {
@@ -2192,21 +2238,24 @@ function scopeText(s) {
 VIEWS.users = {
   mount(root) {
     setTitle(t('nav_users'));
-    const tab = ['roles', 'groups'].includes(S.route.id) ? S.route.id : 'people';
+    const tab = ['roles', 'groups', 'tenants'].includes(S.route.id) ? S.route.id : 'people';
+    if (tab === 'tenants') { VIEWS.tenants.mount(root); return; }
     const add = { people: ['userEdit', 'newUser'], roles: ['roleEdit', 'roleNew'], groups: ['userGroupEdit', 'userGroupNew'] }[tab];
-    root.innerHTML = `<nav class="tabs"><a href="#/users" class="${tab === 'people' ? 'active' : ''}">${t('usersTab')}</a><a href="#/users/roles" class="${tab === 'roles' ? 'active' : ''}">${t('rolesTab')}</a><a href="#/users/groups" class="${tab === 'groups' ? 'active' : ''}">${t('userGroupsTab')}</a></nav>
+    root.innerHTML = `${usersTabs(tab)}
       <section class="card flush"><div class="toolbar"><p class="muted grow">${t(tab === 'people' ? 'usersHint' : tab === 'roles' ? 'rolesHint' : 'userGroupsHint')}</p><button class="btn primary" data-do="${add[0]}">${icon('plus')}${t(add[1])}</button></div><div id="uTable"></div></section>`;
   },
   async update(root) {
-    const [users, roles, groups] = await Promise.all([api('/api/users'), api('/api/roles'), api('/api/user-groups')].map(p => p.catch(() => null)));
+    if (S.route.id === 'tenants') return VIEWS.tenants.update(root);
+    const [users, roles, groups, tenants] = await Promise.all([api('/api/users'), api('/api/roles'), api('/api/user-groups'), api('/api/tenants')].map(p => p.catch(() => null)));
     if (!users || !roles || !groups) return;
+    S.tenants = tenants || [];
     Object.assign(S, { users, roles: roles.roles, userGroups: groups });
     const tab = ['roles', 'groups'].includes(S.route.id) ? S.route.id : 'people';
     const groupName = id => groups.find(g => g.id === id)?.name || '';
     if (tab === 'people') {
       patch($('#uTable', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('username')}</th><th>${t('role')}</th><th>${t('scope')}</th><th>${t('userGroupsTab')}</th><th>${t('state')}</th><th></th></tr></thead>
-        <tbody>${users.map(u => `<tr><td><b>${esc(u.username)}</b>${u.username === S.me.username ? ` <span class="tag">${t('you')}</span>` : ''}<br><small class="muted">${u.language === 'en' ? 'English' : 'Čeština'} · ${dt(u.created)}</small></td>
-        <td>${u.role ? `<span class="badge role">${esc(roleLabel(u.role))}</span>` : `<span class="muted">${t('roleNone')}</span>`}</td><td>${u.role ? scopeText(u.scope) : '—'}</td>
+        <tbody>${users.map(u => `<tr><td><b>${esc(u.username)}</b>${u.username === S.me.username ? ` <span class="tag">${t('you')}</span>` : ''}<br><small class="muted">${(LANG_NAMES.find(x => x[0] === u.language) || LANG_NAMES[0])[1]} · ${dt(u.created)}</small></td>
+        <td>${u.role ? `<span class="badge role">${esc(roleLabel(u.role))}</span>` : `<span class="muted">${t('roleNone')}</span>`}${u.tenant_id ? ` <span class="tag info">${icon('customer')}${esc(tenantName(u.tenant_id))}</span>` : ''}</td><td>${u.role ? scopeText(u.scope) : '—'}</td>
         <td>${u.groups.map(g => `<span class="tag">${esc(groupName(g))}</span>`).join(' ') || '—'}</td>
         <td>${u.enabled ? `<span class="tag ok">${t('active')}</span>` : `<span class="tag">${t('disabled')}</span>`}${u.totp ? ` <span class="tag info">2FA</span>` : ''}${u.must_change_password ? ` <span class="tag frozen">${t('pwOneTime')}</span>` : ''}${u.sso ? ` <span class="tag">SSO</span>` : ''}</td>
         <td class="actions-cell">${u.totp ? `<button class="btn sm ghost" data-do="totpReset" data-uid="${u.id}" data-name="${esc(u.username)}">${t('totpReset')}</button>` : ''}<button class="icon-btn" data-do="userEdit" data-uid="${u.id}" title="${t('edit')}">${icon('edit')}</button>
@@ -2266,7 +2315,8 @@ function userDialog(uid) {
         <button type="button" class="btn sm" data-gen-pw>${icon('refresh')}${t('pwGenerate')}</button></span></label>
       <label class="check must-change" ${u ? 'hidden' : ''}><input type="checkbox" name="must_change" ${u ? '' : 'checked'}><span>${t('pwMustChange')}<br><small class="muted">${t('pwMustChangeHint')}</small></span></label>
       <div class="row2"><label>${t('role')}<select name="role">${roleOptions(u ? u.role : 'viewer', true)}</select></label>
-      <label>${t('language')}<select name="language"><option value="cs" ${u?.language === 'en' ? '' : 'selected'}>Čeština</option><option value="en" ${u?.language === 'en' ? 'selected' : ''}>English</option></select></label></div>
+      <label>${t('language')}<select name="language">${LANG_NAMES.map(([k, n]) => `<option value="${k}" ${(u?.language || 'cs') === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
+      ${(S.tenants || []).length && !S.me.tenant_id ? `<label>${t('tenant')}<select name="tenant_id"><option value="">${t('tenantNone')}</option>${S.tenants.map(x => `<option value="${x.id}" ${u && u.tenant_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select><small class="muted">${t('tenantUserHint')}</small></label>` : ''}
       ${scopeFields(u ? u.scope : { all: true })}
       ${groups.length ? `<div><span class="label">${t('userGroupsTab')}</span><div class="check-grid">${groups.map(g => `<label class="check"><input type="checkbox" data-group value="${g.id}" ${u && u.groups.includes(g.id) ? 'checked' : ''}><span>${esc(g.name)}<br><small class="muted">${esc(roleLabel(g.role))}</small></span></label>`).join('')}</div><small class="muted">${t('userGroupsMemberHint')}</small></div>` : ''}
       ${u ? `<label class="check"><input type="checkbox" name="enabled" ${u.enabled ? 'checked' : ''}>${t('accountEnabled')}</label>` : ''}</div>`,
@@ -2345,6 +2395,7 @@ function userGroupDialog(gid) {
 // Settings are split into sections with their own navigation (#/settings/<section>).
 const SETTINGS = [
   ['account', 'view', 'users'], ['update', 'settings', 'updates'], ['alerts', 'settings', 'bell'], ['install', 'settings', 'plus'], ['notifyapi', 'notify_api', 'web'],
+  ['integrations', 'users', 'console'], ['reports', 'settings', 'plays'],
   ['proxy', 'updates', 'download'], ['sso', 'users', 'lock'], ['branding', 'settings', 'image'], ['backup', 'settings', 'upload'],
 ];
 
@@ -2804,7 +2855,7 @@ function renderAlerts(root, conf) {
       <form class="form" id="alertForm">
         <label class="check"><input type="checkbox" name="enabled" ${on(st.enabled)}>${t('alertsEnabled')}</label>
         <div class="row2"><label>${t('alertsDelay')}<input type="number" name="delay" min="0" max="1440" value="${st.delay}"><small>${t('alertsDelayHint')}</small></label>
-          <label>${t('alertsLanguage')}<select name="language"><option value="cs" ${st.language === 'cs' ? 'selected' : ''}>Čeština</option><option value="en" ${st.language === 'en' ? 'selected' : ''}>English</option></select></label></div>
+          <label>${t('alertsLanguage')}<select name="language">${LANG_NAMES.map(([k, n]) => `<option value="${k}" ${st.language === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
         <label class="check"><input type="checkbox" name="critical" ${on(st.levels.includes('critical'))}>${t('alertsCritical')}</label>
         <label class="check"><input type="checkbox" name="warning" ${on(st.levels.includes('warning'))}>${t('alertsWarning')}</label>
         <label class="check"><input type="checkbox" name="recovery" ${on(st.recovery)}>${t('alertsRecovery')}</label>
@@ -3287,8 +3338,9 @@ VIEWS.global = {
       ${edit ? `<div class="hero-actions"><button class="btn primary" data-do="globalDeploy" ${p.items.length ? '' : 'disabled'}>${icon('upload')}${t('deploy')}</button>
       <button class="btn" data-do="globalEdit">${icon('edit')}${t('edit')}</button><button class="btn danger" data-do="globalDelete">${icon('trash')}${t('delete')}</button></div>` : ''}</section>`);
     patch($('#gItems', root), `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('playlist')} <span class="muted">(${p.items.length})</span></h2>
+      ${edit ? `<button class="btn" data-do="addDocument" data-target="global">${icon('audit')}${t('document')}</button>` : ''}
       ${edit ? ['web', 'image', 'video', 'camera', 'widget', 'grafana-tag'].map(k => `<button class="btn" data-do="globalAddItem" data-kind="${k}">${k === 'widget' ? icon('widget') : kindIcon(k)}${t({ web: 'addWeb', image: 'addImage', video: 'addVideo', camera: 'add_camera', widget: 'widget' }[k] || 'grafanaCollection')}</button>`).join('') : ''}</div>
-      <ol class="playlist">${p.items.map((it, i) => `<li class="g-row">
+      <ol class="playlist" id="gList">${p.items.map((it, i) => `<li class="g-row" ${edit ? `draggable="true" data-iid="${it.id}"` : ''}>
         <span class="idx">${i + 1}</span><span class="kind k-${esc(it.kind)}">${isWidget(it) ? icon('widget') : kindIcon(it.kind)}</span>
         <div class="pl-main"><b>${esc(it.name)}</b>${validityTag(it)}<small>${esc(kindLabel(it.kind))} · ${esc(isWidget(it) ? widgetLabel(it.source) : it.kind === 'web' ? it.source : it.kind === 'camera' ? t('camStreamsN', { n: (it.streams || []).length }) : isTag(it.kind) ? `${t('grafanaTag')} ${it.tag} · ${it.grafana_url}` : (it.file_name || '') + (it.file_size ? ' · ' + fmtSize(it.file_size) : ''))}</small></div>
         <span class="pl-dur">${it.duration ? dur(it.duration) : t('fullLength')}</span>
@@ -3306,6 +3358,13 @@ VIEWS.global = {
         ${dep.results.map(x => `<div class="dep-row"><a href="#/device/${encodeURIComponent(x.device_id)}">${esc(x.device_name || x.device_id)}</a><span class="badge st-${x.state}">${t('state_' + x.state)}</span><small class="result" title="${esc(x.result)}">${esc((x.result || '').slice(0, 160))}</small></div>`).join('')}</details></td></tr>`;
       }).join('') || `<tr><td colspan="4" class="empty">${t('noDeployments')}</td></tr>`}</tbody></table></div></section>`);
     globalVersions($('#gVers', root), p);
+    if (edit) {
+      bindGlobalDrag($('#gList', root), p.id);
+      dropFiles($('#gItems', root), files => uploadMany(files, async (f, up) => {
+        await api('/api/library/' + up.id, { method: 'POST', json: {} });
+        await api(`/api/global-playlists/${p.id}/items`, { method: 'POST', json: mediaItem(f, up) });
+      }).then(() => { toast(t('saved')); render(); }));
+    }
   },
 };
 
@@ -4126,8 +4185,16 @@ function orgDialog(kind, name) {
   modal({
     title: (name ? t('edit') : t('add')) + ': ' + t(kind === 'groups' ? 'group' : 'location'),
     body: `<div class="form"><label>${t('name')}<input name="name" value="${esc(o.name)}" required></label>
-      ${kind === 'locations' ? `<label>${t('address')}<input name="address" value="${esc(o.address || '')}"></label>` : ''}
+      ${kind === 'locations' ? `<label>${t('address')}<span class="pw-row"><input name="address" value="${esc(o.address || '')}"><button type="button" class="btn sm" data-geocode>${icon('location')}${t('findOnMap')}</button></span></label>
+        <div class="geo-found"></div><div class="row2"><label>${t('latitude')}<input name="lat" value="${o.lat ?? ''}" inputmode="decimal"></label><label>${t('longitude')}<input name="lon" value="${o.lon ?? ''}" inputmode="decimal"></label></div>` : ''}
       <label>${t('description')}<textarea name="description" rows="2">${esc(o.description || '')}</textarea></label></div>`,
+    onOpen: form => {
+      const b = $('[data-geocode]', form);
+      if (b) b.onclick = () => tryCommand(form, b, () => api('/api/org/geocode', { method: 'POST', json: { address: form.address.value } }), r => {
+        setTimeout(() => $$('[data-place]', form).forEach(x => { x.onclick = () => { form.lat.value = x.dataset.lat; form.lon.value = x.dataset.lon; $('.geo-found', form).innerHTML = ''; }; }));
+        return r.places.length ? `<div class="cam-list">${r.places.map(x => `<button type="button" class="btn sm" data-place data-lat="${x.lat}" data-lon="${x.lon}">${icon('location')}${esc(x.name.slice(0, 90))}</button>`).join('')}</div>` : `<div class="note">${t('noMatch')}</div>`;
+      }, '.geo-found');
+    },
     onSubmit: async data => {
       if (name) await api(`/api/org/${kind}/${encodeURIComponent(name)}`, { method: 'PATCH', json: data });
       else await api(`/api/org/${kind}`, { method: 'POST', json: data });
@@ -4319,7 +4386,7 @@ const ACTIONS_UI = {
   globalNew() {
     modal({
       title: t('globalNew'),
-      body: `<div class="form"><label>${t('name')}<input name="name" required></label><label>${t('description')}<textarea name="description" rows="2"></textarea></label></div>`,
+      body: `<div class="form"><label>${t('name')}<input name="name" required></label><label>${t('description')}<textarea name="description" rows="2"></textarea></label>${tenantField()}</div>`,
       onSubmit: async data => { const r = await api('/api/global-playlists', { method: 'POST', json: data }); location.hash = '#/global/' + r.id; },
     });
   },
@@ -4673,6 +4740,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyStati
 
 $('#setupForm').addEventListener('submit', doSetup);
 applyStatic();
+loadLang(S.lang).then(applyStatic);
 // single sign-on comes back with the session (or an error) in the address
 let ssoError = '';
 if (location.hash.startsWith('#sso=')) {
@@ -5201,8 +5269,12 @@ VIEWS.library = {
     setTitle(t('nav_library'));
     root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('nav_library')}</h2>
       <input id="libQ" type="search" placeholder="${esc(t('search'))}"><select id="libKind"><option value="">${t('libraryAll')}</option><option value="image">${t('kind_image')}</option><option value="video">${t('kind_video')}</option></select>
-      ${can('content') ? `<label class="btn primary">${icon('upload')}${t('libraryUpload')}<input type="file" id="libUp" accept="image/*,video/*" multiple hidden></label>` : ''}</div>
+      ${can('content') ? `<button class="btn" data-do="addDocument" data-target="library">${icon('audit')}${t('document')}</button><label class="btn primary">${icon('upload')}${t('libraryUpload')}<input type="file" id="libUp" accept="image/*,video/*" multiple hidden></label>` : ''}</div>
       <p class="muted card-intro">${t('libraryHint')}</p><div class="upload-prog" id="libProg" hidden><i></i></div><div class="lib-grid" id="libGrid"><div class="empty">…</div></div></section>`;
+    if (can('content')) {
+      dropFiles($('#libGrid', root).parentElement, files => uploadMany(files, (f, up) => api('/api/library/' + up.id, { method: 'POST', json: {} }))
+        .then(() => { toast(t('saved')); this.load(root); }));
+    }
     $('#libQ', root).oninput = () => this.draw(root);
     $('#libKind', root).onchange = () => this.draw(root);
     const up = $('#libUp', root);
@@ -5381,7 +5453,7 @@ VIEWS.plays = {
       <select id="plGroup">${options(orgNames('groups'), f.group, t('allGroups'))}</select>
       ${S.tags.length ? `<select id="plTag">${options(S.tags, f.tag, t('allTags'))}</select>` : ''}
       <input type="search" id="plQ" placeholder="${esc(t('playsSearch'))}" value="${esc(f.q)}"><span class="grow"></span>
-      <button class="btn sm" id="plCsv">${icon('download')}CSV</button></div>
+      <button class="btn sm" id="plCsv">${icon('download')}CSV</button><button class="btn sm" data-do="monthlyReport">${icon('audit')}${t('monthlyReport')}</button></div>
       <div class="toolbar"><div class="seg" id="plBy">${['item', 'device', 'day'].map(x => `<button data-by="${x}" class="${f.by === x ? 'active' : ''}">${t('playsBy_' + x)}</button>`).join('')}</div></div>
       <div id="plOut" class="plays-out"><div class="empty">…</div></div></section>`;
     const go = () => this.load(root);
@@ -5493,7 +5565,7 @@ async function deviceTimeline(el, d) {
 
 // ---------- widgets
 
-const WIDGET_TYPES = ['clock', 'weather', 'rss', 'table', 'text'];
+const WIDGET_TYPES = ['clock', 'weather', 'rss', 'table', 'text', 'calendar', 'room', 'qr', 'ticker'];
 const WIDGET_PREFIX = 'caracal-widget:';
 function widgetParams(src) {
   src = String(src || '');
@@ -5513,16 +5585,17 @@ window.addEventListener('message', async e => {
   } catch (err) { e.source.postMessage({ caracalFeed: e.data.caracalFeed, error: errText(err) }, location.origin); }
 });
 
-// deviceId: a device's playlist (also more devices through "also add"), pid: a global playlist; item: editing
-function widgetDialog({ deviceId = null, pid = null, item = null }) {
-  const q = item ? widgetParams(item.source) : new URLSearchParams({ type: 'clock' });
+// deviceId: a device's playlist (also more devices through "also add"), pid: a global playlist; item: editing;
+// pick: a zone of a screen layout gets the widget (onPick(query)), nothing is saved here
+function widgetDialog({ deviceId = null, pid = null, item = null, pick = null, query = '' }) {
+  const q = item ? widgetParams(item.source) : query ? new URLSearchParams(query) : new URLSearchParams({ type: pick && pick.zone === 'ticker' ? 'ticker' : 'clock' });
   const v = k => esc(q.get(k) || '');
   const type0 = q.get('type') || 'clock';
   modal({
-    title: item ? t('widgetEdit') : t('widgetAdd'), wide: true, submit: item ? t('save') : t('add'),
+    title: pick ? t('zoneWidget_' + pick.zone) : item ? t('widgetEdit') : t('widgetAdd'), wide: true, submit: item || pick ? t('save') : t('add'),
     body: `<div class="widget-dlg"><div class="form">
       <div class="widget-types">${WIDGET_TYPES.map(x => `<label class="wt"><input type="radio" name="type" value="${x}" ${x === type0 ? 'checked' : ''}><span>${t('widget_' + x)}</span><small>${t('widgetHint_' + x)}</small></label>`).join('')}</div>
-      <div class="row2"><label>${t('name')}<input name="name" value="${esc(item ? item.name : '')}" placeholder="${esc(t('widget_' + type0))}"></label>
+      <div class="row2" ${pick ? 'hidden' : ''}><label>${t('name')}<input name="name" value="${esc(item ? item.name : '')}" placeholder="${esc(t('widget_' + type0))}"></label>
       <label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(item ? item.duration : 20)}" required></label></div>
       <label>${t('widgetTitle')}<input name="title" value="${v('title')}" maxlength="120"></label>
       <div data-w="clock"><label class="check"><input type="checkbox" name="seconds" ${q.get('seconds') === '1' ? 'checked' : ''}>${t('widgetSeconds')}</label>
@@ -5535,10 +5608,18 @@ function widgetDialog({ deviceId = null, pid = null, item = null }) {
         <div class="row2"><label>${t('widgetRows')}<input name="rows" type="number" min="3" max="30" value="${v('rows') || 10}"></label><label>${t('widgetPageSeconds')}<input name="page_seconds" type="number" min="4" max="120" value="${v('page_seconds') || 10}"></label></div></div>
       <div data-w="text"><label>${t('widgetText')}<textarea name="text" rows="4" maxlength="1500">${v('text')}</textarea></label>
         <label class="check"><input type="checkbox" name="align" ${q.get('align') === 'center' ? 'checked' : ''}>${t('widgetCenter')}</label></div>
+      <div data-w="calendar"><label>${t('widgetIcs')}<input name="url_calendar" type="url" value="${q.get('type') === 'calendar' ? v('url') : ''}" placeholder="https://outlook.office365.com/owa/calendar/…/calendar.ics"><small class="muted">${t('widgetIcsHint')}</small></label>
+        <label>${t('widgetCalDays')}<input name="cal_days" type="number" min="1" max="14" value="${v('days') || 3}"></label></div>
+      <div data-w="room"><label>${t('widgetIcs')}<input name="url_room" type="url" value="${q.get('type') === 'room' ? v('url') : ''}" placeholder="https://calendar.google.com/calendar/ical/…/basic.ics"><small class="muted">${t('widgetRoomHint')}</small></label></div>
+      <div data-w="qr"><label>${t('widgetQrUrl')}<input name="url_qr" value="${q.get('type') === 'qr' ? v('url') : ''}" placeholder="https://example.com/menu"></label>
+        <label>${t('widgetQrText')}<input name="qr_text" value="${q.get('type') === 'qr' ? v('text') : ''}" maxlength="200"></label></div>
+      <div data-w="ticker"><label>${t('widgetTickerText')}<textarea name="ticker_text" rows="3" maxlength="1500" placeholder="${esc(t('widgetTickerTextHint'))}">${q.get('type') === 'ticker' ? v('text') : ''}</textarea></label>
+        <label>${t('widgetTickerRss')}<input name="url_ticker" type="url" value="${q.get('type') === 'ticker' ? v('url') : ''}" placeholder="https://www.example.com/rss"></label>
+        <label>${t('widgetSpeed')}<input name="speed" type="range" min="40" max="300" value="${v('speed') || 120}"></label></div>
       <div class="row2"><label>${t('widgetTheme')}<select name="theme"><option value="dark">${t('widgetDark')}</option><option value="light" ${q.get('theme') === 'light' ? 'selected' : ''}>${t('widgetLight')}</option></select></label>
         <label>${t('widgetAccent')}<input name="accent" type="color" value="#${(q.get('accent') || 'f26b1d').replace(/[^0-9a-f]/gi, '')}"></label></div>
-      ${deviceId && !item ? `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], x => (x.capabilities || {}).widgets === true)}</details>` : ''}
-      ${!deviceId && !item ? `<small class="muted">${t('widgetGlobalHint')}</small>` : ''}</div>
+      ${deviceId && !item && !pick ? `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], x => (x.capabilities || {}).widgets === true)}</details>` : ''}
+      ${!deviceId && !item && !pick ? `<small class="muted">${t('widgetGlobalHint')}</small>` : ''}</div>
       <div class="widget-preview"><div class="wp-frame"><iframe id="wpFrame" title="${esc(t('preview'))}" sandbox="allow-scripts allow-same-origin"></iframe></div><small class="muted">${t('widgetPreviewHint')}</small></div></div>`,
     onOpen: form => {
       bindTargetPicker(form);
@@ -5555,6 +5636,7 @@ function widgetDialog({ deviceId = null, pid = null, item = null }) {
       sync();
     },
     onSubmit: async data => {
+      if (pick) return pick.onPick(widgetQuery(data));
       const source = WIDGET_PREFIX + widgetQuery(data);
       const payload = { name: (data.name || '').trim() || t('widget_' + data.type), duration: Number(data.duration || 20), source };
       if (pid) {
@@ -5579,6 +5661,10 @@ function widgetQuery(d) {
   if (d.type === 'rss') { put('url', d.url_rss); put('count', d.count); }
   if (d.type === 'table') { put('url', d.url_table); put('rows', d.rows); put('page_seconds', d.page_seconds); }
   if (d.type === 'text') { put('text', d.text); put('align', d.align ? 'center' : ''); }
+  if (d.type === 'calendar') { put('url', d.url_calendar); put('days', d.cal_days); }
+  if (d.type === 'room') put('url', d.url_room);
+  if (d.type === 'qr') { put('url', d.url_qr); put('text', d.qr_text); }
+  if (d.type === 'ticker') { put('text', d.ticker_text); put('url', d.url_ticker); put('speed', d.speed); }
   return q.toString();
 }
 
@@ -5705,4 +5791,407 @@ Object.assign(ACTIONS_UI, {
   bulkTags(b) { bulkTagsDialog(b.dataset.id ? [b.dataset.id] : [...S.selected]); },
   devicesExport() { return downloadAuthed('/api/devices/export.csv', 'caracal-devices.csv'); },
   devicesImport() { importDialog(); },
+});
+
+// ---------- the first steps, simple / pro mode, dropping files
+
+async function guideCard(el, first) {
+  if (!el || prefs().guide_hidden) { patch(el, ''); return; }
+  if (!S.guide || S.guide.at < Date.now() - 30000) S.guide = { at: Date.now(), data: await api('/api/onboarding').catch(() => null) };
+  const steps = (S.guide.data && S.guide.data.steps) || [];
+  if (!el.isConnected || !steps.length || steps.every(x => x.done)) { patch(el, ''); return; }
+  const done = steps.filter(x => x.done).length;
+  const go = { device: `<button class="btn sm primary" data-do="guideAddDevice">${t('guideDo_device')}</button>`, content: `<a class="btn sm" href="#/global">${t('guideDo_content')}</a>`,
+    alerts: `<a class="btn sm" href="#/settings/alerts">${t('guideDo_alerts')}</a>`, backup: `<a class="btn sm" href="#/settings/backup">${t('guideDo_backup')}</a>`, users: `<a class="btn sm" href="#/users">${t('guideDo_users')}</a>` };
+  patch(el, `<section class="card guide"><div class="card-head"><h2>${t('guideTitle')}</h2><span class="muted">${t('guideProgress', { n: done, m: steps.length })}</span>
+    <button class="btn sm ghost" data-do="guideHide">${t('guideHide')}</button></div>
+    <div class="guide-bar"><i style="width:${Math.round(done / steps.length * 100)}%"></i></div>
+    <ol class="guide-steps">${steps.map(x => `<li class="${x.done ? 'done' : ''}"><span class="guide-check">${x.done ? icon('check') : ''}</span><div><b>${t('guide_' + x.key)}</b><small class="muted">${t('guideHint_' + x.key)}</small></div>${x.done || (first && x.key === 'device') ? '' : go[x.key]}</li>`).join('')}</ol>
+    <div class="guide-mode"><span>${t('guideMode')}</span><div class="seg">${['simple', 'pro'].map(m => `<button data-do="setMode" data-mode="${m}" class="${prefs().ui_mode === m ? 'active' : ''}">${t('mode_' + m + 'UI')}</button>`).join('')}</div><small class="muted">${t('modeHint_' + prefs().ui_mode)}</small></div></section>`);
+}
+
+const mediaItem = (f, up) => ({ kind: f.type.split('/')[0], file_id: up.id, name: f.name.replace(/\.[^.]+$/, ''), duration: f.type.startsWith('video') ? 30 : 15 });
+async function uploadMany(files, each) {
+  for (const [i, f] of files.entries()) {
+    toast(t('uploadingN', { n: i + 1, m: files.length, name: f.name }));
+    await each(f, await uploadFile(f, () => {}));
+  }
+}
+// pictures and videos dropped on el (the latest onFiles is used, el keeps one set of listeners)
+function dropFiles(el, onFiles) {
+  if (!el) return;
+  el.dataset.dropLabel = t('dropHere');
+  if (el._onFiles) { el._onFiles = onFiles; return; }
+  el._onFiles = onFiles;
+  const files = e => [...((e.dataTransfer && e.dataTransfer.types) || [])].includes('Files');
+  el.addEventListener('dragover', e => { if (!files(e)) return; e.preventDefault(); el.classList.add('drop-on'); });
+  el.addEventListener('dragleave', e => { if (!el.contains(e.relatedTarget)) el.classList.remove('drop-on'); });
+  el.addEventListener('drop', e => {
+    if (!files(e)) return;
+    e.preventDefault();
+    el.classList.remove('drop-on');
+    const list = [...e.dataTransfer.files].filter(f => /^(image|video)\//.test(f.type));
+    if (!list.length) { toast(t('dropOnlyMedia'), 'warn'); return; }
+    Promise.resolve(el._onFiles(list)).catch(err => toast(errText(err), 'err'));
+  });
+}
+// the order of a global playlist by dragging its rows
+function bindGlobalDrag(list, pid) {
+  if (!list) return;
+  let dragged = null, before = '';
+  list.ondragstart = e => {
+    dragged = e.target.closest('li[data-iid]');
+    if (!dragged) return;
+    before = $$('li[data-iid]', list).map(x => x.dataset.iid).join();
+    dragged.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  };
+  list.ondragover = e => {
+    const over = e.target.closest('li[data-iid]');
+    if (!dragged || !over || over === dragged) return;
+    e.preventDefault();
+    const r = over.getBoundingClientRect();
+    list.insertBefore(dragged, e.clientY > r.top + r.height / 2 ? over.nextSibling : over);
+  };
+  list.ondragend = async () => {
+    if (!dragged) return;
+    dragged.classList.remove('dragging');
+    dragged = null;
+    const order = $$('li[data-iid]', list).map(x => Number(x.dataset.iid));
+    if (order.join() === before) return;
+    try { await api(`/api/global-playlists/${pid}/order`, { method: 'PUT', json: { order } }); toast(t('saved')); } catch (err) { toast(errText(err), 'err'); }
+    render();
+  };
+}
+
+Object.assign(ACTIONS_UI, {
+  async navGroup(b) {
+    const closed = new Set(prefs().nav_closed);
+    closed.has(b.dataset.g) ? closed.delete(b.dataset.g) : closed.add(b.dataset.g);
+    b.closest('.nav-group').classList.toggle('closed', closed.has(b.dataset.g));
+    b.setAttribute('aria-expanded', closed.has(b.dataset.g) ? 'false' : 'true');
+    await savePrefs({ nav_closed: [...closed] });
+  },
+  async setMode(b) {
+    await savePrefs({ ui_mode: b.dataset.mode });
+    buildNav();
+    render(true);
+    toast(t('modeSet_' + b.dataset.mode));
+  },
+  async guideHide() {
+    await savePrefs({ guide_hidden: true });
+    render(true);
+  },
+  guideAddDevice() { provisionDialog(); },
+});
+
+// ================================================================== screen layouts, documents, integrations, reports,
+// customers and the map
+
+const layoutSupport = d => !!(d && d.player_settings && 'layout' in d.player_settings);
+const tenantName = id => ((S.tenants || []).find(x => x.id === id) || {}).name || '';
+const tenantField = (sel = '') => ((S.tenants || []).length && !S.me.tenant_id ? `<label>${t('tenant')}<select name="tenant_id"><option value="">${t('tenantNone')}</option>${S.tenants.map(x => `<option value="${x.id}" ${String(sel) === String(x.id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>` : '');
+const usersTabs = tab => `<nav class="tabs"><a href="#/users" class="${tab === 'people' ? 'active' : ''}">${t('usersTab')}</a><a href="#/users/roles" class="${tab === 'roles' ? 'active' : ''}">${t('rolesTab')}</a><a href="#/users/groups" class="${tab === 'groups' ? 'active' : ''}">${t('userGroupsTab')}</a>${S.me.tenant_id ? '' : `<a href="#/users/tenants" class="${tab === 'tenants' ? 'active' : ''}">${t('tenantsTab')}</a>`}</nav>`;
+async function loadTenants() { S.tenants = await api('/api/tenants').catch(() => S.tenants || []); return S.tenants; }
+
+// ---------- a screen in zones: the playlist, a side panel and a bar at the bottom
+
+function layoutDialog(ids) {
+  const d = ids.length === 1 ? dev(ids[0]) || S.detail : null;
+  const cur = (d && d.player_settings && d.player_settings.layout) || {};
+  const z = { side: cur.side ? { ...cur.side } : null, ticker: cur.ticker ? { ...cur.ticker } : null };
+  const summary = q => { const p = new URLSearchParams(q || ''); return p.get('type') ? t('widget_' + p.get('type')) + (p.get('title') ? ' · ' + p.get('title') : '') : t('zoneNoWidget'); };
+  modal({
+    title: t('screenLayout'), wide: true,
+    body: `<div class="layout-dlg"><div class="form"><p class="muted">${t('screenLayoutHint')}</p>
+      <label class="check"><input type="checkbox" name="side_on" ${z.side ? 'checked' : ''}>${t('zoneSide')}</label>
+      <div data-z="side" class="zone-box"><div class="row2"><label>${t('zoneWidth')}<input name="side_width" type="range" min="15" max="40" value="${z.side ? z.side.width : 25}"></label>
+        <label>${t('zonePosition')}<select name="side_position"><option value="right">${t('zoneRight')}</option><option value="left" ${z.side && z.side.position === 'left' ? 'selected' : ''}>${t('zoneLeft')}</option></select></label></div>
+        <div class="zone-pick"><span data-sum="side"></span><button type="button" class="btn sm" data-zone="side">${icon('widget')}${t('zoneChoose')}</button></div></div>
+      <label class="check"><input type="checkbox" name="ticker_on" ${z.ticker ? 'checked' : ''}>${t('zoneTicker')}</label>
+      <div data-z="ticker" class="zone-box"><label>${t('zoneHeight')}<input name="ticker_height" type="range" min="5" max="25" value="${z.ticker ? z.ticker.height : 8}"></label>
+        <div class="zone-pick"><span data-sum="ticker"></span><button type="button" class="btn sm" data-zone="ticker">${icon('widget')}${t('zoneChoose')}</button></div></div>
+      ${ids.length > 1 ? `<p class="muted">${t('selectedN', { n: ids.length })}</p>` : ''}</div>
+      <div class="layout-preview"><div class="lp-screen" id="lpScreen"><div class="lp-main">${t('zoneMain')}</div><iframe data-lp="side" title="side"></iframe><iframe data-lp="ticker" title="ticker"></iframe></div><small class="muted">${t('screenLayoutPreview')}</small></div></div>`,
+    onOpen: form => {
+      const draw = () => {
+        const sideOn = form.side_on.checked && z.side, tickOn = form.ticker_on.checked && z.ticker;
+        $('[data-z=side]', form).hidden = !form.side_on.checked;
+        $('[data-z=ticker]', form).hidden = !form.ticker_on.checked;
+        $('[data-sum=side]', form).textContent = summary(z.side && z.side.widget);
+        $('[data-sum=ticker]', form).textContent = summary(z.ticker && z.ticker.widget);
+        const sw = sideOn ? Number(form.side_width.value) : 0, th = tickOn ? Number(form.ticker_height.value) : 0, left = form.side_position.value === 'left';
+        const box = $('#lpScreen', form);
+        box.style.setProperty('--sw', sw + '%'); box.style.setProperty('--th', th + '%'); box.classList.toggle('left', left);
+        for (const [k, on] of [['side', sideOn], ['ticker', tickOn]]) {
+          const f = $(`[data-lp=${k}]`, form);
+          f.hidden = !on;
+          const src = on ? '/static/widgets.html?preview=1&' + z[k].widget : '';
+          if (f.dataset.src !== src) { f.dataset.src = src; f.src = src || 'about:blank'; }
+        }
+      };
+      form.addEventListener('input', draw);
+      form.addEventListener('change', draw);
+      form.addEventListener('click', e => {
+        const b = e.target.closest('[data-zone]');
+        if (!b) return;
+        const zone = b.dataset.zone;
+        widgetDialog({ pick: { zone, onPick: q => { z[zone] = { ...(z[zone] || {}), widget: q }; setTimeout(() => { draw(); }, 50); } }, query: z[zone] && z[zone].widget });
+      });
+      draw();
+    },
+    onSubmit: async data => {
+      const layout = {};
+      if (data.side_on) {
+        if (!z.side || !z.side.widget) throw new Error('zone_widget_required');
+        layout.side = { width: Number(data.side_width), position: data.side_position, widget: z.side.widget };
+      }
+      if (data.ticker_on) {
+        if (!z.ticker || !z.ticker.widget) throw new Error('zone_widget_required');
+        layout.ticker = { height: Number(data.ticker_height), widget: z.ticker.widget };
+      }
+      const targets = ids.filter(id => layoutSupport(dev(id) || (S.detail && S.detail.id === id ? S.detail : null)));
+      return targets.length === 1 ? sendCommand(targets[0], 'player_settings', { layout }) : sendBulk(targets, 'player_settings', { layout });
+    },
+  });
+}
+
+// ---------- PDF and presentations: one picture per page
+
+function documentDialog(target, id = null) {
+  modal({
+    title: t('documentTitle'), submit: t('documentConvert'),
+    body: `<div class="form"><p class="muted">${t('documentHint')}</p>
+      <label>${t('file')}<input type="file" name="file" accept=".pdf,.pptx,.ppt,.odp,.key,.docx,.doc,.odt" required></label>
+      ${target === 'library' ? '' : `<label>${t('documentSeconds')}<input name="duration" type="number" min="5" value="10" required></label>`}
+      <div class="upload-prog" hidden><i></i></div><div class="doc-state muted"></div></div>`,
+    onSubmit: async (data, form) => {
+      const file = form.file.files[0];
+      const pr = $('.upload-prog', form), st = $('.doc-state', form);
+      pr.hidden = false;
+      const r = await new Promise((resolve, reject) => {
+        const x = new XMLHttpRequest();
+        x.open('POST', '/api/documents');
+        x.setRequestHeader('Authorization', 'Bearer ' + S.token);
+        x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+        x.upload.onprogress = e => { if (e.lengthComputable) { $('i', pr).style.width = (e.loaded / e.total * 100) + '%'; if (e.loaded === e.total) st.textContent = t('documentConverting'); } };
+        x.onload = () => { let d = {}; try { d = JSON.parse(x.responseText); } catch { /* ignore */ } x.status < 300 ? resolve(d) : reject(new Error(d.detail || x.statusText)); };
+        x.onerror = () => reject(new Error('network_error'));
+        x.send(file);
+      });
+      const duration = Number(data.duration || 10);
+      if (target === 'global') {
+        for (const p of r.pages) await api(`/api/global-playlists/${S.global.id}/items`, { method: 'POST', json: { kind: 'image', file_id: p.id, name: p.name, duration } });
+        render();
+      } else if (target === 'device') {
+        for (const p of r.pages) await api(`/api/devices/${encodeURIComponent(id)}/commands`, { method: 'POST', json: { action: 'add_media', payload: { kind: 'image', file_id: p.id, name: p.name, duration } } });
+      } else if (S.route.view === 'library') VIEWS.library.load($('#view'));
+      toast(t('documentDone', { n: r.pages.length }));
+    },
+  });
+}
+
+// ---------- settings: API tokens and webhooks, monthly reports
+
+Object.assign(SETTINGS_VIEW, {
+  async integrations(root) {
+    root.innerHTML = '<section class="card"><div class="empty">…</div></section>';
+    const [tokens, hooks, roles] = await Promise.all([api('/api/api-tokens'), can('settings') ? api('/api/webhooks') : null, api('/api/roles')].map(p => p && p.catch(() => null)));
+    if (!root.isConnected) return;
+    S.roles = roles ? roles.roles : S.roles;
+    S.hooks = hooks;
+    root.innerHTML = `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('apiTokens')}</h2><button class="btn primary sm" data-do="apiTokenNew">${icon('plus')}${t('apiTokenNew')}</button></div>
+      <p class="muted card-intro">${t('apiTokensHint')}</p>
+      <div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('role')}</th><th>${t('lastUsed')}</th><th></th></tr></thead><tbody>
+      ${(tokens || []).map(x => `<tr><td><b>${esc(x.name)}</b><br><small class="muted"><code>${esc(x.prefix)}…</code> · ${esc(x.created_by)} · ${dt(x.created)}${x.expires ? ' · ' + t('expires', { time: dt(x.expires) }) : ''}</small></td>
+        <td><span class="badge role">${esc(roleLabel(x.role))}</span><br><small class="muted">${scopeText(x.scope)}</small></td><td class="nowrap">${x.last_used ? ago(x.last_used) : '—'}</td>
+        <td class="nowrap"><label class="check"><input type="checkbox" data-do="apiTokenToggle" data-tid="${x.id}" ${x.enabled ? 'checked' : ''}>${t('enabled')}</label>
+        <button class="icon-btn danger" data-do="apiTokenDelete" data-tid="${x.id}" title="${t('delete')}">${icon('trash')}</button></td></tr>`).join('') || `<tr><td colspan="4" class="empty">${t('apiTokensNone')}</td></tr>`}</tbody></table></div>
+      <details class="api-help"><summary>${t('apiExamples')}</summary><pre class="code">curl -H "Authorization: Bearer cfa_…" ${esc(location.origin)}/api/devices
+
+curl -X POST -H "Authorization: Bearer cfa_…" -H "Content-Type: application/json" \\
+  -d '{"title":"Evacuation","message":"Leave the building","minutes":30,"targets":{"all":true}}' \\
+  ${esc(location.origin)}/api/takeovers
+
+curl -X POST -H "Authorization: Bearer cfa_…" -H "Content-Type: application/json" \\
+  -d '{"target_ids":["CRCL-…"],"mode":"replace"}' ${esc(location.origin)}/api/global-playlists/1/deploy</pre><p class="muted">${t('apiDocsHint')}</p></details></section>
+    ${hooks ? `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('webhooks')}</h2><button class="btn primary sm" data-do="webhookEdit">${icon('plus')}${t('webhookNew')}</button></div>
+      <p class="muted card-intro">${t('webhooksHint')}</p>
+      <div class="table-wrap"><table class="table"><thead><tr><th>${t('name')}</th><th>${t('webhookEvents')}</th><th>${t('webhookLast')}</th><th></th></tr></thead><tbody>
+      ${hooks.webhooks.map(h => `<tr><td><b>${esc(h.name)}</b><br><small class="muted">${esc(h.url)}</small></td><td><small>${h.events.map(e => esc(t('event_' + e.replace('.', '_')))).join(', ')}</small></td>
+        <td>${h.last ? `<span class="tag ${h.last.ok ? 'ok' : 'bad'}">${h.last.ok ? 'OK' : esc(h.last.error || 'error')}</span><br><small class="muted">${ago(h.last.at)}</small>` : '—'}</td>
+        <td class="nowrap"><button class="btn sm" data-do="webhookTest" data-hid="${h.id}">${t('test')}</button><button class="icon-btn" data-do="webhookEdit" data-hid="${h.id}" title="${t('edit')}">${icon('edit')}</button><button class="icon-btn danger" data-do="webhookDelete" data-hid="${h.id}" title="${t('delete')}">${icon('trash')}</button></td></tr>`).join('') || `<tr><td colspan="4" class="empty">${t('webhooksNone')}</td></tr>`}</tbody></table></div></section>` : ''}`;
+  },
+  async reports(root) {
+    root.innerHTML = '<section class="card"><div class="empty">…</div></section>';
+    const s = await api('/api/reports/settings').catch(() => null);
+    if (!s || !root.isConnected) return;
+    const last = new Date(); last.setDate(0);
+    const month = `${last.getFullYear()}-${String(last.getMonth() + 1).padStart(2, '0')}`;
+    root.innerHTML = `<section class="card"><h2>${t('monthlyReport')}</h2><p class="muted">${t('monthlyReportHint')}</p>
+      <div class="form"><div class="row2"><label>${t('reportMonth')}<input type="month" id="repMonth" value="${month}"></label><span></span></div>
+      <div class="form-actions start"><button class="btn" id="repGet">${icon('download')}${t('reportDownload')}</button><button class="btn" id="repSend">${icon('send')}${t('reportSendNow')}</button></div></div></section>
+      <section class="card"><h2>${t('reportAuto')}</h2><form id="repForm" class="form">
+      <label class="check"><input type="checkbox" class="switch" name="enabled" ${s.enabled ? 'checked' : ''}>${t('reportAutoOn')}</label>
+      <label>${t('reportRecipients')}<input name="recipients" value="${esc(s.recipients.join(', '))}" placeholder="vedeni@firma.cz, it@firma.cz"><small class="muted">${t('reportRecipientsHint')}</small></label>
+      <label>${t('language')}<select name="language">${LANG_NAMES.map(([k, n]) => `<option value="${k}" ${s.language === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      <div class="form-actions"><button class="btn primary">${t('save')}</button></div></form></section>`;
+    $('#repGet', root).onclick = () => downloadAuthed('/api/reports/monthly.pdf?month=' + $('#repMonth', root).value, `caracal-report-${$('#repMonth', root).value}.pdf`).catch(e => toast(errText(e), 'err'));
+    $('#repSend', root).onclick = async () => { try { await api('/api/reports/send', { method: 'POST', json: { month: $('#repMonth', root).value } }); toast(t('reportSent')); } catch (e) { toast(errText(e), 'err'); } };
+    $('#repForm', root).onsubmit = async e => {
+      e.preventDefault();
+      try { await api('/api/reports/settings', { method: 'PUT', json: Object.fromEntries(new FormData(e.target)) }); toast(t('saved')); } catch (err) { toast(errText(err), 'err'); }
+    };
+  },
+});
+
+// ---------- customers
+
+VIEWS.tenants = {
+  mount(root) {
+    setTitle(t('nav_users'));
+    root.innerHTML = `${usersTabs('tenants')}<section class="card flush"><div class="toolbar"><p class="muted grow">${t('tenantsHint')}</p><button class="btn primary" data-do="tenantEdit">${icon('plus')}${t('tenantNew')}</button></div><div id="tnTable"></div></section>`;
+  },
+  async update(root) {
+    const list = await loadTenants();
+    patch($('#tnTable', root), `<div class="table-wrap"><table class="table"><thead><tr><th>${t('tenant')}</th><th>${t('locations')}</th><th>${t('usersTab')}</th><th></th></tr></thead><tbody>
+      ${list.map(x => `<tr><td><b>${icon('customer')} ${esc(x.name)}</b></td><td>${x.locations.map(l => `<span class="tag">${esc(l)}</span>`).join(' ') || '—'}</td><td>${x.users}</td>
+        <td class="nowrap"><button class="icon-btn" data-do="tenantEdit" data-tid="${x.id}" title="${t('edit')}">${icon('edit')}</button><button class="icon-btn danger" data-do="tenantDelete" data-tid="${x.id}" title="${t('delete')}">${icon('trash')}</button></td></tr>`).join('')
+      || `<tr><td colspan="4">${emptyState('customer', t('tenantsNone'), t('tenantsHint'))}</td></tr>`}</tbody></table></div>`);
+  },
+};
+
+// ---------- the map of the locations
+
+let leafletLoading = null;
+function loadLeaflet() {
+  if (!leafletLoading) {
+    const css = document.createElement('link');
+    css.rel = 'stylesheet';
+    css.href = '/static/vendor/leaflet/leaflet.css';
+    document.head.append(css);
+    leafletLoading = new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = '/static/vendor/leaflet/leaflet.js';
+      el.onload = resolve;
+      el.onerror = () => { leafletLoading = null; reject(new Error('map_load_failed')); };
+      document.head.append(el);
+    });
+  }
+  return leafletLoading;
+}
+VIEWS.map = {
+  mount(root) {
+    setTitle(t('nav_map'));
+    root.innerHTML = `<section class="card flush map-card"><div class="toolbar"><h2 class="grow">${t('nav_map')}</h2><span class="map-legend"><i class="ok"></i>${t('mapOk')}<i class="warn"></i>${t('mapProblem')}<i class="bad"></i>${t('mapOffline')}</span>
+      ${canAll('devices') ? `<a class="btn sm" href="#/organization">${icon('location')}${t('mapEditPlaces')}</a>` : ''}</div><div id="map" class="map"></div><div id="mapNone"></div></section>`;
+    loadLeaflet().then(() => this.draw(root)).catch(e => { $('#map', root).innerHTML = `<div class="note warn">${esc(errText(e))}</div>`; });
+  },
+  update(root) { if (window.L && this.layer && $('#map', root)) this.markers(root); },
+  draw(root) {
+    const el = $('#map', root);
+    if (!el || !window.L) return;
+    this.map = L.map(el, { attributionControl: true }).setView([49.8, 15.5], 7);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, referrerPolicy: 'origin', attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' }).addTo(this.map);
+    this.layer = L.layerGroup().addTo(this.map);
+    this.markers(root, true);
+  },
+  markers(root, fit = false) {
+    this.layer.clearLayers();
+    const places = (S.org.locations || []).filter(l => l.lat != null && l.lon != null);
+    const pts = [];
+    for (const l of places) {
+      const ds = S.devices.filter(d => d.location === l.name);
+      const off = ds.filter(d => !d.online).length, bad = ds.filter(d => d.online && d.needs_attention).length;
+      const color = off ? '#dc2626' : bad ? '#f59e0b' : ds.length ? '#16a34a' : '#8e8e93';
+      const m = L.circleMarker([l.lat, l.lon], { radius: 9 + Math.min(10, ds.length), color: '#fff', weight: 2, fillColor: color, fillOpacity: .9 }).addTo(this.layer);
+      m.bindPopup(`<b>${esc(l.name)}</b><br>${esc(l.address || '')}<br>${t('mapCounts', { n: ds.length, on: ds.length - off, bad })}<br><a href="#/devices?location=${encodeURIComponent(l.name)}">${t('open')}</a>`);
+      pts.push([l.lat, l.lon]);
+    }
+    if (fit && pts.length) this.map.fitBounds(pts, { padding: [40, 40], maxZoom: 13 });
+    const none = (S.org.locations || []).length - places.length;
+    patch($('#mapNone', root), none ? `<div class="note">${t('mapMissing', { n: none })}</div>` : '');
+  },
+};
+
+Object.assign(ACTIONS_UI, {
+  layoutSettings(b) { layoutDialog([b.dataset.id]); },
+  bulkLayout() { layoutDialog([...S.selected]); },
+  addDocument(b) { documentDialog(b.dataset.target, b.dataset.id); },
+  async monthlyReport() {
+    const last = new Date(); last.setDate(0);
+    const month = `${last.getFullYear()}-${String(last.getMonth() + 1).padStart(2, '0')}`;
+    modal({
+      title: t('monthlyReport'), submit: t('reportDownload'),
+      body: `<div class="form"><p class="muted">${t('monthlyReportHint')}</p><label>${t('reportMonth')}<input type="month" name="month" value="${month}" required></label>
+        <div class="row2"><label>${t('location')}<select name="location">${options(orgNames('locations'), '', t('allLocations'))}</select></label><label>${t('group')}<select name="group">${options(orgNames('groups'), '', t('allGroups'))}</select></label></div></div>`,
+      onSubmit: data => downloadAuthed('/api/reports/monthly.pdf?' + playsQuery(data), `caracal-report-${data.month}.pdf`),
+    });
+  },
+  apiTokenNew() {
+    modal({
+      title: t('apiTokenNew'), wide: true,
+      body: `<div class="form"><label>${t('name')}<input name="name" required placeholder="Home Assistant"></label>
+        <div class="row2"><label>${t('role')}<select name="role">${roleOptions('operator')}</select></label><label>${t('apiTokenDays')}<input name="days" type="number" min="0" max="3650" value="0"><small class="muted">${t('apiTokenDaysHint')}</small></label></div>
+        ${scopeFields({ all: true })}</div>`,
+      onSubmit: async (data, form) => {
+        const r = await api('/api/api-tokens', { method: 'POST', json: { name: data.name, role: data.role, days: Number(data.days || 0), scope: readScope(form) } });
+        setTimeout(() => modal({ title: t('apiTokenCreated'), body: `<p>${t('apiTokenOnce')}</p><pre class="code">${esc(r.token)}</pre>` }), 50);
+        render(true);
+      },
+    });
+  },
+  async apiTokenToggle(b) { await api('/api/api-tokens/' + b.dataset.tid, { method: 'PATCH', json: { enabled: b.checked } }); toast(t('saved')); },
+  async apiTokenDelete(b) {
+    if (!await confirmBox(t('apiTokenDeleteConfirm'))) return;
+    await api('/api/api-tokens/' + b.dataset.tid, { method: 'DELETE' });
+    render(true);
+  },
+  webhookEdit(b) {
+    const h = b.dataset.hid ? S.hooks.webhooks.find(x => x.id === b.dataset.hid) : { name: '', url: '', events: ['device.offline', 'device.online'], enabled: true };
+    modal({
+      title: b.dataset.hid ? t('webhookEdit') : t('webhookNew'), wide: true,
+      body: `<div class="form"><div class="row2"><label>${t('name')}<input name="name" value="${esc(h.name)}"></label><label>URL<input name="url" type="url" value="${esc(h.url)}" required placeholder="https://"></label></div>
+        <span class="label">${t('webhookEvents')}</span><div class="check-grid">${S.hooks.events.map(e => `<label class="check"><input type="checkbox" name="ev:${e}" ${h.events.includes(e) ? 'checked' : ''}><span>${t('event_' + e.replace('.', '_'))}<br><small class="muted"><code>${e}</code></small></span></label>`).join('')}</div>
+        <label class="check"><input type="checkbox" name="enabled" ${h.enabled ? 'checked' : ''}>${t('enabled')}</label>
+        ${b.dataset.hid ? `<label class="check"><input type="checkbox" name="new_secret">${t('webhookNewSecret')}</label>` : ''}
+        <p class="muted">${t('webhookSignHint')}</p></div>`,
+      onSubmit: async data => {
+        const json = { name: data.name, url: data.url, enabled: !!data.enabled, new_secret: !!data.new_secret, events: Object.keys(data).filter(k => k.startsWith('ev:')).map(k => k.slice(3)) };
+        const r = await api(b.dataset.hid ? '/api/webhooks/' + b.dataset.hid : '/api/webhooks', { method: b.dataset.hid ? 'PATCH' : 'POST', json });
+        if (r.secret) setTimeout(() => modal({ title: t('webhookSecret'), body: `<p>${t('webhookSecretOnce')}</p><pre class="code">${esc(r.secret)}</pre>` }), 50);
+        render(true);
+      },
+    });
+  },
+  async webhookTest(b) {
+    try { await api(`/api/webhooks/${b.dataset.hid}/test`, { method: 'POST' }); toast(t('webhookTestOk')); } catch (e) { toast(errText(e), 'err'); }
+    render(true);
+  },
+  async webhookDelete(b) {
+    if (!await confirmBox(t('webhookDeleteConfirm'))) return;
+    await api('/api/webhooks/' + b.dataset.hid, { method: 'DELETE' });
+    render(true);
+  },
+  async tenantEdit(b) {
+    const x = b.dataset.tid ? (S.tenants || []).find(y => String(y.id) === b.dataset.tid) : { name: '', locations: [] };
+    const taken = new Set((S.tenants || []).filter(y => y !== x).flatMap(y => y.locations));
+    modal({
+      title: b.dataset.tid ? t('tenantEdit') : t('tenantNew'),
+      body: `<div class="form"><label>${t('name')}<input name="name" value="${esc(x.name)}" required></label>
+        <span class="label">${t('tenantLocations')}</span><div class="check-grid">${orgNames('locations').map(l => `<label class="check"><input type="checkbox" name="loc:${esc(l)}" ${x.locations.includes(l) ? 'checked' : ''} ${taken.has(l) ? 'disabled' : ''}><span>${esc(l)}${taken.has(l) ? `<br><small class="muted">${t('tenantTaken')}</small>` : ''}</span></label>`).join('') || `<span class="muted">${t('tenantNoLocations')}</span>`}</div>
+        <p class="muted">${t('tenantHint')}</p></div>`,
+      onSubmit: async data => {
+        const json = { name: data.name, locations: Object.keys(data).filter(k => k.startsWith('loc:')).map(k => k.slice(4)) };
+        await api(b.dataset.tid ? '/api/tenants/' + b.dataset.tid : '/api/tenants', { method: b.dataset.tid ? 'PATCH' : 'POST', json });
+        toast(t('saved'));
+        render(true);
+      },
+    });
+  },
+  async tenantDelete(b) {
+    if (!await confirmBox(t('tenantDeleteConfirm'))) return;
+    await api('/api/tenants/' + b.dataset.tid, { method: 'DELETE' });
+    render(true);
+  },
 });

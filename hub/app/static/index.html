@@ -24,7 +24,7 @@
         <ul class="login-features"><li data-i="featHealth"></li><li data-i="featContent"></li><li data-i="featRoles"></li></ul>
       </section>
       <form id="loginForm" class="login-card">
-        <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="en">EN</button></div>
+        <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="sk">SK</button><button type="button" data-lang="en">EN</button><button type="button" data-lang="de">DE</button><button type="button" data-lang="pl">PL</button></div>
         <h2 data-i="welcome"></h2>
         <p class="muted" data-i="loginSub"></p>
         <label><span data-i="username"></span><input id="loginUser" autocomplete="username" required></label>
@@ -35,7 +35,7 @@
         <div id="loginError" class="form-error"></div>
       </form>
       <form id="setupForm" class="login-card" hidden>
-        <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="en">EN</button></div>
+        <div class="login-lang"><button type="button" data-lang="cs">CS</button><button type="button" data-lang="sk">SK</button><button type="button" data-lang="en">EN</button><button type="button" data-lang="de">DE</button><button type="button" data-lang="pl">PL</button></div>
         <span class="step-note" data-i="setupKicker"></span>
         <h2 data-i="setupTitle"></h2>
         <p class="muted" data-i="setupSub"></p>
@@ -63,8 +63,9 @@
     <aside id="sidebar">
       <div class="brand"><span class="mark small" data-logo>C</span><div><b>CARACAL</b><small>Fleet</small></div></div>
       <nav id="nav"></nav>
+      <div class="seg mode-seg" id="modeSwitch"></div>
       <div class="aside-foot">
-        <div class="seg" id="langSwitch"><button data-lang="cs">CS</button><button data-lang="en">EN</button></div>
+        <div class="seg" id="langSwitch"><button data-lang="cs">CS</button><button data-lang="sk">SK</button><button data-lang="en">EN</button><button data-lang="de">DE</button><button data-lang="pl">PL</button></div>
         <button class="icon-btn ghost" id="themeToggle" title="Theme"></button>
       </div>
     </aside>

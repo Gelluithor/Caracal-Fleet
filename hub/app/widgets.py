@@ -64,3 +64,17 @@ def fetch(url):
 async def feed(r: Request, url: str = ''):
     current_user(r, 'content')
     return {'text': await run_in_threadpool(fetch, url)}
+
+
+@router.get('/api/widgets/qr')
+def qr(text: str = ''):
+    """A QR code as SVG for the preview of the QR widget (the node draws its own)."""
+    import io
+    import segno
+    from fastapi.responses import Response
+    text = str(text or '')[:1000]
+    if not text:
+        raise HTTPException(400, 'invalid_value')
+    buf = io.BytesIO()
+    segno.make(text, error='m').save(buf, kind='svg', scale=10, border=2, dark='#000', light='#fff', xmldecl=False, svgns=True)
+    return Response(buf.getvalue(), media_type='image/svg+xml', headers={'Cache-Control': 'max-age=86400'})

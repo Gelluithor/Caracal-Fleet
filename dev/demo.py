@@ -74,6 +74,21 @@ def seed_history(db_path, device_ids):
     c.close()
 
 
+PLACES = {'Praha': (50.0875, 14.4213), 'Plzeň': (49.7475, 13.3776)}
+
+
+def seed_places(db_path):
+    """The mock nodes in their locations and groups, and coordinates of the locations, so they show on the map."""
+    c = sqlite3.connect(db_path)
+    for name, location, group, _ in NODES:
+        c.execute("UPDATE devices SET location=?, device_group=? WHERE name=? AND COALESCE(location, '')=''", (location, group, name))
+    for name, (lat, lon) in PLACES.items():
+        c.execute('INSERT INTO device_locations(name, lat, lon) VALUES(?,?,?) '
+                  'ON CONFLICT(name) DO UPDATE SET lat=COALESCE(lat, excluded.lat), lon=COALESCE(lon, excluded.lon)', (name, lat, lon))
+    c.commit()
+    c.close()
+
+
 def seed_plays(db_path, device_ids):
     """A synthetic week of plays (proof of play) for the mock nodes: their playlist from 7:00 to 20:00, once."""
     c = sqlite3.connect(db_path)
@@ -321,6 +336,7 @@ def main():
         print(f'node {name}: {enrolled["device_id"]} local API :{port}')
     seed_history(DATA / 'hub' / 'hub.db', ids)
     seed_plays(DATA / 'hub' / 'hub.db', ids)
+    seed_places(DATA / 'hub' / 'hub.db')
     start_real_node(hub, agent_mod, '--overlay' in sys.argv)
     try:
         seed_features(hub, ids)

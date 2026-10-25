@@ -114,6 +114,8 @@ async def approve(aid: int, r: Request):
         c.execute("UPDATE approvals SET state='approved', decided_by=?, decided=?, comment=? WHERE id=?",
                   (u['username'], time.time(), str(d.get('comment') or '')[:500], aid))
     audit(u, 'approval.approve', str(aid), {'playlist': res['name'], 'requested_by': row['username']})
+    from .integrations import emit
+    emit('approval.decided', {'id': aid, 'state': 'approved', 'playlist': res['name'], 'requested_by': row['username'], 'by': u['username']})
     return {'ok': True, **{k: res[k] for k in ('batch', 'media_unsupported', 'items_unsupported')}}
 
 
@@ -129,6 +131,8 @@ async def reject(aid: int, r: Request):
         c.execute("UPDATE approvals SET state='rejected', decided_by=?, decided=?, comment=? WHERE id=?",
                   (u['username'], time.time(), str(d.get('comment') or '')[:500], aid))
     audit(u, 'approval.reject', str(aid), {'requested_by': row['username']})
+    from .integrations import emit
+    emit('approval.decided', {'id': aid, 'state': 'rejected', 'requested_by': row['username'], 'by': u['username']})
     return {'ok': True}
 
 
