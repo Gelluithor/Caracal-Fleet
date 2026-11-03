@@ -18,6 +18,7 @@
 </p>
 
 <p align="center">
+  <a href="https://gelluithor.github.io/fleet/">Website</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#adding-screens">Adding screens</a> ·
   <a href="#permissions-and-roles">Permissions</a> ·
