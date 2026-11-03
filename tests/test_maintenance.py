@@ -2,6 +2,8 @@
 website, global playlists and templates)."""
 import json
 import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -180,6 +182,35 @@ def test_installer_reinstall_options():
     # the containers and images go first, the data only when asked
     assert src.index('docker compose down --remove-orphans --rmi all') < src.index("step '[3/7] User and data folders'")
     assert 'find /var/lib/caracal -mindepth 1 -maxdepth 1 -exec rm -rf {} +' in src
+
+
+@pytest.mark.skipif(not shutil.which('bash'), reason='bash not available')
+def test_installer_standalone_without_hub(tmp_path):
+    """Without --hub install-node.sh installs a node without the agent (the caracal repo's docker/install.sh)."""
+    from conftest import ROOT
+    script = ROOT / 'hub' / 'bootstrap' / 'install-node.sh'
+    src = script.read_text()
+    assert 'IMAGE=${IMAGE:-ghcr.io/gelluithor/caracal-node}' in src
+    assert src.index("echo 'Standalone node: no Fleet Agent") < src.index('bash "$SRC_DIR/install-agent.sh"')
+    # root is faked and no package manager is on PATH: the arguments are checked, then the system check stops it
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    (bin_dir / 'id').write_text('#!/bin/sh\necho 0\n')
+    (bin_dir / 'id').chmod(0o755)
+    env = {'PATH': f'{bin_dir}:/usr/bin:/bin', 'HOME': str(tmp_path)}
+
+    def run(*args):
+        return subprocess.run([shutil.which('bash'), str(script), *args], capture_output=True, text=True, env=env)
+    for refused in (['--token', 't'], ['--via-fleet'], ['--template', '3'], ['--name', 'n'], ['--admin-file', '/x']):
+        r = run(*refused)
+        assert r.returncode == 2 and 'need --hub' in r.stderr, refused
+    for accepted in ([], ['--version', '2026.10.25']):
+        r = run(*accepted)
+        assert r.returncode != 2, r.stderr
+        if not (shutil.which('apt-get') or shutil.which('apk')):
+            assert r.returncode == 3 and 'Supported systems' in r.stderr, r.stderr
+    r = run('--hub', 'https://fleet.example')
+    assert r.returncode == 2 and '--image is required' in r.stderr
 
 
 def test_agent_screen_and_display_watch(tmp_path, monkeypatch):

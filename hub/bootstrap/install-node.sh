@@ -6,6 +6,11 @@
 #        --image ghcr.io/OWNER/caracal-node --version 2026.10.06 [--name NAME] [--docker-pool 10.200.0.0/16] \
 #        [--via-fleet [--fleet-auth-file FILE]] [--admin-file FILE] [--template ID] [--reinstall [--wipe-data]]
 #
+# Without --hub it installs a standalone CARACAL node on Docker, without the Fleet Agent (the one-command Docker
+# installation of the caracal repository, docker/install.sh): --image defaults to ghcr.io/gelluithor/caracal-node,
+# and the options that need a hub (--token, --via-fleet, --admin-file, --template, --name) are refused. The node can
+# join a hub later with Add device -> Fleet Agent only.
+#
 # --template: a node template of the hub, applied by the hub once the new node reports (playlist, notifications...).
 #
 # --reinstall installs CARACAL again from scratch (CARACAL Fleet: device -> Manage -> Reinstall CARACAL): the CARACAL
@@ -54,7 +59,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$(id -u)" -eq 0 ] || { echo 'Run as root (sudo).' >&2; exit 1; }
-[ -n "$HUB" ] && [ -n "$IMAGE" ] || { echo '--hub and --image are required' >&2; exit 2; }
+if [ -z "$HUB" ]; then   # standalone node: nothing that needs a hub
+  IMAGE=${IMAGE:-ghcr.io/gelluithor/caracal-node}
+  [ -z "$TOKEN$VIA_FLEET$AUTH_FILE$ADMIN_FILE$TEMPLATE$NAME$SKIP_AGENT" ] \
+    || { echo '--token, --via-fleet, --admin-file, --template, --name and --skip-agent need --hub' >&2; exit 2; }
+fi
+[ -n "$IMAGE" ] || { echo '--image is required' >&2; exit 2; }
 [ -z "$WIPE_DATA" ] || [ -n "$REINSTALL" ] || { echo '--wipe-data needs --reinstall' >&2; exit 2; }
 # package manager and init system: apt + systemd (Debian family) or apk + OpenRC (Alpine Linux)
 if command -v apt-get >/dev/null; then PKG=apt
@@ -457,7 +467,9 @@ curl -fsS http://127.0.0.1:8080/api/setup-status >/dev/null || { docker compose 
 echo "CARACAL $VERSION is running"
 
 step '[7/7] Fleet Agent'
-if [ -n "$SKIP_AGENT" ]; then
+if [ -z "$HUB" ]; then
+  echo 'Standalone node: no Fleet Agent (connect it later in CARACAL Fleet: Add device -> Fleet Agent only).'
+elif [ -n "$SKIP_AGENT" ]; then
   echo 'Fleet Agent already installed.'
   if [ -n "$ADMIN_FILE" ]; then
     python3 /opt/caracal-agent/agent.py set-admin "$ADMIN_FILE" \
@@ -478,3 +490,7 @@ if [ -n "$ADMIN_FILE" ]; then rm -f "$ADMIN_FILE"; fi
 IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
 [ -n "$IP" ] || IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo "==> Done. CARACAL admin: http://${IP}:8080"
+if [ -z "$HUB" ]; then
+  echo '    Open it and create the administrator. Update (CARACAL_VERSION in /opt/caracal-node/.env picks the version):'
+  echo '    cd /opt/caracal-node && sudo docker compose pull && sudo docker compose up -d'
+fi
