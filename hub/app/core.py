@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.21.0'
+HUB_VERSION = '4.22.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -64,6 +64,7 @@ ROLE_KEY_RE = re.compile(r'^r[0-9a-f]{8}$')   # custom roles
 ACTIONS = {
     'next': ('control', 600),
     'unfreeze': ('control', 600),
+    'reload': ('control', 600),
     'show': ('control', 600),
     'freeze': ('control', 600),
     'show_collection': ('control', 600),

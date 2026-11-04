@@ -88,7 +88,7 @@ async def security_headers(request: Request, call_next):
     return response
 
 LIVE_ACTIONS = {'next', 'unfreeze', 'show', 'freeze', 'show_collection', 'freeze_collection', 'restart_player',
-                'reboot'}
+                'reboot', 'reload'}
 INTERNAL_ACTIONS = {'import_playlist', 'export_assets', 'takeover', 'takeover_end'}
 ORG = {'groups': ('device_groups', 'device_group'), 'locations': ('device_locations', 'location')}
 MAX_UPLOAD = 2 * 1024 ** 3
@@ -643,6 +643,7 @@ def validate_command(c, row, action, payload):
     if action in ('add_watcher', 'update_watcher'):
         payload = {**({'id': payload['id']} if payload.get('id') not in (None, '') else {}),
                    **validate_watcher(payload, required=action == 'add_watcher')}
+        watcher_request_supported(payload, caps)
     if action == 'notify_sound':
         payload = validate_notify_sound(c, payload)
     if action in ('update_watcher', 'delete_watcher', 'check_watcher'):
@@ -655,6 +656,7 @@ def validate_command(c, row, action, payload):
         # tries a watcher configuration without saving it (secrets only travel to the node, like for add_watcher)
         payload = {**({'id': payload['id']} if payload.get('id') not in (None, '') else {}),
                    **validate_watcher(payload, required=payload.get('id') in (None, ''))}
+        watcher_request_supported(payload, caps)
     if action == 'set_admin':
         payload = validate_admin(payload)
     if action == 'overlay_settings':
@@ -806,12 +808,16 @@ NOTIFY_POSITIONS = ('top-right', 'top-left', 'top', 'bottom-right', 'bottom-left
 NOTIFY_SOUNDS = ('off', 'critical', 'warning', 'all')
 NOTIFY_LIMITS = {'duration': (3, 120), 'max_queue': (1, 200), 'scale': (50, 300), 'volume': (0, 100),
                  'history_max': (50, 5000), 'history_days': (1, 90)}
-WATCHER_AUTH = ('none', 'bearer', 'basic', 'header', 'oauth2')
+# 'template': the credentials only go into the request where it says {{username}} / {{secret}} (body or a header)
+WATCHER_AUTH = ('none', 'bearer', 'basic', 'header', 'oauth2', 'template')
 WATCHER_TEXT = {'name': 60, 'url': 4000, 'auth_header': 100, 'list_path': 200, 'id_field': 200,
                 'title_template': 500, 'message_template': 1000, 'level_field': 200, 'oauth_token_url': 4000,
-                'oauth_client_id': 500, 'oauth_scope': 1000, 'oauth_extra': 1000}
+                'oauth_client_id': 500, 'oauth_scope': 1000, 'oauth_extra': 1000,
+                # the request itself (CARACAL 2026.11.04 with agent 4.18): body, Content-Type, more headers, levels
+                'body': 20000, 'content_type': 200, 'headers': 4000, 'level_map': 500}
 WATCHER_CHOICES = {'auth_type': WATCHER_AUTH, 'oauth_grant': ('client_credentials', 'password', 'refresh_token'),
-                   'oauth_client_auth': ('body', 'basic'), 'level': NOTIFY_LEVELS}
+                   'oauth_client_auth': ('body', 'basic'), 'level': NOTIFY_LEVELS,
+                   'method': ('GET', 'POST', 'PUT', 'PATCH')}
 WATCHER_SECRETS = ('username', 'secret', 'client_secret', 'refresh_token')
 # command -> local endpoint of the node (capability reported by the agent)
 NOTIFY_CAPABILITY = {'notify': 'notify', 'notify_clear': 'notify_clear', 'notify_settings': 'notify_settings',
@@ -825,7 +831,7 @@ SOUND_MAX = 5 * 1024 ** 2
 # command -> local endpoint of the node, for commands that old agents do not know at all
 NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot', 'player_settings': 'player_settings',
                   'add_camera': 'add_camera', 'update_camera': 'update_camera', 'camera_onvif': 'camera_onvif',
-                  'camera_discover': 'camera_discover', 'camera_preview': 'camera_preview'}
+                  'camera_discover': 'camera_discover', 'camera_preview': 'camera_preview', 'reload': 'reload'}
 CAMERA_SCHEMES, CAMERA_LAYOUTS, CAMERA_MAX = ('rtsp://', 'rtsps://', 'http://', 'https://'), ('auto', '2', '2x2', '3x3'), 9
 # what only newer agents can do (they report their version in every heartbeat)
 AGENT_FEATURES = {'reinstall_node': (4, 13, 0), 'diagnostics': (4, 13, 0), 'player_settings': (4, 13, 0),
@@ -1064,6 +1070,15 @@ def validate_watcher(d, required=True):
         if value:
             out[key] = value
     return out
+
+
+def watcher_request_supported(w, caps):
+    """A watcher with its own request (another method, a body, more headers, a level map) needs a node that has it;
+    an older one would silently send a plain GET."""
+    custom = w.get('method', 'GET') != 'GET' or w.get('auth_type') == 'template' or \
+        any(w.get(k) for k in ('body', 'content_type', 'headers', 'level_map'))
+    if custom and caps.get('watcher_options') is not True:
+        raise HTTPException(409, 'update_required')
 
 
 def validate_grafana(d, required=True):

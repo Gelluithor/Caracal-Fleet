@@ -34,7 +34,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.17.0'
+VERSION = '4.18.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -129,6 +129,9 @@ ENDPOINTS = {
     'takeover': ('POST', '/api/fleet/v1/takeover'),
     'takeover_end': ('DELETE', '/api/fleet/v1/takeover'),
     'widgets': ('GET', '/widgets'),
+    # CARACAL 2026.11.04: the page on the screen loaded again, watchers with any request (method, body, headers)
+    'reload': ('POST', '/api/fleet/v1/player/reload'),
+    'watcher_options': ('GET', '/api/fleet/v1/notify/watchers/options'),
 }
 # a widget item from Fleet: 'caracal-widget:<query>' becomes the node's own widget page
 WIDGET_PREFIX = 'caracal-widget:'
@@ -148,11 +151,12 @@ NOTIFY_SETTINGS = ('enabled', 'position', 'duration', 'max_queue', 'scale', 'sou
 WATCHER_FIELDS = ('name', 'url', 'auth_type', 'auth_header', 'username', 'secret', 'client_secret', 'refresh_token',
                   'list_path', 'id_field', 'title_template', 'message_template', 'level', 'level_field', 'interval',
                   'verify_tls', 'enabled', 'oauth_token_url', 'oauth_grant', 'oauth_client_id', 'oauth_scope',
-                  'oauth_extra', 'oauth_client_auth')
+                  'oauth_extra', 'oauth_client_auth', 'method', 'body', 'content_type', 'headers', 'level_map')
 WATCHER_PUBLIC = ('id', 'name', 'url', 'auth_type', 'auth_header', 'list_path', 'id_field', 'title_template',
                   'message_template', 'level', 'level_field', 'interval', 'verify_tls', 'enabled', 'initialized',
                   'last_check', 'last_error', 'last_count', 'last_new', 'oauth_token_url', 'oauth_grant',
-                  'oauth_client_id', 'oauth_scope', 'oauth_extra', 'oauth_client_auth', 'has_credentials')
+                  'oauth_client_id', 'oauth_scope', 'oauth_extra', 'oauth_client_auth', 'method', 'body',
+                  'content_type', 'headers', 'level_map', 'has_credentials')
 QUEUE_PUBLIC = ('id', 'source', 'title', 'message', 'level', 'priority', 'created')
 TOKEN_PUBLIC = ('id', 'name', 'prefix', 'rate_per_min', 'enabled', 'created', 'last_used')   # never the token
 MEDIA_KINDS = ('image', 'video')
@@ -562,6 +566,11 @@ class Agent:
         self.state['frozen'] = False
         self.save_state()
         return self.control('next')
+
+    def do_reload(self, p):
+        """The item on the screen is loaded again; its time on the screen and a freeze stay as they are."""
+        self.require_player()
+        return self.body(self.local('reload'))
 
     def do_unfreeze(self, p):
         self.state.pop('unfreeze_at', None)

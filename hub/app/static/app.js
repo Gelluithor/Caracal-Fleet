@@ -702,6 +702,7 @@ function deviceActions(d = null) {
     // resuming makes sense only for a frozen screen; the selection may contain one
     (!d || d.frozen) && A(cmd, 'play', t('act_unfreeze'), { act: 'unfreeze', disabled: off }),
     A(cmd, 'next', t('act_next'), { act: 'next', disabled: off }),
+    A(cmd, 'refresh', t('act_reload'), { act: 'reload', disabled: off || !has('reload'), why: off ? t('offline') : why(has('reload')) }),
     A(cmd, 'restart', t('act_restart_player'), { act: 'restart_player', disabled: off }),
   ].filter(Boolean) : [];
   const menus = [
@@ -1952,6 +1953,13 @@ function notifySettingsDialog(ids, current) {
   });
 }
 
+// Zabbix JSON-RPC: active problems of a host group, newest first; each problem (eventid) is announced once.
+// 6.4 and newer take the API token as a Bearer header, 6.0-7.0 also inside the body ("auth").
+const zabbixBody = auth => JSON.stringify({ jsonrpc: '2.0', method: 'problem.get', params: { groupids: ['<GROUP-ID>'], output: ['eventid', 'name', 'severity', 'clock', 'opdata'], recent: false, sortfield: ['eventid'], sortorder: 'DESC', limit: 100 }, ...(auth ? { auth: '{{secret}}' } : {}), id: 1 }, null, 2);
+const ZABBIX_WATCHER = { url: 'https://zabbix.example/api_jsonrpc.php', method: 'POST', content_type: 'application/json-rpc', list_path: 'result', id_field: 'eventid', title_template: '{name}', message_template: '{opdata}', level_field: 'severity', level_map: '5=critical, 4=critical, 3=warning, 2=warning, 1=info, 0=info' };
+// what a preset without its own request leaves in the form
+const WATCHER_REQUEST = { method: 'GET', body: '', content_type: '', headers: '', level_map: '' };
+
 // Presets of watchers (the same as in the node's admin UI); addresses are examples to replace.
 const WATCHER_PRESETS = {
   custom: {},
@@ -1962,16 +1970,20 @@ const WATCHER_PRESETS = {
   gitlab: { url: 'https://gitlab.example/api/v4/projects/123/issues?state=opened&order_by=created_at&per_page=50', auth_type: 'header', auth_header: 'PRIVATE-TOKEN', list_path: '', id_field: 'id', title_template: '#{iid}: {title}', message_template: '{author.name}', level_field: '' },
   github: { url: 'https://api.github.com/repos/OWNER/REPO/issues?state=open&sort=created&per_page=50', auth_type: 'bearer', list_path: '', id_field: 'id', title_template: '#{number}: {title}', message_template: '{user.login}', level_field: '' },
   graph: { url: 'https://graph.microsoft.com/v1.0/users/helpdesk@example.com/mailFolders/inbox/messages?$top=25&$orderby=receivedDateTime%20desc&$select=subject,from,receivedDateTime,importance', auth_type: 'oauth2', oauth_token_url: 'https://login.microsoftonline.com/<TENANT-ID>/oauth2/v2.0/token', oauth_grant: 'client_credentials', oauth_scope: 'https://graph.microsoft.com/.default', oauth_client_auth: 'body', list_path: 'value', id_field: 'id', title_template: '{subject}', message_template: '{from.emailAddress.name}', level_field: '' },
+  zabbix: { ...ZABBIX_WATCHER, auth_type: 'bearer', body: zabbixBody(false) },
+  zabbix6: { ...ZABBIX_WATCHER, auth_type: 'template', body: zabbixBody(true) },
   servicenow: { url: 'https://example.service-now.com/api/now/table/incident?sysparm_query=active%3Dtrue%5EORDERBYDESCsys_created_on&sysparm_limit=50&sysparm_fields=sys_id,number,short_description,priority,category', auth_type: 'oauth2', oauth_token_url: 'https://example.service-now.com/oauth_token.do', oauth_grant: 'password', oauth_client_auth: 'body', list_path: 'result', id_field: 'sys_id', title_template: '{number}: {short_description}', message_template: '{category}', level_field: '' },
 };
-const WATCHER_AUTH = ['none', 'bearer', 'basic', 'header', 'oauth2'];
+const WATCHER_AUTH = ['none', 'bearer', 'basic', 'header', 'oauth2', 'template'];
+const WATCHER_METHODS = ['GET', 'POST', 'PUT', 'PATCH'];
 const OAUTH_GRANTS = ['client_credentials', 'password', 'refresh_token'];
-const WATCHER_TEXT = ['name', 'url', 'auth_header', 'list_path', 'id_field', 'title_template', 'message_template', 'level_field', 'oauth_token_url', 'oauth_client_id', 'oauth_scope', 'oauth_extra'];
+const WATCHER_TEXT = ['name', 'url', 'auth_header', 'list_path', 'id_field', 'title_template', 'message_template', 'level_field', 'oauth_token_url', 'oauth_client_id', 'oauth_scope', 'oauth_extra',
+  'body', 'content_type', 'headers', 'level_map'];
 
 function watcherPayload(data) {
   const payload = {};
   for (const k of WATCHER_TEXT) payload[k] = (data[k] || '').trim();
-  Object.assign(payload, { auth_type: data.auth_type, oauth_grant: data.oauth_grant, oauth_client_auth: data.oauth_client_auth, level: data.level,
+  Object.assign(payload, { method: data.method || 'GET', auth_type: data.auth_type, oauth_grant: data.oauth_grant, oauth_client_auth: data.oauth_client_auth, level: data.level,
     interval: Number(data.interval), verify_tls: !!data.verify_tls, enabled: !!data.enabled });
   // empty credentials keep the stored ones
   for (const k of ['username', 'secret', 'client_secret', 'refresh_token']) if ((data[k] || '').trim()) payload[k] = data[k].trim();
@@ -1989,7 +2001,7 @@ async function tryCommand(form, btn, run, show, target = '.try-result') {
 }
 
 function watcherDialog(deviceId, w = null, targets = null) {
-  const v = { name: '', url: '', auth_type: 'none', auth_header: '', list_path: '', id_field: 'id', title_template: '', message_template: '', level: 'info', level_field: '', interval: 60, verify_tls: 1, enabled: 1, oauth_token_url: '', oauth_grant: 'client_credentials', oauth_client_id: '', oauth_scope: '', oauth_extra: '', oauth_client_auth: 'body', ...(w || {}) };
+  const v = { name: '', url: '', auth_type: 'none', auth_header: '', list_path: '', id_field: 'id', title_template: '', message_template: '', level: 'info', level_field: '', interval: 60, verify_tls: 1, enabled: 1, oauth_token_url: '', oauth_grant: 'client_credentials', oauth_client_id: '', oauth_scope: '', oauth_extra: '', oauth_client_auth: 'body', ...WATCHER_REQUEST, ...(w || {}) };
   const keep = w && w.has_credentials ? `placeholder="${esc(t('leaveEmpty'))}"` : '';
   const field = (name, label, attrs = '') => `<label>${label}<input name="${name}" value="${esc(v[name] ?? '')}" spellcheck="false" ${attrs}></label>`;
   const secret = name => `<input name="${name}" type="password" autocomplete="new-password" ${keep}>`;
@@ -1998,7 +2010,11 @@ function watcherDialog(deviceId, w = null, targets = null) {
     body: `<div class="form"><p class="muted">${t('watcherDialogHint')}</p>
       ${w ? '' : `<label>${t('watcherPreset')}<select name="preset">${Object.keys(WATCHER_PRESETS).map(k => `<option value="${k}">${t('watcherPreset_' + k)}</option>`).join('')}</select></label>`}
       ${field('name', t('watcherName'), 'required maxlength="60"')}
-      ${field('url', t('watcherUrl'), 'type="url" required placeholder="https://"')}
+      <div class="row2"><label>${t('watcherMethod')}<select name="method">${WATCHER_METHODS.map(m => `<option ${(v.method || 'GET') === m ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
+        ${field('url', t('watcherUrl'), 'type="url" required placeholder="https://"')}</div>
+      <div data-method="POST PUT PATCH">${field('content_type', t('watcherContentType'), 'placeholder="application/json"')}
+        <label>${t('watcherBody')}<textarea name="body" rows="7" spellcheck="false" class="mono" placeholder='{"query": "…"}'>${esc(v.body ?? '')}</textarea></label></div>
+      <label>${t('watcherHeaders')}<textarea name="headers" rows="2" spellcheck="false" class="mono" placeholder="X-Tenant: brno">${esc(v.headers ?? '')}</textarea></label>
       <div class="row2"><label>${t('watcherAuth')}<select name="auth_type">${choice(WATCHER_AUTH, v.auth_type, 'watcherAuth_')}</select></label>
         <span data-auth="header">${field('auth_header', t('watcherHeader'), 'placeholder="X-API-Key"')}</span></div>
       <div data-auth="oauth2">${field('oauth_token_url', t('watcherTokenUrl'), 'type="url" placeholder="https://login…/oauth2/token"')}
@@ -2006,16 +2022,17 @@ function watcherDialog(deviceId, w = null, targets = null) {
         <div class="row2"><label>Client Secret${secret('client_secret')}</label>${field('oauth_scope', 'Scope')}</div>
         <div class="row2"><label>${t('watcherClientAuth')}<select name="oauth_client_auth"><option value="body" ${v.oauth_client_auth !== 'basic' ? 'selected' : ''}>client_secret_post</option><option value="basic" ${v.oauth_client_auth === 'basic' ? 'selected' : ''}>client_secret_basic</option></select></label>${field('oauth_extra', t('watcherTokenExtra'), 'placeholder="audience=https://api.example"')}</div>
         <label data-grant="refresh_token">Refresh token${secret('refresh_token')}</label></div>
-      <div class="row2"><label data-auth="basic oauth2" data-grant="password">${t('watcherUser')}<input name="username" autocomplete="off" spellcheck="false" ${keep}></label>
-        <label data-auth="bearer basic header oauth2" data-grant="password">${t('watcherSecret')}${secret('secret')}</label></div>
+      <div class="row2"><label data-auth="basic oauth2 template" data-grant="password">${t('watcherUser')}<input name="username" autocomplete="off" spellcheck="false" ${keep}></label>
+        <label data-auth="bearer basic header oauth2 template" data-grant="password">${t('watcherSecret')}${secret('secret')}</label></div>
       <div class="row2">${field('list_path', t('watcherListPath'), `placeholder="${esc(t('watcherListPathHint'))}"`)}${field('id_field', t('watcherIdField'), 'required')}</div>
       ${field('title_template', t('watcherTitle'), `placeholder="${esc(t('watcherTitleHint'))}"`)}
       ${field('message_template', t('watcherMessage'), 'placeholder="{customer.name} · {group}"')}
       <div class="row2"><label>${t('notifyLevel')}<select name="level">${choice(NOTIFY_LEVELS, v.level, 'notifyLevel_')}</select></label>${field('level_field', t('watcherLevelField'), 'placeholder="priority.name"')}</div>
-      <div class="row2"><label>${t('watcherInterval')}<input name="interval" type="number" min="15" max="86400" value="${esc(v.interval)}" required></label><span></span></div>
+      <div class="row2">${field('level_map', t('watcherLevelMap'), 'placeholder="5=critical, 3=warning, 1=info"')}<label>${t('watcherInterval')}<input name="interval" type="number" min="15" max="86400" value="${esc(v.interval)}" required></label></div>
       <label class="check"><input type="checkbox" name="verify_tls" ${v.verify_tls ? 'checked' : ''}>${t('watcherVerifyTls')}</label>
       <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? 'checked' : ''}>${t('watcherEnabled')}</label>
       <p class="muted">${t('watcherTemplateHint')}</p>
+      <p class="muted">${t('watcherRequestHint')}</p>
       ${targets ? `<p class="muted">${t('addToSelected', { n: targets.length })}</p>` : w ? '' : `<details><summary>${t('alsoAddTo')}</summary>${targetPicker(deviceId, [], d => notifySupport(d) === 'ok')}</details>`}
       ${(dev(deviceId)?.capabilities || {}).preview_watcher ? `<div class="form-actions start"><button type="button" class="btn sm" data-try>${icon('refresh')}${t('watcherTry')}</button></div><div class="try-result"></div>` : ''}
       <div class="note info">${icon('lock')}${t('watchersSecurity')}</div></div>`,
@@ -2025,8 +2042,10 @@ function watcherDialog(deviceId, w = null, targets = null) {
         const auth = form.auth_type.value, grant = form.oauth_grant.value;
         $$('[data-auth]', form).forEach(el => { el.hidden = !el.dataset.auth.split(' ').includes(auth) || (auth === 'oauth2' && el.dataset.grant !== undefined && !el.dataset.grant.split(' ').includes(grant)); });
         $$('[data-auth="oauth2"] [data-grant]', form).forEach(el => { el.hidden = !el.dataset.grant.split(' ').includes(grant); });
+        $$('[data-method]', form).forEach(el => { el.hidden = !el.dataset.method.split(' ').includes(form.method.value) && !form.body.value.trim(); });
       };
       form.auth_type.onchange = sync;
+      form.method.onchange = sync;
       form.oauth_grant.onchange = sync;
       const tryBtn = $('[data-try]', form);
       if (tryBtn) {
@@ -2035,7 +2054,7 @@ function watcherDialog(deviceId, w = null, targets = null) {
       }
       if (form.preset) {
         form.preset.onchange = () => {
-          const p = WATCHER_PRESETS[form.preset.value];
+          const p = { ...WATCHER_REQUEST, ...WATCHER_PRESETS[form.preset.value] };
           for (const [k, val] of Object.entries(p)) if (form[k]) form[k].value = val;
           if (!form.name.value && form.preset.value !== 'custom') form.name.value = t('watcherPreset_' + form.preset.value).split(' – ')[0];
           sync();
@@ -2138,7 +2157,8 @@ VIEWS.playlists = {
     patch($('#pHead', ed), freezeBanner(d) + `<section class="card dev-hero slim"><div class="hero-main"><div class="hero-title">${statusBadge(d)}<h2><a href="#/device/${encodeURIComponent(d.id)}">${esc(d.name)}</a></h2></div>
       <div class="chips"><span>${t('nowPlaying')}: ${esc(d.current_name || '—')}${d.frozen ? ' (' + t('frozen') + ')' : ''}</span></div></div><div class="hero-actions">${can('control') ? `
       ${d.frozen ? `<button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="unfreeze" ${d.online ? '' : 'disabled'}>${icon('play')}${t('act_unfreeze')}</button>` : ''}
-      <button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="next" ${d.online ? '' : 'disabled'}>${icon('next')}${t('act_next')}</button>` : ''}</div></section>`);
+      <button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="next" ${d.online ? '' : 'disabled'}>${icon('next')}${t('act_next')}</button>
+      ${(d.capabilities || {}).reload ? `<button class="btn" data-do="cmd" data-id="${esc(d.id)}" data-act="reload" ${d.online ? '' : 'disabled'}>${icon('refresh')}${t('act_reload')}</button>` : ''}` : ''}</div></section>`);
     renderPlaylist($('#pPl', ed), d);
     patch($('#pCol', ed), renderCollections(d));
     patch($('#pLog', ed), renderProfiles(d));

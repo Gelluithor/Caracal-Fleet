@@ -239,3 +239,27 @@ def test_prefs_and_onboarding(client, admin_headers):
     assert set(steps) == {'device', 'content', 'alerts', 'backup', 'users'}
     client.post('/api/users', headers=h, json={'username': 'ob-viewer', 'password': 'long-password-1', 'role': 'viewer'})
     assert client.get('/api/onboarding', headers=login(client, 'ob-viewer')).json()['steps'] == []
+
+
+def test_watcher_request_and_reload_need_a_new_node(client, admin_headers):
+    """A watcher's own request and reloading the page go only to nodes that have them (CARACAL 2026.11.04, agent 4.18);
+    an older node would send a plain GET and ignore the body."""
+    h = admin_headers
+    new = enroll(client, 'wr-new', version='4.18.0', caps={**NEW, 'add_watcher': True, 'preview_watcher': True,
+                                                          'watcher_options': True, 'reload': True})
+    old = enroll(client, 'wr-old', version='4.17.0', caps={**NEW, 'add_watcher': True})
+    zabbix = {'name': 'Zabbix', 'url': 'https://zabbix.example/api_jsonrpc.php', 'method': 'POST', 'auth_type': 'template',
+              'body': '{"method": "problem.get", "auth": "{{secret}}"}', 'content_type': 'application/json-rpc',
+              'headers': 'X-A: 1', 'level_map': '5=critical', 'list_path': 'result', 'id_field': 'eventid', 'secret': 's'}
+    post = lambda d, action, payload: client.post(f"/api/devices/{d['device_id']}/commands", headers=h,
+                                                  json={'action': action, 'payload': payload})
+    r = post(new, 'add_watcher', zabbix)
+    assert r.status_code == 200, r.text
+    sent = next(c for c in delivered(client, new) if c['action'] == 'add_watcher')['payload']
+    assert sent['method'] == 'POST' and sent['body'] == zabbix['body'] and sent['headers'] == 'X-A: 1' and sent['level_map'] == '5=critical'
+    assert post(old, 'add_watcher', zabbix).json()['detail'] == 'update_required'
+    assert post(old, 'add_watcher', {**zabbix, 'method': 'GET', 'auth_type': 'bearer', 'body': '', 'content_type': '',
+                                     'headers': '', 'level_map': ''}).status_code == 200   # a plain watcher still works
+    assert post(new, 'add_watcher', {**zabbix, 'method': 'DELETE'}).json()['detail'] == 'invalid_value'
+    assert post(new, 'reload', {}).status_code == 200
+    assert post(old, 'reload', {}).json()['detail'] == 'update_required'

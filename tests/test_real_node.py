@@ -387,6 +387,38 @@ def test_watchers_from_fleet(env):
     run(env, 'notify_clear')
 
 
+def test_watcher_request_and_reload_from_fleet(env):
+    """A watcher with its own request (Zabbix JSON-RPC: POST, a body with the token, levels) and the page reloaded."""
+    from fastapi import FastAPI, Request
+    api, seen = FastAPI(), []
+
+    @api.post('/api_jsonrpc.php')
+    async def rpc(req: Request):
+        seen.append({'type': req.headers.get('content-type'), 'body': await req.json()})
+        return {'jsonrpc': '2.0', 'result': [{'eventid': '501', 'name': 'Disk full on db01', 'severity': '4'}], 'id': 1}
+    api_url, _ = serve(api)
+    assert device(env)['capabilities']['watcher_options'] is True and device(env)['capabilities']['reload'] is True
+    body = '{"jsonrpc": "2.0", "method": "problem.get", "params": {"groupids": ["7"]}, "auth": "{{secret}}", "id": 1}'
+    row = run(env, 'add_watcher', {'name': 'Zabbix', 'url': api_url + '/api_jsonrpc.php', 'method': 'POST', 'body': body,
+                                   'content_type': 'application/json-rpc', 'auth_type': 'template', 'secret': 'zbx-T0ken',
+                                   'list_path': 'result', 'id_field': 'eventid', 'title_template': '{name}',
+                                   'level_field': 'severity', 'level_map': '5=critical, 4=critical', 'enabled': False})
+    wid = json.loads(row['result'])['id']
+    assert 'zbx-T0ken' not in row['payload_json']
+    w = next(x for x in device(env)['notifications']['watchers'] if x['id'] == wid)
+    assert w['method'] == 'POST' and w['body'] == body and w['level_map'] == '5=critical, 4=critical'
+    preview = json.loads(run(env, 'preview_watcher', {'id': wid, 'name': 'Zabbix'})['result'])
+    assert preview['samples'][0]['title'] == 'Disk full on db01' and preview['samples'][0]['level'] == 'critical'
+    assert seen[-1]['type'] == 'application/json-rpc' and seen[-1]['body']['auth'] == 'zbx-T0ken'
+    run(env, 'delete_watcher', {'id': wid})
+
+    # the page on the screen loaded again
+    before = env['local'].get(f"{env['node']}/api/v6/player/command").json()['command_id']
+    run(env, 'reload')
+    cmd = env['local'].get(f"{env['node']}/api/v6/player/command").json()
+    assert cmd['action'] == 'reload' and cmd['command_id'] == before + 1
+
+
 def test_http_login_profile(env):
     """HTTP Basic/Digest log-ins (the browser pop-up) need only the server address and the credentials."""
     row = run(env, 'add_profile', {'auth_type': 'http', 'name': 'Router', 'target_url': 'https://router.example/',
@@ -743,9 +775,10 @@ def test_screenshot_from_fleet(env):
 def test_dark_websites_from_fleet(env):
     """Websites in dark mode: the node's setting, a choice per website or collection and what the player gets."""
     assert device(env)['capabilities']['player_settings'] is True
-    assert device(env)['player_settings'] == {'web_dark': 'off'}
+    # only the dark mode here: the node reports its screen layout in the same settings (CARACAL 2026.10.25)
+    assert device(env)['player_settings']['web_dark'] == 'off'
     run(env, 'player_settings', {'web_dark': 'dark'})
-    assert device(env)['player_settings'] == {'web_dark': 'dark'}
+    assert device(env)['player_settings']['web_dark'] == 'dark'
     run(env, 'add_web', {'name': 'Forced', 'source': 'https://example.com/forced', 'duration': 20, 'dark': 'force'})
     run(env, 'add_web', {'name': 'Follows', 'source': 'https://example.com/follows', 'duration': 20})
     run(env, 'add_collection', {'name': 'Dark dashboards', 'grafana_url': 'https://grafana.example', 'tag': 'tv',

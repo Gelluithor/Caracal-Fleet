@@ -80,7 +80,7 @@ the node, and camera passwords are never shown and leave the command history onc
 
 - **Content:** playlists with web pages, images, videos and Grafana collections; logins for web pages that need
   a username and password, as a log-in form or the browser's HTTP log-in pop-up (stored encrypted on the node only);
-  show or freeze an item, skip, resume, restart the player or the device
+  show or freeze an item, skip, resume, reload the page on the screen, restart the player or the device
 - **Widgets:** a clock, the weather (Open-Meteo), news from RSS / Atom, a table from CSV or Google Sheets and a text
   as playlist items, with a live preview; the node draws them itself (CARACAL 2026.10.23.1 with agent 4.17); also a
   calendar and a meeting room (free / busy) from an ICS link of Microsoft 365, Outlook or Google, a QR code and a
@@ -102,7 +102,7 @@ the node, and camera passwords are never shown and leave the command history onc
   dark for every page
 - **On-screen notifications:** send a notification to one screen or many, change the notification settings (position,
   size, sound, limits, your own MP3 per level) and their look in a visual editor with a live preview of the TV (colours,
-  icons, shape, banner, font, animation) and manage watchers that announce new tickets or issues from other apps; a notification API
+  icons, shape, banner, font, animation) and manage watchers that announce new tickets, issues or Zabbix problems from other apps (any method, body and headers, CARACAL 2026.11.04 with agent 4.18); a notification API
   lets other apps reach many screens with one request
 - **Emergency message:** one click puts a full-screen message (evacuation, an outage) on all screens or on chosen
   locations, groups and devices, right away and for a time or until it is ended; then the playlists go on. Older

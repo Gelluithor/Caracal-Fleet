@@ -53,6 +53,8 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Clear history / audit | `POST /notify/history/clear`, `POST /notify/audit/clear` | the clearing of the audit log stays in it |
 | Node token | `PUT /notify/tokens/{id}`, `DELETE /notify/tokens/{id}` | `{name, rate_per_min, enabled}`; new tokens are created in the node's administration only (shown once) |
 | Try a watcher | `POST /notify/watchers/preview` | the watcher fields (and `id` to use the stored credentials) → `{count, samples}`, nothing is saved |
+| Watcher options | `GET /notify/watchers/options` | `{methods, auth, placeholders, levels}`; its presence tells the agent that watchers take `method`, `body`, `content_type`, `headers` and `level_map` (CARACAL 2026.11.04) |
+| Reload the page | `POST /player/reload` | `{ok, command_id}`: the player loads the item on the screen again; its time and a freeze stay (CARACAL 2026.11.04) |
 | Try a Grafana tag | `POST /grafana/discover` | `{grafana_url, tag}` → `{count, dashboards}` |
 | Notification picture | `POST /notify/image`, `DELETE /notify/image` | multipart `file`: PNG, JPEG, GIF or WebP up to 5 MB for the notification look (CARACAL 2026.10.10.4) |
 | Screenshot | `POST /screenshot` | a picture of what the TV shows, taken by the node's overlay → the JPEG (waits up to 15 s; 504 when the overlay does not answer) |

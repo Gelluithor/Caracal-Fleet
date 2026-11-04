@@ -57,6 +57,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 0; 
 
 /* ---------- inputs & buttons */
 input, select, textarea { width: 100%; padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel); outline: none; }
+textarea.mono { font: 13px/1.5 var(--mono); resize: vertical; }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 22%, transparent); }
 input[type=file] { padding: 6px; }
 select, input:not([type=checkbox]):not([type=radio]):not([type=file]) { height: 36px; }
