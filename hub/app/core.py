@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-HUB_VERSION = '4.22.0'
+HUB_VERSION = '4.23.0'
 APP_DIR = Path(__file__).resolve().parent
 BOOT = APP_DIR.parent / 'bootstrap'
 DATA = Path(os.getenv('CARACAL_HUB_DATA', '/var/lib/caracal-hub'))
@@ -65,6 +65,8 @@ ACTIONS = {
     'next': ('control', 600),
     'unfreeze': ('control', 600),
     'reload': ('control', 600),
+    'scroll': ('control', 60),       # the page on the screen moves while its start is being set
+    'scroll_to': ('control', 60),
     'show': ('control', 600),
     'freeze': ('control', 600),
     'show_collection': ('control', 600),
@@ -73,6 +75,9 @@ ACTIONS = {
     'reboot': ('control', 600),
     'snapshot': ('view', 600),
     'add_web': ('content', None),
+    'add_multi': ('content', None),
+    'update_multi': ('content', None),
+    'set_scroll': ('content', None),
     'add_media': ('content', None),
     'update_asset': ('content', None),
     'delete_asset': ('content', None),
@@ -312,6 +317,7 @@ COLUMNS = [
     ('global_playlist_items', 'valid_from', 'REAL'),    # shown only from / until (Unix time), CARACAL 2026.10.14
     ('global_playlist_items', 'valid_until', 'REAL'),
     ('global_playlist_items', 'secret_json', "TEXT DEFAULT ''"),   # credentials of a camera's streams, never returned
+    ('global_playlist_items', 'scroll_y', 'REAL DEFAULT 0'),   # where a website starts (CSS px), CARACAL 2026.11.13
     ('devices', 'tags_json', "TEXT DEFAULT '[]'"),   # free labels of a device
     ('files', 'library', 'INTEGER DEFAULT 0'),       # kept in the media library
     ('device_locations', 'lat', 'REAL'),             # the place on the map

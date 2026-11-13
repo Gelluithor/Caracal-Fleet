@@ -419,6 +419,31 @@ def test_watcher_request_and_reload_from_fleet(env):
     assert cmd['action'] == 'reload' and cmd['command_id'] == before + 1
 
 
+def test_multi_view_and_scroll_from_fleet(env):
+    """Several things on one screen and where a page starts, created from Fleet on the real node."""
+    caps = device(env)['capabilities']
+    assert caps['add_multi'] is True and caps['update_multi'] is True and caps['asset_scroll'] is True
+    row = run(env, 'add_multi', {'name': 'Výroba', 'layout': '2', 'duration': 30,
+                                 'cells': [{'source': 'https://a.example'}, {'source': 'caracal-widget:type=clock'}]})
+    mid = json.loads(row['result'])['id']
+    node = next(a for a in device(env)['assets'] if str(a['id']) == str(mid))
+    assert node['kind'] == 'multi' and node['layout'] == '2' and node['cells'][1]['source'] == 'caracal-widget:type=clock'
+    run(env, 'update_multi', {'id': mid, 'layout': '2v', 'cells': [{'source': 'https://a.example'}, {'source': 'https://b.example'}]})
+    run(env, 'set_scroll', {'id': mid, 'cell': 1, 'y': 640})
+    stored = json.loads(env['mod'].rows('SELECT source FROM assets WHERE id=?', (mid,))[0]['source'])
+    assert stored['layout'] == '2v' and stored['cells'][1]['scroll_y'] == 640
+    web = json.loads(run(env, 'add_web', {'name': 'Dlouhá', 'source': 'https://long.example', 'duration': 20})['result'])['id']
+    run(env, 'set_scroll', {'id': web, 'y': 1200})
+    assert env['mod'].rows('SELECT scroll_y FROM assets WHERE id=?', (web,))[0]['scroll_y'] == 1200
+    # a live scroll goes to the player (it reports back where the page is)
+    before = env['local'].get(f"{env['node']}/api/v6/player/command").json()['command_id']
+    run(env, 'scroll', {'dy': 300, 'cell': 0})
+    cmd = env['local'].get(f"{env['node']}/api/v6/player/command").json()
+    assert cmd['command_id'] == before + 1 and cmd['action'] == 'scroll' and cmd['extra']['dy'] == 300
+    for a in (mid, web):
+        run(env, 'delete_asset', {'id': a})
+
+
 def test_http_login_profile(env):
     """HTTP Basic/Digest log-ins (the browser pop-up) need only the server address and the credentials."""
     row = run(env, 'add_profile', {'auth_type': 'http', 'name': 'Router', 'target_url': 'https://router.example/',

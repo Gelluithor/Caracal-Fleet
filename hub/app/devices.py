@@ -33,6 +33,12 @@ def normalize_asset(a):
     a['enabled'] = a.get('enabled', a.get('is_enabled', True)) not in (False, 0, '0', 'false')
     if a['kind'] == COLLECTION_KIND:
         a.update(grafana_config(a['source']))
+    elif a['kind'] == 'multi':   # several things on one screen: {"layout", "cells"} as JSON in 'source'
+        try:
+            cfg = json.loads(a['source'] or '{}')
+        except (TypeError, ValueError):
+            cfg = {}
+        a.update(layout=str(cfg.get('layout') or ''), cells=cfg.get('cells') if isinstance(cfg.get('cells'), list) else [])
     return a
 
 
@@ -242,6 +248,7 @@ def build(row, failed_commands=0, full=False, latest_caracal=None):
         'current_kind': player.get('current_kind') or '',
         'remaining': player.get('remaining'), 'duration': player.get('duration'),
         'frozen': bool(player.get('frozen')), 'frozen_until': status.get('frozen_until'),
+        'scroll': player.get('scroll') if isinstance(player.get('scroll'), dict) else None,
         'playlist_count': len(assets), 'collection_count': len(collections), 'profile_count': len(profiles),
         'notify_waiting': notifications['waiting'] if notifications else None,
         'watcher_count': len(notifications['watchers']) if notifications else 0,

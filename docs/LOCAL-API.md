@@ -55,6 +55,9 @@ Authentication: header `X-Fleet-Key` with the content of the key file the agent 
 | Try a watcher | `POST /notify/watchers/preview` | the watcher fields (and `id` to use the stored credentials) → `{count, samples}`, nothing is saved |
 | Watcher options | `GET /notify/watchers/options` | `{methods, auth, placeholders, levels}`; its presence tells the agent that watchers take `method`, `body`, `content_type`, `headers` and `level_map` (CARACAL 2026.11.04) |
 | Reload the page | `POST /player/reload` | `{ok, command_id}`: the player loads the item on the screen again; its time and a freeze stay (CARACAL 2026.11.04) |
+| Several on one screen | `POST /assets/multi`, `PUT /assets/multi/{id}` | `{name, duration, layout (2, 2v, 3, 1+2, 2x2), cells: [{source (http(s) address or `caracal-widget:<query>`), auth_profile_id, scale, dark, scroll_x, scroll_y}]}`, as many cells as the layout has; every cell is a window of its own on the TV (CARACAL 2026.11.13) |
+| Where a page starts | `PUT /assets/{id}/scroll` | `{x, y}` in CSS pixels (0 = the top) for a website or a Grafana collection, `{cell, x, y}` for a cell of a multi view; the player scrolls the page there whenever it shows it (CARACAL 2026.11.13) |
+| Scroll the screen | `POST /control` `{action: scroll, dy, cell}` or `{action: scroll_to, y, x, cell}` | moves the page on the screen now; the snapshot reports `player.scroll` `{x, y, max_y}` while it is being adjusted (CARACAL 2026.11.13) |
 | Try a Grafana tag | `POST /grafana/discover` | `{grafana_url, tag}` → `{count, dashboards}` |
 | Notification picture | `POST /notify/image`, `DELETE /notify/image` | multipart `file`: PNG, JPEG, GIF or WebP up to 5 MB for the notification look (CARACAL 2026.10.10.4) |
 | Screenshot | `POST /screenshot` | a picture of what the TV shows, taken by the node's overlay → the JPEG (waits up to 15 s; 504 when the overlay does not answer) |

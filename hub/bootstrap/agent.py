@@ -34,7 +34,7 @@ from urllib.parse import quote, urlparse
 import psutil
 import requests
 
-VERSION = '4.18.0'
+VERSION = '4.19.0'
 CONFIG = Path(os.getenv('CARACAL_AGENT_CONFIG', '/etc/caracal-agent.json'))
 KEY_FILE = Path(os.getenv('CARACAL_FLEET_KEY_FILE', '/etc/caracal-fleet-key'))
 STATE = Path(os.getenv('CARACAL_AGENT_STATE', '/var/lib/caracal-agent/state.json'))
@@ -132,6 +132,10 @@ ENDPOINTS = {
     # CARACAL 2026.11.04: the page on the screen loaded again, watchers with any request (method, body, headers)
     'reload': ('POST', '/api/fleet/v1/player/reload'),
     'watcher_options': ('GET', '/api/fleet/v1/notify/watchers/options'),
+    # CARACAL 2026.11.13: several things on one screen, and where a website starts (scrolled down)
+    'add_multi': ('POST', '/api/fleet/v1/assets/multi'),
+    'update_multi': ('PUT', '/api/fleet/v1/assets/multi/{id}'),
+    'asset_scroll': ('PUT', '/api/fleet/v1/assets/{id}/scroll'),
 }
 # a widget item from Fleet: 'caracal-widget:<query>' becomes the node's own widget page
 WIDGET_PREFIX = 'caracal-widget:'
@@ -567,6 +571,37 @@ class Agent:
         self.save_state()
         return self.control('next')
 
+    def do_add_multi(self, p):
+        res = self.body(self.local('add_multi', json=self.clean(p)))
+        return {'id': item_id(res), 'name': p.get('name')}
+
+    def do_update_multi(self, p):
+        ident = p.pop('id')
+        return self.body(self.local('update_multi', {'id': ident}, json=self.clean(p)))
+
+    def do_set_scroll(self, p):
+        """Where a website (or a cell of a multi view) starts: {id, x, y, cell}."""
+        return self.body(self.local('asset_scroll', {'id': p['id']},
+                                    json={k: p[k] for k in ('x', 'y', 'cell') if p.get(k) is not None}))
+
+    def scrolled(self, action, p):
+        """Scrolls the page on the screen and answers where it is now (the player reports it within a second or
+        two), so that Fleet can show the position without waiting for the next heartbeat."""
+        self.require_player()
+        self.control(action, **{k: p[k] for k in ('dy', 'y', 'x', 'cell') if p.get(k) is not None})
+        for _ in range(8):
+            time.sleep(.5)
+            scroll = (self.snapshot().get('player') or {}).get('scroll')
+            if isinstance(scroll, dict) and int(scroll.get('cell') or 0) == int(p.get('cell') or 0):
+                return scroll
+        return {}
+
+    def do_scroll(self, p):
+        return self.scrolled('scroll', p)
+
+    def do_scroll_to(self, p):
+        return self.scrolled('scroll_to', p)
+
     def do_reload(self, p):
         """The item on the screen is loaded again; its time on the screen and a freeze stay as they are."""
         self.require_player()
@@ -982,6 +1017,7 @@ class Agent:
                 if (collection and caps.get('add_grafana_tag') is False) or \
                         (it.get('file_id') and caps.get('upload') is False) or \
                         (kind == 'camera' and caps.get('add_camera') is False) or \
+                        (kind == 'multi' and caps.get('add_multi') is not True) or \
                         (str(it.get('source') or '').startswith(WIDGET_PREFIX) and caps.get('widgets') is not True):
                     skipped.append(it.get('name'))
                     continue
@@ -989,6 +1025,8 @@ class Agent:
                     res = self.do_add_collection(dict(it))
                 elif kind == 'camera':
                     res = self.do_add_camera(dict(it))
+                elif kind == 'multi':
+                    res = self.do_add_multi(dict(it))
                 elif it.get('file_id'):
                     res = self.do_add_media(dict(it))
                 else:
@@ -996,6 +1034,8 @@ class Agent:
                 ident = item_id(res)
                 unknown_ids = unknown_ids or ident is None
                 created.append(ident)
+                if ident is not None and it.get('scroll_y') and kind in ('web', COLLECTION_KIND) and caps.get('asset_scroll'):
+                    self.local('asset_scroll', {'id': ident}, json={'y': it['scroll_y']})
                 log('imported', kind, it.get('name'))
         except Exception:
             for ident in created:

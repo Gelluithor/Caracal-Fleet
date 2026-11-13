@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import access, approvals, documents, integrations, reports, tenants, console, images, library, monitor, notify, offsite, plays, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, takeover, templates, timeline, widgets
+from . import access, approvals, assistant, documents, integrations, reports, tenants, console, images, library, monitor, notify, offsite, plays, playlists, provisioning, proxy, releases, rollout, schedule, sdcard, security, system, takeover, templates, timeline, widgets
 from .core import (ACTIONS, AGENT_VERSION, BOOT, DEVICE_PERMISSIONS, FILES, HUB_VERSION, LANGUAGES, ONLINE_TIMEOUT, APP_DIR, require_device,
                    audit, cfg, check_password, cleanup_files, current_user, db, device_auth, hash_password, init,
                    make_session, new_batch, public_user, queue_command, redact, redact_json, scrub_secrets,
@@ -35,6 +35,7 @@ app = FastAPI(title='CARACAL Fleet Controller', version=HUB_VERSION, docs_url=No
 init()
 STATIC = APP_DIR / 'static'
 app.include_router(system.router)
+app.include_router(assistant.router)    # the assistant (local model or a provider of the administrator's choice)
 app.include_router(playlists.router)
 app.include_router(releases.router)
 app.include_router(images.router)
@@ -88,7 +89,7 @@ async def security_headers(request: Request, call_next):
     return response
 
 LIVE_ACTIONS = {'next', 'unfreeze', 'show', 'freeze', 'show_collection', 'freeze_collection', 'restart_player',
-                'reboot', 'reload'}
+                'reboot', 'reload', 'scroll', 'scroll_to'}
 INTERNAL_ACTIONS = {'import_playlist', 'export_assets', 'takeover', 'takeover_end'}
 ORG = {'groups': ('device_groups', 'device_group'), 'locations': ('device_locations', 'location')}
 MAX_UPLOAD = 2 * 1024 ** 3
@@ -657,6 +658,18 @@ def validate_command(c, row, action, payload):
         payload = {**({'id': payload['id']} if payload.get('id') not in (None, '') else {}),
                    **validate_watcher(payload, required=payload.get('id') in (None, ''))}
         watcher_request_supported(payload, caps)
+    if action in ('add_multi', 'update_multi'):
+        from .playlists import validate_multi
+        multi = validate_multi(payload, partial=action == 'update_multi')
+        payload = {**({'id': payload['id']} if action == 'update_multi' else {}), **multi,
+                   **({'name': text(payload.get('name'), 200)} if payload.get('name') else {}),
+                   **validate_timing(payload), **validate_validity(payload)}
+        if action == 'update_multi' and payload.get('id') in (None, ''):
+            raise HTTPException(400, 'item_required')
+        if action == 'add_multi' and not payload.get('name'):
+            raise HTTPException(400, 'name_required')
+    if action in ('set_scroll', 'scroll', 'scroll_to'):
+        payload = validate_scroll(payload, action)
     if action == 'set_admin':
         payload = validate_admin(payload)
     if action == 'overlay_settings':
@@ -831,7 +844,10 @@ SOUND_MAX = 5 * 1024 ** 2
 # command -> local endpoint of the node, for commands that old agents do not know at all
 NEW_CAPABILITY = {'notify_image': 'notify_image', 'screenshot': 'screenshot', 'player_settings': 'player_settings',
                   'add_camera': 'add_camera', 'update_camera': 'update_camera', 'camera_onvif': 'camera_onvif',
-                  'camera_discover': 'camera_discover', 'camera_preview': 'camera_preview', 'reload': 'reload'}
+                  'camera_discover': 'camera_discover', 'camera_preview': 'camera_preview', 'reload': 'reload',
+                  # CARACAL 2026.11.13 with agent 4.19
+                  'add_multi': 'add_multi', 'update_multi': 'update_multi', 'set_scroll': 'asset_scroll',
+                  'scroll': 'asset_scroll', 'scroll_to': 'asset_scroll'}
 CAMERA_SCHEMES, CAMERA_LAYOUTS, CAMERA_MAX = ('rtsp://', 'rtsps://', 'http://', 'https://'), ('auto', '2', '2x2', '3x3'), 9
 # what only newer agents can do (they report their version in every heartbeat)
 AGENT_FEATURES = {'reinstall_node': (4, 13, 0), 'diagnostics': (4, 13, 0), 'player_settings': (4, 13, 0),
@@ -1079,6 +1095,29 @@ def watcher_request_supported(w, caps):
         any(w.get(k) for k in ('body', 'content_type', 'headers', 'level_map'))
     if custom and caps.get('watcher_options') is not True:
         raise HTTPException(409, 'update_required')
+
+
+def validate_scroll(d, action):
+    """set_scroll {id, y, cell}: where a website starts; scroll {dy, cell} / scroll_to {y, cell}: the page on the
+    screen while that is set. Pixels of the page."""
+    def px(v, lo, hi):
+        try:
+            v = round(float(v or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'invalid_value')
+        if not lo <= v <= hi:
+            raise HTTPException(400, 'invalid_value')
+        return v
+    out = {'cell': px(d.get('cell'), 0, 3)}
+    if action == 'scroll':
+        out['dy'] = px(d.get('dy'), -20000, 20000)
+    else:
+        out.update(y=px(d.get('y'), 0, 200000), x=px(d.get('x'), 0, 200000))
+    if action == 'set_scroll':
+        if d.get('id') in (None, ''):
+            raise HTTPException(400, 'item_required')
+        out['id'] = d['id']
+    return out
 
 
 def validate_grafana(d, required=True):

@@ -99,6 +99,10 @@ function dur(s) {
 }
 
 const ICONS = {
+  spark: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z',
+  grid: 'M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3zM13 13h8v8h-8z',
+  start: 'M4 4h16M4 9h16M8 14h8M12 14v7',
+  top: 'M5 4h14M12 20V8M6 14l6-6 6 6',
   overview: 'M3 13h8V3H3zm0 8h8v-6H3zm10 0h8V11h-8zm0-18v6h8V3z',
   devices: 'M4 5h16v11H4zM8 20h8M12 16v4',
   attention: 'M12 3 2 21h20zM12 10v5M12 18h.01',
@@ -168,7 +172,7 @@ const ICONS = {
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[n] || ICONS.web}"/></svg>`;
 const isTag = k => k === 'grafana-tag';
 const kindLabel = k => t((k || '').includes('grafana') ? 'kind_grafana' : 'kind_' + k);
-const kindIcon = k => icon(k === 'image' ? 'image' : k === 'video' ? 'video' : k === 'camera' ? 'camera' : (k || '').includes('grafana') ? 'grafana' : 'web');
+const kindIcon = k => icon(k === 'image' ? 'image' : k === 'video' ? 'video' : k === 'camera' ? 'camera' : k === 'multi' ? 'grid' : (k || '').includes('grafana') ? 'grafana' : 'web');
 
 function bar(v, warn, crit, unit = '%') {
   v = num(v);
@@ -355,6 +359,7 @@ async function start() {
     return;
   }
   await Promise.all([refresh(), loadTenants()]);
+  assistantInit();
   route();
 }
 
@@ -928,14 +933,20 @@ function closeMenus(except = null) {
   $$('.menu-pop').forEach(p => {
     if (p === except || p.hidden) return;
     p.hidden = true;
-    const b = p.previousElementSibling;
+    const b = p._btn || p.previousElementSibling;
     if (b && b.hasAttribute('data-menu')) b.setAttribute('aria-expanded', 'false');
+    if (p._home && p.parentNode !== p._home) p._home.append(p);
   });
 }
 function toggleMenu(btn) {
-  const pop = btn.nextElementSibling;
+  const pop = btn._pop || btn.nextElementSibling;
+  btn._pop = pop;
+  pop._btn = btn;
   closeMenus(pop);
-  if (!pop.hidden) { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); return; }
+  if (!pop.hidden) { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); if (pop._home) pop._home.append(pop); return; }
+  // an open menu lives in <body>: a row that shows its actions only on hover, or a card that clips, cannot hide it
+  pop._home = btn.parentNode;
+  document.body.append(pop);
   pop.hidden = false;
   menuOpenedAt = performance.now();
   btn.setAttribute('aria-expanded', 'true');
@@ -955,7 +966,7 @@ document.addEventListener('keydown', e => {
   const pop = e.target.closest && e.target.closest('.menu-pop');
   if (!pop) return;
   const items = menuItems(pop), i = items.indexOf(e.target);
-  if (e.key === 'Escape') { const b = pop.previousElementSibling; closeMenus(); if (b && b.hasAttribute('data-menu')) b.focus(); }
+  if (e.key === 'Escape') { const b = pop._btn || pop.previousElementSibling; closeMenus(); if (b && b.hasAttribute('data-menu')) b.focus(); }
   else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus(); }
   else if (e.key === 'Tab') closeMenus();
 });
@@ -1025,7 +1036,7 @@ VIEWS.device = {
     const d = S.detail;
     if (!d) return;
     const tab = DEVICE_TABS.includes(S.route.tab) ? S.route.tab : 'overview';
-    patch($('#devHero', root), `<div class="hero-main"><div class="hero-title">${statusBadge(d)}<h2>${esc(d.name)}</h2></div>
+    patch($('#devHero', root), `<div class="hero-main"><div class="hero-title">${statusBadge(d)}</div>
       <div class="chips"><span>${esc(d.id)}</span><span>${esc(d.ip || '—')}</span>${d.location ? `<span>${icon('location')}${esc(d.location)}</span>` : ''}${d.group ? `<span>${icon('group')}${esc(d.group)}</span>` : ''}
       ${d.caracal_version || d.runtime ? `<span>CARACAL ${esc(d.caracal_version || '?')} · ${runtimeLabel(d)}</span>` : ''}
       ${d.muted_until ? `<span class="chip-muted">${icon('bell')}${t('mutedUntil', { time: clock(d.muted_until) })}</span>` : ''}<span>${t('agent')} ${esc(d.version || '—')}</span>${d.model ? `<span>${esc(d.model)}</span>` : ''}<span>${d.online ? t('uptime') + ' ' + dur(d.uptime) : t('lastSeen') + ' ' + ago(d.last_seen)}</span></div></div>`);
@@ -1578,13 +1589,11 @@ function renderPlaylist(el, d) {
   const html = `<section class="card flush">
     <div class="toolbar">
       <h2 class="grow">${t('playlist')} <span class="muted">(${assets.length})</span></h2>
-      ${edit ? `<button class="btn" data-do="addAsset" data-kind="web" data-id="${esc(d.id)}">${icon('web')}${t('addWeb')}</button>
-      ${d.capabilities.upload === false ? '' : `<button class="btn" data-do="addAsset" data-kind="image" data-id="${esc(d.id)}">${icon('image')}${t('addImage')}</button>
-      <button class="btn" data-do="addAsset" data-kind="video" data-id="${esc(d.id)}">${icon('video')}${t('addVideo')}</button>`}
-      ${d.capabilities.add_camera === true ? `<button class="btn" data-do="addCamera" data-id="${esc(d.id)}">${icon('camera')}${t('add_camera')}</button>` : ''}
-      ${d.capabilities.widgets === true ? `<button class="btn" data-do="addWidget" data-id="${esc(d.id)}">${icon('widget')}${t('widget')}</button>` : ''}
-      ${d.capabilities.upload === false ? '' : `<button class="btn" data-do="addDocument" data-target="device" data-id="${esc(d.id)}">${icon('audit')}${t('document')}</button>`}
-      <button class="btn" data-do="copyContent" data-id="${esc(d.id)}">${icon('copy')}${t('copyPlaylist')}</button>` : ''}
+      ${edit ? `<button class="btn" data-do="copyContent" data-id="${esc(d.id)}">${icon('copy')}${t('copyPlaylist')}</button>
+      ${addMenu([['addAsset', 'web', t('addWeb'), { kind: 'web' }], d.capabilities.add_multi === true && ['addMulti', 'grid', t('add_multi')],
+        d.capabilities.widgets === true && ['addWidget', 'widget', t('widget')],
+        d.capabilities.upload !== false && ['addAsset', 'image', t('addImage'), { kind: 'image' }], d.capabilities.upload !== false && ['addAsset', 'video', t('addVideo'), { kind: 'video' }],
+        d.capabilities.add_camera === true && ['addCamera', 'camera', t('add_camera')], d.capabilities.upload !== false && ['addDocument', 'audit', t('document'), { target: 'device' }]], d.id)}` : ''}
     </div>
     ${S.pendingOrder ? `<div class="savebar">${t('orderChanged')}<button class="btn primary sm" data-do="saveOrder" data-id="${esc(d.id)}">${t('saveOrder')}</button><button class="btn sm ghost" data-do="resetOrder">${t('cancel')}</button></div>` : ''}
     ${!d.online ? `<div class="note">${t('offlineQueued')}</div>` : ''}
@@ -1599,24 +1608,23 @@ function renderPlaylist(el, d) {
       return `<li class="pl-row ${playing ? 'playing' : ''} ${a.enabled ? '' : 'disabled'}" data-aid="${esc(a.id)}" ${edit ? 'draggable="true"' : ''}>
         ${edit ? `<span class="handle" title="${t('dragToReorder')}">${icon('drag')}</span>` : ''}<span class="idx">${i + 1}</span>
         <span class="kind k-${esc(a.kind)}">${isWidget(a) ? icon('widget') : kindIcon(a.kind)}</span>
-        <div class="pl-main"><b>${esc(a.name)}</b>${validityTag(a)}<small>${isWidget(a) ? esc(widgetLabel(a.source)) : esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.source && a.kind === 'web' && !isWidget(a) ? ' · ' + esc(a.source) : ''}</small>
+        <div class="pl-main"><b>${esc(a.name)}</b>${validityTag(a)}${startTag(a)}<small>${isWidget(a) ? esc(widgetLabel(a.source)) : esc(kindLabel(a.kind))}${isTag(a.kind) ? ` · ${esc(t('grafanaTag'))} ${esc(a.tag)}` : a.kind === 'multi' ? ' · ' + esc(multiText(a)) : a.source && a.kind === 'web' && !isWidget(a) ? ' · ' + esc(a.source) : ''}</small>
           ${dash && dash.length ? `<button class="pl-expand ${open ? 'open' : ''}" data-do="toggleCol" data-col="${esc(a.id)}" aria-expanded="${open ? 'true' : 'false'}">${icon('chev')}${t('dashboardsCount', { n: dash.length })}</button>` : ''}</div>
         <span class="pl-dur">${a.duration ? dur(a.duration) : (a.kind === 'video' ? t('fullLength') : '—')}</span>
         <span class="pl-tags">${playing ? `<span class="tag ok">${d.frozen ? icon('snow') + t('frozen') : icon('play') + t('playing')}</span>` : ''}${a.enabled ? '' : `<span class="tag">${t('disabled')}</span>`}${loginTag(d, a)}</span>
         <span class="pl-actions">
           ${ctl && a.enabled ? (isTag(a.kind)
-            ? `<button class="icon-btn" title="${t('showNow')}" data-do="cmd" data-id="${esc(d.id)}" data-act="show_collection" data-col="${esc(a.id)}">${icon('eye')}</button>
-          <button class="icon-btn" title="${t('freezeItem')}" data-do="freeze" data-id="${esc(d.id)}" data-col="${esc(a.id)}" data-name="${esc(a.name)}">${icon('snow')}</button>`
-            : `<button class="icon-btn" title="${t('showNow')}" data-do="cmd" data-id="${esc(d.id)}" data-act="show" data-item="${esc(a.id)}">${icon('eye')}</button>
-          <button class="icon-btn" title="${t('freezeItem')}" data-do="freeze" data-id="${esc(d.id)}" data-item="${esc(a.id)}" data-name="${esc(a.name)}">${icon('snow')}</button>`) : ''}
-          ${edit ? `<button class="icon-btn" title="${t('moveUp')}" data-do="move" data-dir="-1" data-item="${esc(a.id)}" ${i ? '' : 'disabled'}>${icon('up')}</button>
-          <button class="icon-btn" title="${t('moveDown')}" data-do="move" data-dir="1" data-item="${esc(a.id)}" ${i < assets.length - 1 ? '' : 'disabled'}>${icon('down')}</button>
-          <button class="icon-btn" title="${t('edit')}" data-do="editAsset" data-id="${esc(d.id)}" data-item="${esc(a.id)}">${icon('edit')}</button>
-          <button class="icon-btn" title="${t('copyTo')}" data-do="copyContent" data-id="${esc(d.id)}" data-item="${esc(a.id)}">${icon('copy')}</button>
-          <button class="icon-btn danger" title="${t('delete')}" data-do="deleteAsset" data-id="${esc(d.id)}" data-item="${esc(a.id)}" data-name="${esc(a.name)}">${icon('trash')}</button>` : ''}
+            ? `<button class="icon-btn" title="${t('showNow')}" aria-label="${t('showNow')}" data-do="cmd" data-id="${esc(d.id)}" data-act="show_collection" data-col="${esc(a.id)}">${icon('eye')}</button>`
+            : `<button class="icon-btn" title="${t('showNow')}" aria-label="${t('showNow')}" data-do="cmd" data-id="${esc(d.id)}" data-act="show" data-item="${esc(a.id)}">${icon('eye')}</button>`) : ''}
+          ${edit ? `<button class="icon-btn" title="${t('edit')}" aria-label="${t('edit')}" data-do="editAsset" data-id="${esc(d.id)}" data-item="${esc(a.id)}">${icon('edit')}</button>` : ''}
+          ${rowMenu([ctl && a.enabled && ['freeze', 'snow', t('freezeItem'), { id: d.id, ...(isTag(a.kind) ? { col: a.id } : { item: a.id }), name: a.name }],
+            ctl && a.enabled && edit && (a.kind === 'web' && !isWidget(a) || isTag(a.kind) || a.kind === 'multi') && (d.capabilities || {}).asset_scroll === true && ['pickScroll', 'start', t('startPos') + '…', { id: d.id, item: a.id }],
+            edit && i > 0 && ['move', 'up', t('moveUp'), { dir: -1, item: a.id }], edit && i < assets.length - 1 && ['move', 'down', t('moveDown'), { dir: 1, item: a.id }],
+            edit && ['copyContent', 'copy', t('copyTo'), { id: d.id, item: a.id }],
+            null, edit && ['deleteAsset', 'trash', t('delete'), { id: d.id, item: a.id, name: a.name }, 'danger']])}
         </span></li>${open ? dashboardRows(d, dash, ctl && a.enabled, 'pl-dash') : ''}`;
     }).join('') || `<li class="empty">${d.api_ok === false ? t('playlistUnavailable') : t('playlistEmpty')}</li>`}</ol></section>`;
-  if (el._dragging) return;
+  if (el._dragging || $('body > .menu-pop:not([hidden])')) return;   // never under an open menu
   patch(el, html);
   if (edit) bindDrag($('#plist', el));
   if (edit && d.capabilities.upload !== false) {
@@ -2417,6 +2425,7 @@ const SETTINGS = [
   ['account', 'view', 'users'], ['update', 'settings', 'updates'], ['alerts', 'settings', 'bell'], ['install', 'settings', 'plus'], ['notifyapi', 'notify_api', 'web'],
   ['integrations', 'users', 'console'], ['reports', 'settings', 'plays'],
   ['proxy', 'updates', 'download'], ['sso', 'users', 'lock'], ['branding', 'settings', 'image'], ['backup', 'settings', 'upload'],
+  ['assistant', 'settings', 'spark'],
 ];
 
 VIEWS.settings = {
@@ -3352,17 +3361,17 @@ VIEWS.global = {
     S.global = p;
     setTitle(p.name, t('nav_global'), '#/global');
     const edit = can('content');
-    patch($('#gHead', root), `<section class="card dev-hero"><div class="hero-main"><div class="hero-title">${icon('global')}<h2>${esc(p.name)}</h2></div>
+    patch($('#gHead', root), `<section class="card dev-hero"><div class="hero-main">
       <div class="chips"><span>${t('nItems', { n: p.items.length })}</span><span>${t('updated')} ${dt(p.updated)} · ${esc(p.updated_by)}</span></div>
       ${p.description ? `<p class="muted">${esc(p.description)}</p>` : ''}</div>
       ${edit ? `<div class="hero-actions"><button class="btn primary" data-do="globalDeploy" ${p.items.length ? '' : 'disabled'}>${icon('upload')}${t('deploy')}</button>
       <button class="btn" data-do="globalEdit">${icon('edit')}${t('edit')}</button><button class="btn danger" data-do="globalDelete">${icon('trash')}${t('delete')}</button></div>` : ''}</section>`);
     patch($('#gItems', root), `<section class="card flush"><div class="toolbar"><h2 class="grow">${t('playlist')} <span class="muted">(${p.items.length})</span></h2>
-      ${edit ? `<button class="btn" data-do="addDocument" data-target="global">${icon('audit')}${t('document')}</button>` : ''}
-      ${edit ? ['web', 'image', 'video', 'camera', 'widget', 'grafana-tag'].map(k => `<button class="btn" data-do="globalAddItem" data-kind="${k}">${k === 'widget' ? icon('widget') : kindIcon(k)}${t({ web: 'addWeb', image: 'addImage', video: 'addVideo', camera: 'add_camera', widget: 'widget' }[k] || 'grafanaCollection')}</button>`).join('') : ''}</div>
+      ${edit ? addMenu([...['web', 'multi', 'widget', 'image', 'video', 'camera', 'grafana-tag'].map(k => ['globalAddItem', k === 'widget' ? 'widget' : k === 'multi' ? 'grid' : k === 'grafana-tag' ? 'grafana' : k, t({ web: 'addWeb', multi: 'add_multi', image: 'addImage', video: 'addVideo', camera: 'add_camera', widget: 'widget' }[k] || 'grafanaCollection'), { kind: k }]),
+        ['addDocument', 'audit', t('document'), { target: 'global' }]]) : ''}</div>
       <ol class="playlist" id="gList">${p.items.map((it, i) => `<li class="g-row" ${edit ? `draggable="true" data-iid="${it.id}"` : ''}>
         <span class="idx">${i + 1}</span><span class="kind k-${esc(it.kind)}">${isWidget(it) ? icon('widget') : kindIcon(it.kind)}</span>
-        <div class="pl-main"><b>${esc(it.name)}</b>${validityTag(it)}<small>${esc(kindLabel(it.kind))} · ${esc(isWidget(it) ? widgetLabel(it.source) : it.kind === 'web' ? it.source : it.kind === 'camera' ? t('camStreamsN', { n: (it.streams || []).length }) : isTag(it.kind) ? `${t('grafanaTag')} ${it.tag} · ${it.grafana_url}` : (it.file_name || '') + (it.file_size ? ' · ' + fmtSize(it.file_size) : ''))}</small></div>
+        <div class="pl-main"><b>${esc(it.name)}</b>${validityTag(it)}<small>${esc(kindLabel(it.kind))} · ${esc(isWidget(it) ? widgetLabel(it.source) : it.kind === 'multi' ? multiText(it) : it.kind === 'web' ? it.source : it.kind === 'camera' ? t('camStreamsN', { n: (it.streams || []).length }) : isTag(it.kind) ? `${t('grafanaTag')} ${it.tag} · ${it.grafana_url}` : (it.file_name || '') + (it.file_size ? ' · ' + fmtSize(it.file_size) : ''))}</small></div>
         <span class="pl-dur">${it.duration ? dur(it.duration) : t('fullLength')}</span>
         <span class="pl-actions">${edit ? `<button class="icon-btn" title="${t('moveUp')}" data-do="globalMove" data-iid="${it.id}" data-dir="-1" ${i ? '' : 'disabled'}>${icon('up')}</button>
           <button class="icon-btn" title="${t('moveDown')}" data-do="globalMove" data-iid="${it.id}" data-dir="1" ${i < p.items.length - 1 ? '' : 'disabled'}>${icon('down')}</button>
@@ -3431,6 +3440,7 @@ function globalItemDialog(pid, kind, item = null) {
       ${kind === 'web' || isTag(kind) ? `<label>${t('scale')}<input name="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(it.scale ?? 1)}"></label>` : '<span></span>'}</div>
       ${kind === 'video' ? `<small class="muted">${t('videoDurationHint')}</small>` : ''}
       ${kind === 'web' || isTag(kind) ? darkField(it.dark || '', isTag(kind)) : ''}
+      ${kind === 'web' || isTag(kind) ? `<label>${t('startPos')}<input name="scroll_y" type="number" min="0" max="200000" step="10" value="${esc(it.scroll_y || 0)}"><small class="muted">${t('startPosGlobalHint')}</small></label>` : ''}
       ${validityFields(it)}</div>`,
     onOpen: form => {
       const f = $('input[name=file]', form);
@@ -3462,7 +3472,7 @@ function globalItemDialog(pid, kind, item = null) {
       }
       if (kind === 'web') payload.source = data.source.trim();
       if (isTag(kind)) Object.assign(payload, grafanaPayload(data));
-      if (kind === 'web' || isTag(kind)) payload.dark = data.dark || '';
+      if (kind === 'web' || isTag(kind)) Object.assign(payload, { dark: data.dark || '', scroll_y: Number(data.scroll_y || 0) });
       Object.assign(payload, validityPayload(data));
       if (item) {
         await api(`/api/global-playlists/${pid}/items/${item.id}`, { method: 'PATCH', json: payload });
@@ -3562,7 +3572,7 @@ VIEWS.templates = {
     const edit = can('devices'), n = p.notify || {};
     const editBtn = (todo, label = t('edit')) => (edit ? `<button class="btn sm" data-do="${todo}">${icon('edit')}${label}</button>` : '');
     const off = `<span class="muted">${t('tplKeep')}</span>`;
-    patch($('#tHead', root), `<section class="card dev-hero"><div class="hero-main"><div class="hero-title">${icon('templates')}<h2>${esc(p.name)}</h2></div>
+    patch($('#tHead', root), `<section class="card dev-hero"><div class="hero-main">
       <div class="chips">${tplChips(p)}<span>${t('updated')} ${dt(p.updated)} · ${esc(p.updated_by)}</span></div>
       ${p.description ? `<p class="muted">${esc(p.description)}</p>` : ''}</div>
       ${edit ? `<div class="hero-actions"><button class="btn primary" data-do="templateApply" ${tplParts(p).length ? '' : 'disabled'}>${icon('upload')}${t('templateApply')}</button>
@@ -4438,6 +4448,7 @@ const ACTIONS_UI = {
   },
   globalAddItem(b) {
     if (b.dataset.kind === 'camera') cameraDialog(null, null, null, S.global.id);
+    else if (b.dataset.kind === 'multi') multiDialog({ pid: S.global.id });
     else if (b.dataset.kind === 'widget') widgetDialog({ pid: S.global.id });
     else globalItemDialog(S.global.id, b.dataset.kind);
   },
@@ -4445,6 +4456,7 @@ const ACTIONS_UI = {
     const it = S.global.items.find(x => String(x.id) === b.dataset.iid);
     if (!it) return;
     if (it.kind === 'camera') cameraDialog(null, it, null, S.global.id);
+    else if (it.kind === 'multi') multiDialog({ pid: S.global.id, item: it });
     else if (isWidget(it)) widgetDialog({ pid: S.global.id, item: it });
     else globalItemDialog(S.global.id, it.kind, it);
   },
@@ -4561,6 +4573,7 @@ const ACTIONS_UI = {
     const a = S.detail.assets.find(x => String(x.id) === b.dataset.item);
     if (a && isTag(a.kind)) collectionDialog(b.dataset.id, a);
     else if (a && a.kind === 'camera') cameraDialog(b.dataset.id, a);
+    else if (a && a.kind === 'multi') multiDialog({ deviceId: b.dataset.id, item: a });
     else if (a && isWidget(a)) widgetDialog({ deviceId: b.dataset.id, item: a });
     else if (a) assetDialog(b.dataset.id, ['image', 'video'].includes(a.kind) ? a.kind : 'web', a);
   },
@@ -5687,6 +5700,335 @@ function widgetQuery(d) {
   if (d.type === 'ticker') { put('text', d.ticker_text); put('url', d.url_ticker); put('speed', d.speed); }
   return q.toString();
 }
+
+// ---------- add menus, row menus, several on one screen, where a page starts
+
+// [todo, icon, label, data, class] -> a menu item; data-* carry what the action needs
+const menuItemHtml = ([todo, ic, label, data = {}, cls = ''], id = '') => `<button class="mi ${cls}" role="menuitem" data-do="${todo}"${id ? ` data-id="${esc(id)}"` : ''}${Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${icon(ic)}<span>${esc(label)}</span></button>`;
+// one primary "Add" button with the kinds in its menu instead of a row of buttons
+function addMenu(items, id = '') {
+  return `<div class="menu"><button class="btn primary" data-menu aria-haspopup="menu" aria-expanded="false">${icon('plus')}<span>${t('addMenu')}</span>${icon('chev', 'chev')}</button>
+    <div class="menu-pop" role="menu" hidden>${items.filter(Array.isArray).map(x => menuItemHtml(x, id)).join('')}</div></div>`;
+}
+// the "…" of a row: the less frequent actions, the destructive one last (null = a separator)
+function rowMenu(items) {
+  const list = items.filter(x => x === null || Array.isArray(x)).filter((x, i, a) => x || (i > 0 && i < a.length - 1 && a[i - 1]));
+  while (list.length && list[list.length - 1] === null) list.pop();
+  if (!list.length) return '';
+  return `<div class="menu"><button class="icon-btn" data-menu aria-haspopup="menu" aria-expanded="false" title="${t('moreActions')}" aria-label="${t('moreActions')}">${icon('more')}</button>
+    <div class="menu-pop" role="menu" hidden>${list.map(x => (x ? menuItemHtml(x) : '<hr>')).join('')}</div></div>`;
+}
+const MULTI_LAYOUTS = { '2': 2, '2v': 2, '3': 3, '1+2': 3, '2x2': 4 };
+// the one setting a widget in a cell needs (more of them in the widget items of the playlist)
+const CELL_WIDGET_PARAM = { weather: 'city', rss: 'url', table: 'url', calendar: 'url', room: 'url', qr: 'url', text: 'text', ticker: 'text' };
+const LAYOUT_RECTS = { '2': [[0, 0, 12, 16], [12, 0, 12, 16]], '2v': [[0, 0, 24, 8], [0, 8, 24, 8]], '3': [[0, 0, 8, 16], [8, 0, 8, 16], [16, 0, 8, 16]],
+  '1+2': [[0, 0, 16, 16], [16, 0, 8, 8], [16, 8, 8, 8]], '2x2': [[0, 0, 12, 8], [12, 0, 12, 8], [0, 8, 12, 8], [12, 8, 12, 8]] };
+const layoutSvg = (l, mark = -1) => `<svg viewBox="-1 -1 26 18" class="layout-svg" aria-hidden="true">${(LAYOUT_RECTS[l] || []).map(([x, y, w, h], i) => `<rect x="${x + .6}" y="${y + .6}" width="${w - 1.2}" height="${h - 1.2}" rx="1.2" class="${i === mark ? 'on' : ''}"/>`).join('')}</svg>`;
+const multiText = a => `${t('layout_' + String(a.layout || '2').replace('+', 'p'))} · ${(a.cells || []).map(c => (String(c.source || '').startsWith(WIDGET_PREFIX) ? widgetLabel(c.source) : hostOf(c.source))).join(', ')}`;
+const startTag = a => {
+  const y = a.kind === 'multi' ? Math.max(0, ...(a.cells || []).map(c => c.scroll_y || 0)) : a.scroll_y;
+  return y ? `<span class="tag" title="${esc(t('startPosHint'))}">${icon('start')}${a.kind === 'multi' ? t('scrolled') : Math.round(y) + ' px'}</span>` : '';
+};
+
+// Several things on one screen: 2 to 4 websites or widgets, each a window of its own on the TV (logins shared).
+function multiDialog({ deviceId = null, pid = null, item = null }) {
+  const here = deviceId && S.detail && S.detail.id === deviceId ? S.detail : null;
+  const profiles = here && loginSupport(here) === 'ok' ? here.profiles || [] : null;
+  const st = { layout: item ? item.layout || '2x2' : '2x2', cells: item ? (item.cells || []).map(c => ({ ...c })) : [] };
+  const cellHtml = i => {
+    const c = st.cells[i] || {}, widget = String(c.source || '').startsWith(WIDGET_PREFIX);
+    return `<fieldset class="cell-edit" data-cell="${i}"><legend>${layoutSvg(st.layout, i)}${t('multiCell', { n: i + 1 })}</legend>
+      <div class="seg wide-seg" role="radiogroup"><button type="button" class="${widget ? '' : 'active'}" data-ckind="web">${icon('web')}${t('addWeb')}</button><button type="button" class="${widget ? 'active' : ''}" data-ckind="widget">${icon('widget')}${t('widget')}</button></div>
+      ${widget ? (() => {
+        const q = new URLSearchParams(String(c.source).slice(WIDGET_PREFIX.length)), type = q.get('type') || 'clock', param = CELL_WIDGET_PARAM[type];
+        return `<div class="row2"><label>${t('widget')}<select data-cw="type">${WIDGET_TYPES.map(x => `<option value="${x}" ${x === type ? 'selected' : ''}>${t('widget_' + x)}</option>`).join('')}</select></label>
+          ${param ? `<label>${t('cellWidgetParam_' + param)}<input data-cw="param" value="${esc(q.get(param) || '')}" placeholder="${param === 'city' ? 'Praha' : param === 'url' ? 'https://' : ''}"></label>` : '<span></span>'}</div>`;
+      })()
+        : `<label>URL<input data-cf="source" type="url" placeholder="https://" value="${esc(c.source || '')}"></label>
+      <div class="row3">${profiles ? `<label>${t('login')}<select data-cf="auth_profile_id"><option value="">${t('noLogin')}</option>${profiles.map(p => `<option value="${esc(p.id)}" ${String(p.id) === String(c.auth_profile_id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>` : ''}
+        <label>${t('scale')}<input data-cf="scale" type="number" step="0.05" min="0.5" max="3" value="${esc(c.scale ?? 1)}"></label>
+        <label>${t('webDark')}<select data-cf="dark"><option value="">${t('darkAsNode')}</option>${['off', 'dark', 'force'].map(m => `<option value="${m}" ${c.dark === m ? 'selected' : ''}>${t('dark_' + m)}</option>`).join('')}</select></label></div>`}</fieldset>`;
+  };
+  const read = form => $$('.cell-edit', form).forEach(fs => {
+    const i = Number(fs.dataset.cell), c = st.cells[i] = st.cells[i] || {};
+    $$('[data-cf]', fs).forEach(x => { c[x.dataset.cf] = x.value; });
+    const type = $('[data-cw=type]', fs);
+    if (type) {   // a widget of the node: its type and its one main setting
+      const q = new URLSearchParams({ type: type.value, lang: S.lang }), param = CELL_WIDGET_PARAM[type.value], v = $('[data-cw=param]', fs);
+      if (param && v && v.value.trim()) q.set(param, v.value.trim());
+      c.source = WIDGET_PREFIX + q.toString();
+    }
+  });
+  modal({
+    title: item ? t('editItem') : t('add_multi'), wide: true, submit: item ? t('save') : t('add'),
+    body: `<div class="form"><div class="row2"><label>${t('name')}<input name="name" required value="${esc(item ? item.name : '')}"></label>
+        <label>${t('durationSec')}<input name="duration" type="number" min="5" value="${esc(item ? item.duration : 60)}" required></label></div>
+      <div class="layout-pick" role="radiogroup" aria-label="${t('multiLayout')}">${Object.keys(MULTI_LAYOUTS).map(l => `<label class="layout-tile"><input type="radio" name="layout" value="${l}" ${l === st.layout ? 'checked' : ''}>${layoutSvg(l)}<span>${t('layout_' + l.replace('+', 'p'))}</span></label>`).join('')}</div>
+      <div class="cells"></div>
+      <p class="muted">${t('multiHint')}</p>
+      ${validityFields(item || {})}</div>`,
+    onOpen: form => {
+      const draw = () => { $('.cells', form).innerHTML = Array.from({ length: MULTI_LAYOUTS[st.layout] }, (_, i) => cellHtml(i)).join(''); };
+      $$('[name=layout]', form).forEach(r => { r.onchange = () => { read(form); st.layout = r.value; draw(); }; });
+      $('.cells', form).onclick = e => {
+        const k = e.target.closest('[data-ckind]');
+        if (!k) return;
+        read(form);
+        const i = Number(k.closest('.cell-edit').dataset.cell), c = st.cells[i] = st.cells[i] || {};
+        const isW = String(c.source || '').startsWith(WIDGET_PREFIX);
+        if (k.dataset.ckind === 'widget' && !isW) c.source = WIDGET_PREFIX + 'type=clock';
+        if (k.dataset.ckind === 'web' && isW) c.source = '';
+        draw();
+      };
+      // another widget type has another setting
+      $('.cells', form).onchange = e => { if (e.target.matches('[data-cw=type]')) { read(form); draw(); } };
+      draw();
+    },
+    onSubmit: async (data, form) => {
+      read(form);
+      const cells = st.cells.slice(0, MULTI_LAYOUTS[st.layout]).map(c => ({ source: String(c.source || '').trim(), auth_profile_id: c.auth_profile_id || null,
+        scale: Number(c.scale || 1), dark: c.dark || null, scroll_y: Number(c.scroll_y || 0) }));
+      if (cells.length < MULTI_LAYOUTS[st.layout] || cells.some(c => !c.source)) throw new Error('multi_cells_missing');
+      const payload = { name: data.name.trim(), duration: Number(data.duration || 60), layout: st.layout, cells, ...validityPayload(data) };
+      if (pid) {
+        if (item) await api(`/api/global-playlists/${pid}/items/${item.id}`, { method: 'PATCH', json: payload });
+        else await api(`/api/global-playlists/${pid}/items`, { method: 'POST', json: { kind: 'multi', ...payload } });
+        toast(t('saved'));
+        return render();
+      }
+      await sendCommand(deviceId, item ? 'update_multi' : 'add_multi', item ? { id: item.id, ...payload } : payload);
+    },
+  });
+}
+
+// Where a page starts: the item is frozen on the screen, a picture of the screen shows it, the buttons scroll the
+// real page (logins included) and the position is saved on the node.
+function scrollPicker(deviceId, a) {
+  const d = S.detail, multi = a.kind === 'multi';
+  const col = isTag(a.kind) ? (d.collections.find(c => String(c.id) === String(a.id)) || {}).dashboards || [] : null;
+  if (col && !col.length) return toast(t('collectionEmpty'), 'err');
+  const st = { cell: 0, y: 0, max: 0, busy: false, next: null, alive: true };
+  const dlg = modal({
+    title: t('startPos'), wide: true, submit: t('startPosSave'),
+    body: `<div class="form"><p class="muted">${t('pickerHint')}</p>
+      ${multi ? `<div class="seg wide-seg">${(a.cells || []).map((c, i) => `<button type="button" data-pcell="${i}" class="${i ? '' : 'active'}" ${String(c.source || '').startsWith(WIDGET_PREFIX) ? 'disabled' : ''}>${layoutSvg(a.layout, i)}${t('multiCell', { n: i + 1 })}</button>`).join('')}</div>` : ''}
+      <div class="shot picker" id="pickShot"><span>${t('pickerLoading')}</span></div>
+      <div class="picker-bar"><div class="action-group">
+        <button type="button" class="btn sm" data-dy="top" title="${t('pickerTop')}" aria-label="${t('pickerTop')}">${icon('top')}</button>
+        <button type="button" class="btn sm" data-dy="-page" title="${t('pickerPageUp')}" aria-label="${t('pickerPageUp')}">${icon('up')}${icon('up')}</button>
+        <button type="button" class="btn sm" data-dy="-80" title="${t('pickerUp')}" aria-label="${t('pickerUp')}">${icon('up')}</button>
+        <button type="button" class="btn sm" data-dy="80" title="${t('pickerDown')}" aria-label="${t('pickerDown')}">${icon('down')}</button>
+        <button type="button" class="btn sm" data-dy="page" title="${t('pickerPageDown')}" aria-label="${t('pickerPageDown')}">${icon('down')}${icon('down')}</button></div>
+        <span class="muted" id="pickPos" aria-live="polite"></span></div></div>`,
+    onOpen: form => {
+      const box = $('#pickShot', form), pos = $('#pickPos', form);
+      const picture = async () => {
+        try { const url = await captureScreen(deviceId); if (st.alive) box.innerHTML = `<img src="${url}" alt="${esc(t('onScreen'))}">`; } catch (e) { box.innerHTML = `<span>${esc(errText(e))}</span>`; }
+      };
+      // every step is a command: the agent scrolls the page and answers where it is now
+      const send = async (action, payload) => {
+        if (st.busy) { st.next = [action, payload]; return; }
+        st.busy = true;
+        try {
+          const r = await commandResult(deviceId, action, { cell: st.cell, ...payload });
+          if (r && r.y != null) { st.y = r.y; st.max = r.max || 0; pos.textContent = t(st.max ? 'pickerPosOf' : 'pickerPos', { y: st.y, max: st.max }); }
+          await picture();
+        } catch (e) { toast(errText(e), 'err'); }
+        st.busy = false;
+        if (st.next && st.alive) { const n = st.next; st.next = null; send(...n); }
+      };
+      const page = () => (multi ? 480 : 900);
+      $$('[data-dy]', form).forEach(b => {
+        b.onclick = () => (b.dataset.dy === 'top' ? send('scroll_to', { y: 0 }) : send('scroll', { dy: b.dataset.dy === 'page' ? page() : b.dataset.dy === '-page' ? -page() : Number(b.dataset.dy) }));
+      });
+      $$('[data-pcell]', form).forEach(b => { b.onclick = () => { $$('[data-pcell]', form).forEach(x => x.classList.toggle('active', x === b)); st.cell = Number(b.dataset.pcell); send('scroll', { dy: 0 }); }; });
+      (async () => {
+        await sendCommand(deviceId, col ? 'freeze_collection' : 'freeze', col ? { collection_id: a.id } : { item_id: a.id }).catch(() => {});
+        await new Promise(r => setTimeout(r, 6000));   // the node loads the page (sign-in, saved start) first
+        if (st.alive) send('scroll', { dy: 0 });
+      })();
+    },
+    onSubmit: async () => { await sendCommand(deviceId, 'set_scroll', { id: a.id, y: st.y, cell: st.cell }); },
+  });
+  dlg.addEventListener('close', () => { st.alive = false; api(`/api/devices/${encodeURIComponent(deviceId)}/commands`, { method: 'POST', json: { action: 'unfreeze', payload: {} } }).catch(() => {}); }, { once: true });
+}
+
+Object.assign(ACTIONS_UI, {
+  addMulti(b) { multiDialog({ deviceId: b.dataset.id }); },
+  pickScroll(b) { const a = S.detail && S.detail.assets.find(x => String(x.id) === b.dataset.item); if (a) scrollPicker(b.dataset.id, a); },
+});
+
+// ---------- the assistant
+// A panel that answers questions about Fleet and about the page the user is on. It reads only: it gets a short
+// summary of what this user sees (never tokens or passwords) and links to the pages to open.
+
+const ASSIST = { state: null, msgs: [], busy: false };
+async function assistantInit() {
+  try { ASSIST.state = await api('/api/assistant'); } catch { ASSIST.state = null; }
+  let btn = $('#assistBtn');
+  if (!ASSIST.state || !ASSIST.state.enabled) { if (btn) btn.remove(); $('#assistPanel')?.remove(); return; }
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'assistBtn';
+    btn.className = 'assist-btn';
+    btn.onclick = () => assistantOpen(!$('#assistPanel') || $('#assistPanel').hidden);
+    document.body.append(btn);
+  }
+  btn.innerHTML = `${icon('spark')}<span>${t('assistant')}</span>`;
+  btn.setAttribute('aria-label', t('assistant'));
+}
+// what the user is looking at, briefly: the view, the device on it, the counts of the fleet
+function assistantContext() {
+  const d = S.route.view === 'device' && S.detail ? S.detail : null;
+  return {
+    page: S.route.view, tab: S.route.tab || '', title: document.title.replace(/ · .*$/, ''), role: S.me && S.me.role,
+    // the menu as this user sees it, in their language: the assistant names things the way the UI does
+    menu: $$('#nav a[href^="#/"]').map(a => ({ route: a.getAttribute('href'), label: a.textContent.trim() })), addButton: t('addDevice'),
+    fleet: { devices: S.devices.length, online: S.devices.filter(x => x.online).length, attention: S.devices.filter(x => x.needs_attention).length },
+    device: d && { name: d.name, online: d.online, playing: d.current_name, frozen: d.frozen, caracal: d.caracal_version, agent: d.version,
+      location: d.location, group: d.group, problems: (d.attention || []).map(a => ({ code: a.code, level: a.level, text: attText(a) })),
+      cpu: d.cpu, ram: d.ram, disk: d.disk, temperature: d.temp, playlist: (d.assets || []).slice(0, 15).map(a => ({ name: a.name, kind: a.kind })) },
+  };
+}
+// the answer is text with a little Markdown: bold, lists, and links to pages of Fleet only
+function assistantHtml(text) {
+  return esc(text).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\((#\/[^)\s]*)\)/g, '<a href="$2">$1</a>')
+    .replace(/^\s*[-*] (.*)$/gm, '<span class="li">$1</span>').replace(/\n/g, '<br>');
+}
+function assistantDraw() {
+  const box = $('#assistLog');
+  if (!box) return;
+  box.innerHTML = ASSIST.msgs.length ? ASSIST.msgs.map(m => `<div class="amsg ${m.role}">${m.role === 'user' ? esc(m.content) : assistantHtml(m.content) || '<span class="typing"><i></i><i></i><i></i></span>'}</div>`).join('')
+    : `<div class="assist-empty">${icon('spark')}<p>${t('assistantHello')}</p><div class="assist-chips">${['assistantQ1', 'assistantQ2', 'assistantQ3'].map(k => `<button type="button" class="chip-btn" data-q="${esc(t(k))}">${t(k)}</button>`).join('')}</div></div>`;
+  box.scrollTop = box.scrollHeight;
+}
+const assistNote = st => t(st.external ? 'assistantExternalNote' : st.provider === 'builtin' ? 'assistantBuiltinNote' : 'assistantLocalNote');
+function assistantOpen(open = true) {
+  let p = $('#assistPanel');
+  if (!p) {
+    const st = ASSIST.state || {};
+    p = document.createElement('section');   // not <aside>: that is the sidebar's element
+    p.id = 'assistPanel';
+    p.className = 'assist-panel';
+    p.setAttribute('role', 'dialog');
+    p.setAttribute('aria-label', t('assistant'));
+    p.innerHTML = `<header><b>${icon('spark')}${t('assistant')}</b><span class="tag ${st.external ? 'warn' : ''}" title="${esc(assistNote(st))}">${esc(st.external ? t('assistantProvider_' + st.provider) : st.provider === 'builtin' ? t('assistantBuiltin') : t('assistantLocal'))}</span>
+        <button type="button" class="icon-btn" data-assist-new title="${t('assistantNew')}" aria-label="${t('assistantNew')}">${icon('edit')}</button><button type="button" class="icon-btn" data-assist-close aria-label="${t('close')}">${icon('x')}</button></header>
+      <div class="assist-log" id="assistLog" aria-live="polite"></div>
+      <form class="assist-form"><textarea rows="2" placeholder="${esc(t('assistantAsk'))}" aria-label="${esc(t('assistantAsk'))}"></textarea><button class="btn primary" aria-label="${t('send')}">${icon('send')}</button></form>
+      <small class="assist-note">${assistNote(st)}</small>`;
+    document.body.append(p);
+    const form = $('form', p), ta = $('textarea', form);
+    form.onsubmit = e => { e.preventDefault(); assistantAsk(ta.value); ta.value = ''; };
+    ta.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } };
+    p.onclick = e => {
+      if (e.target.closest('[data-assist-close]')) assistantOpen(false);
+      if (e.target.closest('[data-assist-new]')) { ASSIST.msgs = []; assistantDraw(); }
+      const q = e.target.closest('[data-q]');
+      if (q) assistantAsk(q.dataset.q);
+      if (e.target.closest('a[href^="#/"]') && innerWidth < 760) assistantOpen(false);
+    };
+    p.onkeydown = e => { if (e.key === 'Escape') assistantOpen(false); };
+  }
+  p.hidden = !open;
+  $('#assistBtn')?.classList.toggle('active', open);
+  if (open) { assistantDraw(); $('textarea', p).focus(); }
+}
+async function assistantAsk(text) {
+  text = String(text || '').trim();
+  if (!text || ASSIST.busy) return;
+  ASSIST.busy = true;
+  ASSIST.msgs.push({ role: 'user', content: text }, { role: 'assistant', content: '' });
+  const reply = ASSIST.msgs[ASSIST.msgs.length - 1];
+  assistantDraw();
+  try {
+    const r = await fetch('/api/assistant/chat', { method: 'POST', headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: ASSIST.msgs.slice(0, -1).slice(-12), context: assistantContext(), lang: S.lang }) });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.detail || 'act_failed'); }
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      reply.content += dec.decode(value, { stream: true });
+      assistantDraw();
+    }
+    // [code] at the end is the server's note of what went wrong
+    reply.content = reply.content.replace(/\n?\[([a-z_]+)\]$/, (_, c) => '\n\n' + errText(new Error(c)));
+  } catch (e) { reply.content = errText(e); }
+  if (!reply.content.trim()) reply.content = t('assistantEmpty');
+  ASSIST.busy = false;
+  assistantDraw();
+}
+
+// Settings -> Assistant: where the questions go. The local model is the default; a provider outside CARACAL needs
+// a confirmation that its data leave the server.
+SETTINGS_VIEW.assistant = async root => {
+  root.innerHTML = '<section class="card"><div class="empty">…</div></section>';
+  const o = await api('/api/assistant/settings').catch(() => null);
+  if (!o || !root.isConnected) return;
+  const local = o.local_models;
+  const opt = (v, cur) => `<label class="radio-card"><input type="radio" name="provider" value="${v}" ${v === cur ? 'checked' : ''}><span><b>${t('assistantProvider_' + v)}</b><small>${t('assistantProviderHint_' + v)}</small></span></label>`;
+  root.innerHTML = `<section class="card"><h2>${t('assistant')}</h2><p class="muted">${t('assistantSettingsHint')}</p>
+    <form id="asForm" class="form"><div class="radio-cards">${['off', 'builtin', 'local', 'anthropic', 'openai', 'compatible'].map(v => opt(v, o.provider)).join('')}</div>
+      <div data-p="local" class="note info">${local === null ? t('assistantLocalMissing') : local.length ? t('assistantLocalReady', { models: local.join(', ') }) : t('assistantLocalEmpty')}
+        ${local !== null ? `<div class="form-actions start"><button type="button" class="btn sm" id="asPull">${icon('download')}${t('assistantPull')}</button><span class="muted" id="asPullState"></span></div>` : ''}</div>
+      <div data-p="local anthropic openai compatible"><label>${t('assistantModel')}<input name="model" value="${esc(o.model)}" placeholder="${esc(o.default_models[o.provider] || '')}" spellcheck="false"><small class="muted" id="asModelHint"></small></label></div>
+      <div data-p="compatible"><label>${t('assistantUrl')}<input name="base_url" type="url" value="${esc(o.base_url)}" placeholder="http://ollama.lan:11434" spellcheck="false"></label></div>
+      <div data-p="anthropic openai compatible"><label>${t('assistantKey')}<input name="api_key" type="password" value="${esc(o.api_key)}" autocomplete="off" spellcheck="false"></label></div>
+      <div data-p="anthropic openai compatible" class="note warn">${icon('attention')}<div><b>${t('assistantExternalTitle')}</b><p>${t('assistantExternalWarning')}</p>
+        <label class="check"><input type="checkbox" name="external_ack" ${o.external && o.external_ack ? 'checked' : ''}>${t('assistantExternalAck')}</label>
+        ${o.external_ack ? `<small class="muted">${t('assistantAckBy', { user: esc(o.external_ack.username), time: dt(o.external_ack.time) })}</small>` : ''}</div></div>
+      <div class="form-actions"><button class="btn primary">${t('save')}</button></div></form></section>`;
+  const form = $('#asForm', root);
+  const sync = () => {
+    const p = form.provider.value;
+    $$('[data-p]', form).forEach(x => { x.hidden = !x.dataset.p.split(' ').includes(p); });
+    form.model.placeholder = o.default_models[p] || '';
+    $('#asModelHint', form).textContent = t('assistantModelHint_' + p);
+  };
+  form.onchange = sync;
+  sync();
+  const pull = $('#asPull', form);
+  if (pull) pull.onclick = async () => {
+    pull.disabled = true;
+    const state = $('#asPullState', form);
+    try {
+      const r = await fetch('/api/assistant/pull', { method: 'POST', headers: { Authorization: 'Bearer ' + S.token } });
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const l of lines) {
+          try {
+            const j = JSON.parse(l);
+            if (j.error) throw new Error(j.error.split(':')[0]);
+            state.textContent = j.total ? `${j.status} · ${Math.round(100 * (j.completed || 0) / j.total)} %` : j.status || '';
+          } catch (e) { if (e.message) { state.textContent = errText(e); } }
+        }
+      }
+      toast(t('assistantPulled'));
+      SETTINGS_VIEW.assistant(root);
+    } catch (e) { state.textContent = errText(e); }
+    pull.disabled = false;
+  };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(form));
+    try {
+      await api('/api/assistant/settings', { method: 'PUT', json: { ...f, external_ack: !!f.external_ack } });
+      toast(t('saved'));
+      $('#assistPanel')?.remove();
+      ASSIST.msgs = [];
+      assistantInit();
+      SETTINGS_VIEW.assistant(root);
+    } catch (err) { toast(errText(err), 'err'); }
+  };
+};
 
 // ---------- device labels and tables
 

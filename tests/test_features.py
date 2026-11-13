@@ -263,3 +263,45 @@ def test_watcher_request_and_reload_need_a_new_node(client, admin_headers):
     assert post(new, 'add_watcher', {**zabbix, 'method': 'DELETE'}).json()['detail'] == 'invalid_value'
     assert post(new, 'reload', {}).status_code == 200
     assert post(old, 'reload', {}).json()['detail'] == 'update_required'
+
+
+def test_multi_view_and_scroll(client, admin_headers):
+    """Several things on one screen and where a page starts: only to nodes that have them (CARACAL 2026.11.13,
+    agent 4.19); global playlists keep them and pass them on when deployed."""
+    h = admin_headers
+    caps = {**NEW, 'add_multi': True, 'update_multi': True, 'asset_scroll': True}
+    new = enroll(client, 'mv-new', version='4.19.0', caps=caps)
+    old = enroll(client, 'mv-old', version='4.18.0', caps=NEW)
+    post = lambda d, action, payload: client.post(f"/api/devices/{d['device_id']}/commands", headers=h, json={'action': action, 'payload': payload})
+    multi = {'name': 'Výroba', 'duration': 40, 'layout': '1+2', 'cells': [{'source': 'https://a.example'}, {'source': 'caracal-widget:type=clock'},
+                                                                             {'source': 'https://c.example', 'scale': 1.5, 'dark': 'force', 'scroll_y': 300}]}
+    r = post(new, 'add_multi', multi)
+    assert r.status_code == 200, r.text
+    sent = next(c for c in delivered(client, new) if c['action'] == 'add_multi')['payload']
+    assert sent['layout'] == '1+2' and sent['cells'][2] == {'source': 'https://c.example', 'scale': 1.5, 'scroll_y': 300, 'dark': 'force', 'auth_profile_id': None}
+    assert sent['cells'][1]['dark'] is None and sent['duration'] == 40
+    assert post(old, 'add_multi', multi).json()['detail'] == 'update_required'
+    assert post(new, 'add_multi', {**multi, 'layout': '2x2'}).json()['detail'] == 'invalid_value'          # 3 cells for 4
+    assert post(new, 'add_multi', {**multi, 'cells': [{'source': 'ftp://x'}] * 3}).json()['detail'] == 'invalid_url'
+    assert post(new, 'set_scroll', {'id': 5, 'y': 1200}).status_code == 200
+    assert post(new, 'set_scroll', {'id': 5, 'y': -1}).json()['detail'] == 'invalid_value'
+    assert post(old, 'set_scroll', {'id': 5, 'y': 10}).json()['detail'] == 'update_required'
+    assert post(new, 'scroll', {'dy': 400, 'cell': 1}).status_code == 200
+    assert post(new, 'scroll_to', {'y': 0}).status_code == 200
+    # a global playlist with a multi view and a website that starts scrolled down
+    pid = client.post('/api/global-playlists', headers=h, json={'name': 'MV'}).json()['id']
+    assert client.post(f'/api/global-playlists/{pid}/items', headers=h, json={'kind': 'multi', **multi}).status_code == 200
+    r = client.post(f'/api/global-playlists/{pid}/items', headers=h, json={'kind': 'web', 'name': 'Long', 'source': 'https://long.example', 'scroll_y': 900})
+    assert r.status_code == 200, r.text
+    items = client.get(f'/api/global-playlists/{pid}', headers=h).json()['items']
+    assert items[0]['kind'] == 'multi' and items[0]['layout'] == '1+2' and len(items[0]['cells']) == 3 and items[1]['scroll_y'] == 900
+    iid = items[0]['id']
+    assert client.patch(f'/api/global-playlists/{pid}/items/{iid}', headers=h, json={'name': 'Výroba 2'}).status_code == 200
+    item = client.get(f'/api/global-playlists/{pid}', headers=h).json()['items'][0]
+    assert item['name'] == 'Výroba 2' and item['layout'] == '1+2'   # layout and cells not sent stay
+    r = client.post(f'/api/global-playlists/{pid}/deploy', headers=h, json={'target_ids': [new['device_id'], old['device_id']], 'mode': 'append'})
+    assert r.status_code == 200, r.text
+    imported = next(c for c in delivered(client, new) if c['action'] == 'import_playlist')['payload']['items']
+    assert [x['kind'] for x in imported] == ['multi', 'web'] and imported[0]['cells'][0]['source'] == 'https://a.example' and imported[1]['scroll_y'] == 900
+    left = next(c for c in delivered(client, old) if c['action'] == 'import_playlist')['payload']['items']
+    assert [x['kind'] for x in left] == ['web']   # an older node gets what it can play

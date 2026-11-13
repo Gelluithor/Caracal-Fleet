@@ -13,7 +13,40 @@ from .core import DARK_MODES, audit, cfg, current_user, db, new_batch, queue_com
 from .devices import COLLECTION_KIND, MEDIA_KINDS, build, grafana_config
 
 router = APIRouter()
-ITEM_KINDS = ('web', 'image', 'video', COLLECTION_KIND, 'camera')
+ITEM_KINDS = ('web', 'image', 'video', COLLECTION_KIND, 'camera', 'multi')
+# several things on one screen (CARACAL 2026.11.13): layout -> number of cells
+MULTI_LAYOUTS = {'2': 2, '2v': 2, '3': 3, '1+2': 3, '2x2': 4}
+
+
+def validate_multi(d, partial=False):
+    """{layout, cells: [{source, auth_profile_id, scale, dark, scroll_y}]}: websites or widgets of the node."""
+    if partial and 'layout' not in d and 'cells' not in d:
+        return {}
+    layout = str(d.get('layout') or '')
+    if layout not in MULTI_LAYOUTS:
+        raise HTTPException(400, 'invalid_value')
+    cells = d.get('cells')
+    if not isinstance(cells, list) or len(cells) != MULTI_LAYOUTS[layout]:
+        raise HTTPException(400, 'invalid_value')
+    from .main import validate_dark   # main imports this module
+    out = []
+    for cell in cells:
+        cell = cell if isinstance(cell, dict) else {}
+        src = _text(cell.get('source'), 4000)
+        widget = src.startswith(WIDGET_PREFIX)
+        if not widget and not src.lower().startswith(('http://', 'https://')):
+            raise HTTPException(400, 'invalid_url')
+        try:
+            scale = float(str(cell.get('scale') or 1).replace(',', '.'))
+            scroll = max(0, min(200000, round(float(cell.get('scroll_y') or 0))))
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'invalid_value')
+        if not 0.5 <= scale <= 3:
+            raise HTTPException(400, 'invalid_scale')
+        out.append({'source': src, 'scale': scale, 'scroll_y': scroll,
+                    'dark': None if widget else (validate_dark(cell.get('dark')) or None),
+                    'auth_profile_id': None if widget or cell.get('auth_profile_id') in (None, '') else cell['auth_profile_id']})
+    return {'layout': layout, 'cells': out}
 # cameras follow the node's rules (CARACAL 2026.10.13); the stream credentials are kept in secret_json, which the API
 # never returns, and travel only to the nodes
 CAMERA_SCHEMES = ('rtsp://', 'rtsps://', 'http://', 'https://')
@@ -67,6 +100,8 @@ def _expand(c, raw):
         secrets_ = _camera_secrets(it.pop('secret_json', ''))
         if it['kind'] == COLLECTION_KIND:
             it.update(grafana_config(it['source']))
+        elif it['kind'] == 'multi':
+            it.update(_multi_config(it['source']))
         elif it['kind'] == 'camera':
             it.update(_camera_config(it['source']))
             # the user names for the edit dialog, never the passwords
@@ -74,6 +109,14 @@ def _expand(c, raw):
                               'has_password': bool((secrets_[i] if i < len(secrets_) else {}).get('password'))}
                              for i, s in enumerate(it['streams'])]
     return out
+
+
+def _multi_config(source):
+    try:
+        cfg = json.loads(source or '{}')
+    except (TypeError, ValueError):
+        cfg = {}
+    return {'layout': str(cfg.get('layout') or '2'), 'cells': cfg.get('cells') if isinstance(cfg.get('cells'), list) else []}
 
 
 def _camera_config(source):
@@ -130,7 +173,8 @@ def _validate_item(c, d, kind, old_secrets=None):
     """Normalized item fields following the CARACAL rules (>= 5 s, videos loop; scale 0.5 to 3.0)."""
     if kind not in ITEM_KINDS:
         raise HTTPException(400, 'unsupported_file')
-    item = {'name': _text(d.get('name'), 200), 'source': '', 'file_id': '', 'scale': 1.0, 'dark': '', 'secret_json': ''}
+    item = {'name': _text(d.get('name'), 200), 'source': '', 'file_id': '', 'scale': 1.0, 'dark': '', 'secret_json': '',
+            'scroll_y': 0}
     try:
         item['duration'] = int(float(d.get('duration', 60 if kind == COLLECTION_KIND else 30 if kind == 'web' else 15)))
         item['scale'] = float(str(d.get('scale') or 1).replace(',', '.'))
@@ -140,9 +184,13 @@ def _validate_item(c, d, kind, old_secrets=None):
         raise HTTPException(400, 'invalid_duration')
     if not 0.5 <= item['scale'] <= 3:
         raise HTTPException(400, 'invalid_scale')
-    if kind in ('web', COLLECTION_KIND):   # dark mode: '' = as the node
+    if kind in ('web', COLLECTION_KIND):   # dark mode: '' = as the node; where the page starts
         from .main import validate_dark   # main imports this module
         item['dark'] = validate_dark(d.get('dark'))
+        try:
+            item['scroll_y'] = max(0, min(200000, round(float(d.get('scroll_y') or 0))))
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'invalid_value')
     if kind == COLLECTION_KIND:
         # stored like on the node: {"grafana_url", "tag", "kiosk"} as JSON in 'source'
         cfg = {**grafana_config(d.get('source')), **{k: d[k] for k in ('grafana_url', 'tag', 'kiosk') if k in d}}
@@ -155,6 +203,10 @@ def _validate_item(c, d, kind, old_secrets=None):
             raise HTTPException(400, 'name_required')
         item['source'] = json.dumps({'grafana_url': url, 'tag': tag, 'kiosk': bool(cfg.get('kiosk', True))},
                                     ensure_ascii=False)
+    elif kind == 'multi':
+        if not item['name']:
+            raise HTTPException(400, 'name_required')
+        item['source'] = json.dumps(validate_multi(d), ensure_ascii=False)
     elif kind == 'camera':
         if not item['name']:
             raise HTTPException(400, 'name_required')
@@ -347,9 +399,9 @@ async def add_item(pid: int, r: Request):
         pos = c.execute('SELECT COALESCE(MAX(position), -1) + 1 FROM global_playlist_items WHERE playlist_id=?',
                         (pid,)).fetchone()[0]
         iid = c.execute('INSERT INTO global_playlist_items(playlist_id, position, kind, name, source, duration, scale, '
-                        'file_id, dark, secret_json) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                        'file_id, dark, secret_json, scroll_y) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                         (pid, pos, d['kind'], item['name'], item['source'], item['duration'], item['scale'],
-                         item['file_id'], item['dark'], item['secret_json'])).lastrowid
+                         item['file_id'], item['dark'], item['secret_json'], item['scroll_y'])).lastrowid
         c.execute('UPDATE global_playlist_items SET valid_from=?, valid_until=? WHERE id=?',
                   (valid.get('valid_from'), valid.get('valid_until'), iid))
         _touch(c, pid, u)
@@ -368,7 +420,10 @@ async def edit_item(pid: int, iid: int, r: Request):
             raise HTTPException(404, 'not_found')
         _before_change(c, pid)
         merged = {**dict(row), **{k: d[k] for k in ('name', 'source', 'duration', 'scale', 'grafana_url', 'tag',
-                                                    'kiosk', 'dark', 'layout', 'audio') if k in d}}
+                                                    'kiosk', 'dark', 'layout', 'audio', 'cells', 'scroll_y') if k in d}}
+        if row['kind'] == 'multi':   # layout and cells not sent stay as they are
+            cfg = _multi_config(row['source'])
+            merged.update({k: cfg[k] for k in ('layout', 'cells') if k not in d})
         old_secrets = _camera_secrets(row['secret_json'])
         if row['kind'] == 'camera':   # streams, layout and audio not sent stay as they are
             cfg = _camera_config(row['source'])
@@ -376,9 +431,9 @@ async def edit_item(pid: int, iid: int, r: Request):
             merged['streams'] = d['streams'] if 'streams' in d else [{**s, **(old_secrets[i] if i < len(old_secrets) else {})}
                                                                     for i, s in enumerate(cfg['streams'])]
         item = _validate_item(c, merged, row['kind'], old_secrets)
-        c.execute('UPDATE global_playlist_items SET name=?, source=?, duration=?, scale=?, dark=?, secret_json=? WHERE id=?',
-                  (item['name'], item['source'], item['duration'], item['scale'], item['dark'],
-                   item['secret_json'] or row['secret_json'] or '', iid))
+        c.execute('UPDATE global_playlist_items SET name=?, source=?, duration=?, scale=?, dark=?, secret_json=?, scroll_y=? '
+                  'WHERE id=?', (item['name'], item['source'], item['duration'], item['scale'], item['dark'],
+                                 item['secret_json'] or row['secret_json'] or '', item['scroll_y'], iid))
         from .main import validate_validity   # late import: main imports this module
         valid = validate_validity({**{k: row[k] for k in ('valid_from', 'valid_until')},
                                    **{k: d[k] for k in ('valid_from', 'valid_until') if k in d}})
@@ -437,6 +492,8 @@ def deploy_items(c, pid, missing_ok=False, raw=None):
                  'scale': it['scale']}
         if it.get('dark'):   # only a choice of its own: nodes before CARACAL 2026.10.12 do not know it
             entry['dark'] = it['dark']
+        if it.get('scroll_y'):   # likewise: older nodes start at the top
+            entry['scroll_y'] = it['scroll_y']
         for key in ('valid_from', 'valid_until'):   # likewise: older nodes play the item all the time
             if it.get(key):
                 entry[key] = it[key]
@@ -447,6 +504,8 @@ def deploy_items(c, pid, missing_ok=False, raw=None):
             entry.update(layout=it['layout'], audio=it['audio'],
                          streams=[{'name': s.get('name', ''), 'url': s.get('url', ''),
                                    **(cred[i] if i < len(cred) else {})} for i, s in enumerate(it['streams'])])
+        elif it['kind'] == 'multi':
+            entry.update(layout=it['layout'], cells=it['cells'])
         elif it['kind'] == 'web':
             entry['source'] = it['source']
         else:
@@ -468,6 +527,7 @@ def items_for(caps, items):
     CARACAL 2026.10.13 and newer), older agents would add them as web pages; widgets only on nodes with the widget
     page (CARACAL 2026.10.23.1). (items, names left out)"""
     ok = lambda it: (it.get('kind') != 'camera' or caps.get('import_camera') is True) and \
+        (it.get('kind') != 'multi' or caps.get('add_multi') is True) and \
         (not is_widget(it) or caps.get('widgets') is True)
     return [it for it in items if ok(it)], [it['name'] for it in items if not ok(it)]
 

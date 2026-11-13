@@ -85,6 +85,10 @@ the node, and camera passwords are never shown and leave the command history onc
   as playlist items, with a live preview; the node draws them itself (CARACAL 2026.10.23.1 with agent 4.17); also a
   calendar and a meeting room (free / busy) from an ICS link of Microsoft 365, Outlook or Google, a QR code and a
   ticker of your own text or RSS
+- **Several on one screen:** 2 to 4 websites or widgets side by side as one playlist item, also in global playlists
+  (CARACAL 2026.11.13 with agent 4.19)
+- **Where a page starts:** a website or a Grafana dashboard can start scrolled down, set on a live picture of the
+  screen from the item's menu, or as pixels in a global playlist
 - **Screen layout:** a side panel and a bar at the bottom next to the playlist, each with its own widget
   (CARACAL 2026.10.25)
 - **PDF and presentations:** a PDF, PowerPoint, Impress or Word document becomes one picture per page in the media
@@ -165,6 +169,36 @@ the node, and camera passwords are never shown and leave the command history onc
   Czech, Slovak, English, German and Polish UI, simple and pro mode remembered per user, a getting-started guide, custom logo, full backup and restore for server migrations, daily backups on the hub;
   one-time passwords (the user sets their own at the first sign-in), two-factor sign-in (TOTP with recovery codes) and single sign-on through OpenID Connect (Microsoft Entra ID,
   Google, Keycloak, Authentik…)
+
+## Assistant
+
+A panel at the bottom right answers questions about Fleet and about the page the user is on ("how do I put the same
+content on more screens?", "what is wrong with this device?"), with links to the pages to open. It only reads: it
+never runs a command. It gets a short summary of what that user sees (the menu, the device on the page, its
+problems), never passwords or tokens. Choose where it runs in *Settings → Assistant*:
+
+| Choice | Where the questions go | Cost |
+|---|---|---|
+| **Built-in help** (default, recommended) | nowhere: checked notes picked by the question and the page | nothing: instant on any server, no model |
+| **Local language model** | nowhere: a small model on this server (Ollama, `gemma3:1b` by default) rephrases the notes | about 0.8 GB of disk and 1.3 GB of memory while it answers, freed after 5 idle minutes |
+| **Claude** (Anthropic, `claude-opus-5-5` by default) | Anthropic | paid per question |
+| **OpenAI** | OpenAI | paid per question |
+| **Your own server** | any OpenAI-compatible server (Ollama, vLLM, LM Studio) on an address you enter | as that server |
+
+The built-in help knows the common tasks (adding a screen, a device offline or black, the same content on many
+screens, several on one screen, schedules, emergency messages, notifications, updates, users, backups) and understands
+Czech word forms; on the page of an offline device it starts with what to check. It costs nothing, so it is on from
+the start.
+
+The local language model is for servers with power to spare: it runs as the optional `assistant` service
+(`docker compose --profile assistant up -d`, then *Settings → Assistant → Local language model → Download the model*),
+takes at most two CPU cores and 2 GB of memory (`CARACAL_ASSISTANT_CPUS`, `CARACAL_ASSISTANT_MEMORY` in `.env`) and
+gets only the notes that fit, so its prompt stays small. On two cores it still takes tens of seconds; when it has
+not started answering within 25 seconds, the notes answer instead. A cloud provider gives the most natural answers.
+
+With Claude, OpenAI or your own server the questions and the page summary leave CARACAL. Fleet says so in the
+settings and saves the choice only after an administrator confirms it; the confirmation and every change are in the
+audit log. With Claude, a declined request is answered by Anthropic's recommended fallback model.
 
 ## Quick start
 

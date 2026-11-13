@@ -44,7 +44,25 @@ services:
       - caddy-config:/config
     depends_on: [hub]
 
+  # A local language model for the assistant (Ollama), for servers with power to spare; the assistant works without it
+  # (built-in help). It loads the model only while it answers and frees the memory after a few idle minutes. Opt-in:
+  #   docker compose --profile assistant up -d     then Settings -> Assistant -> Local model -> Download the model
+  assistant:
+    profiles: [assistant]
+    image: ${CARACAL_ASSISTANT_IMAGE:-ollama/ollama:0.40.13}
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: ${CARACAL_ASSISTANT_KEEP_ALIVE:-5m}
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes:
+      - assistant-models:/root/.ollama
+    # only the hub talks to it (no published port); at most two CPU cores, so the hub stays responsive
+    cpus: ${CARACAL_ASSISTANT_CPUS:-2}
+    mem_limit: ${CARACAL_ASSISTANT_MEMORY:-2g}
+
 volumes:
   hub-data:
+  assistant-models:
   caddy-data:
   caddy-config:
